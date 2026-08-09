@@ -9,7 +9,7 @@
 
 The current embodied agent for Sari Sandbox V2. It uses a checkpoint graph for navigation and
 vision models for local perception, manipulation, and task reasoning. The Unity simulator lives in
-the separate `SariSandboxV2` repository.
+[this repository](https://github.com/iggyvilla/sari-sandbox-v2).
 
 ## Quick start
 * Install [uv](https://docs.astral.sh/uv/)
