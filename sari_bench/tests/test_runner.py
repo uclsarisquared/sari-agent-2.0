@@ -71,6 +71,11 @@ if mode == "crash":
     sys.exit(3)
 if mode == "hang":
     time.sleep(600)
+if mode == "api_retry_exhausted":
+    with open(os.environ["SARI_API_RETRY_EXHAUSTED_PATH"], "w") as f:
+        json.dump({"attempts": 10, "error_type": "TimeoutError",
+                   "error": "server stayed down"}, f)
+    time.sleep(600)
 if mode == "cancel_siblings" and task == "winner prompt" and not run_dir.endswith("try01"):
     time.sleep(600)
 
@@ -514,6 +519,43 @@ async def test_crashed_agent_still_releases_its_sandbox() -> None:
             await sandbox.close()
             await coordinator.stop()
     print("ok  a crashed agent still releases, so the battery finishes")
+
+
+async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="wait for the endpoint")],
+                        workspace,
+                        concurrency=1,
+                    ).run(),
+                    timeout=60,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            attempt = summary["attempts"][0]
+            assert attempt["outcome"] == "api_retry_exhausted", attempt
+            assert attempt["requeues"] == 3, attempt
+            assert attempt["success"] is False
+            run_parent = workspace / "runs" / "p1"
+            assert all(
+                (run_parent / f"try01.requeue{index:02d}").is_dir()
+                for index in range(3)
+            )
+            assert sandbox.reset_count == 4
+        finally:
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  exhausted API retries requeue the logical attempt with a finite budget")
 
 
 async def test_capture_lifecycle_follows_the_agent_process() -> None:
@@ -1260,6 +1302,7 @@ async def main() -> int:
         test_startup_timeout_explains_an_empty_pool,
         test_overrunning_attempt_is_killed_and_recorded,
         test_crashed_agent_still_releases_its_sandbox,
+        test_api_retry_exhaustion_requeues_the_logical_attempt,
         test_capture_lifecycle_follows_the_agent_process,
         test_cancelling_runner_kills_agent_and_releases_sandbox,
         test_human_success_stops_running_and_skips_queued_siblings,

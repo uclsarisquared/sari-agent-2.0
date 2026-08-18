@@ -245,9 +245,10 @@ def test_record_external_counts_the_raw_http_backends():
     assert token_meter.totals()["untracked_calls"] == 1, token_meter.totals()
 
 
-def test_raw_http_request_counts_before_a_failed_send(monkeypatch):
+def test_raw_http_request_retries_and_counts_each_failed_send(monkeypatch):
     token_meter.install()
     token_meter.reset()
+    monkeypatch.setattr("agent_core.llm.time.sleep", lambda _delay: None)
 
     def fail(*_args, **_kwargs):
         raise requests.ConnectionError("offline")
@@ -262,7 +263,7 @@ def test_raw_http_request_counts_before_a_failed_send(monkeypatch):
         raise AssertionError("the raw HTTP request unexpectedly succeeded")
 
     totals = token_meter.totals()
-    assert totals["api_calls"] == 1, totals
+    assert totals["api_calls"] == 10, totals
     assert totals["calls"] == 0, totals
 
 

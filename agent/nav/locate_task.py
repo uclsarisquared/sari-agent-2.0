@@ -187,14 +187,14 @@ def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="
 
 def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
               base_url=None, api_key=None):
-    """One Chat Completions call against the configured endpoint -> (dict, envelope-ish).
+    """One logical Chat Completions call against the configured endpoint -> (dict, envelope-ish).
     `model` defaults to $SARI_MODEL. MEASURED (see CLAUDE.md): vLLM has silently ignored
     guided_json before - the schema is stated in the prompt AND parsed defensively, never
     trusted to be enforced server-side. The endpoint requires a bearer key
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside
     $OPENAI_API_URL in the repo-root config.env."""
     import requests
-    from agent_core.llm import normalize_endpoint_root
+    from agent_core.llm import call_with_api_retries, normalize_endpoint_root
     model = model or agent_model()
     endpoint = base_url or os.environ.get("OPENAI_API_URL")
     key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -218,9 +218,14 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
         "temperature": 0.0,
     }
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    _meter_api_call()
-    resp = requests.post(url, json=payload, timeout=timeout, headers=headers)
-    resp.raise_for_status()
+
+    def request():
+        _meter_api_call()
+        response = requests.post(url, json=payload, timeout=timeout, headers=headers)
+        response.raise_for_status()
+        return response
+
+    resp = call_with_api_retries(request)
     body = resp.json()
     _meter(model, body)
     text = body["choices"][0]["message"]["content"]

@@ -1,5 +1,6 @@
 """Offline tests for the agent's bounded, quiet LLM retry policy."""
 
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -76,8 +77,10 @@ def test_api_call_recovers_quietly(monkeypatch, caplog):
     assert caplog.records == []
 
 
-def test_api_call_raises_original_error_after_ten_attempts(monkeypatch, caplog):
+def test_api_call_raises_original_error_after_ten_attempts(monkeypatch, caplog, tmp_path):
     monkeypatch.setattr("agent_core.llm.time.sleep", lambda _delay: None)
+    signal_path = tmp_path / "api_retry_exhausted.json"
+    monkeypatch.setenv("SARI_API_RETRY_EXHAUSTED_PATH", str(signal_path))
     final_error = TimeoutError("server stayed down")
     failures = [TimeoutError(f"timeout {n}") for n in range(9)] + [final_error]
     client = _Client(failures)
@@ -88,6 +91,10 @@ def test_api_call_raises_original_error_after_ten_attempts(monkeypatch, caplog):
     assert raised.value is final_error
     assert client.completions.calls == 10
     assert caplog.records == []
+    signal = json.loads(signal_path.read_text(encoding="utf-8"))
+    assert signal["attempts"] == 10
+    assert signal["error_type"] == "TimeoutError"
+    assert signal["error"] == "server stayed down"
 
 
 def test_non_transient_programming_error_fails_immediately(monkeypatch):

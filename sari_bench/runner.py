@@ -5,9 +5,9 @@ agent subprocess against it, and hands it back - the coordinator resets it befor
 so no attempt inherits state from the one before it. By default the worker pool grows with the
 coordinator's sandbox fleet; ``--concurrency`` remains available as an explicit upper bound.
 
-Failures are contained per attempt: a crashed agent, an attempt that blows its time limit, or a
-sandbox that dies mid-run all record an outcome and move on. Only a sandbox death requeues the
-attempt, because that one is the harness's fault rather than the agent's.
+Failures are contained per attempt: a crashed agent or an attempt that blows its time limit records
+an outcome and moves on. Sandbox loss and exhaustion of the agent's transient API retry budget
+requeue the logical attempt because neither is evidence about agent quality.
 """
 
 from __future__ import annotations
@@ -60,6 +60,9 @@ TERMINATE_GRACE_SECONDS = 20.0
 # An attempt whose sandbox died is retried this many times before being recorded as failed. Guards
 # against a permanently sick machine turning into an infinite requeue loop.
 MAX_SANDBOX_LOST_REQUEUES = 3
+MAX_API_EXHAUSTED_REQUEUES = 3
+API_RETRY_EXHAUSTED_SIGNAL = "api_retry_exhausted.json"
+API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
 DEFAULT_CAPACITY_POLL_SECONDS = 1.0
 
@@ -74,6 +77,10 @@ class ResumeError(RuntimeError):
 
 class OcrPreflightError(RuntimeError):
     """The required central OCR service was unavailable before sandbox leasing."""
+
+
+class ApiRetriesExhausted(RuntimeError):
+    """The agent exhausted its transient OpenAI-compatible API retry budget."""
 
 
 # Per-attempt manifest, written INTO the run dir before the agent is spawned. attempts.jsonl only
@@ -902,6 +909,32 @@ class BenchmarkRunner:
             started = time.monotonic()
             try:
                 result = await self._spawn_agent(client, lease, prompt, attempt, run_dir)
+            except ApiRetriesExhausted as exhausted:
+                # Endpoint availability is infrastructure state, not an agent result. Preserve the
+                # failed process as an archive and retry the same logical attempt after reset.
+                if requeues < MAX_API_EXHAUSTED_REQUEUES:
+                    _patch_json(
+                        run_dir / ATTEMPT_MANIFEST,
+                        {
+                            "state": "requeued",
+                            "outcome": "requeued",
+                            "requeue_reason": "api_retry_exhausted",
+                            "ended_at": datetime.now().isoformat(timespec="seconds"),
+                        },
+                    )
+                    _log(
+                        f"[w{index}] {prompt_id} try {attempt}: {exhausted}; requeueing"
+                    )
+                    self._queue.put_nowait((prompt_id, attempt, requeues + 1))
+                    return
+                result = self._result_from_run_dir(
+                    prompt,
+                    attempt,
+                    run_dir,
+                    exit_code=None,
+                    outcome="api_retry_exhausted",
+                )
+                result.error = str(exhausted)
             except SandboxLost as lost:
                 # The machine went away, not the agent. Put the attempt back rather than scoring it.
                 if requeues < MAX_SANDBOX_LOST_REQUEUES:
@@ -983,6 +1016,8 @@ class BenchmarkRunner:
         # How the agent finds its sandbox. sim/env.py reads this for every command's default URI.
         env["SARI_WS_URI"] = lease.commands_uri
         env["SARI_OCR_URL"] = self.ocr_url
+        api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
+        env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)
         if self.map_dir:
             # Belt to --output-dir's braces. The flag only reaches the call sites the orchestrator
             # explicitly threads it through; this reaches every StoreMap() in the attempt's process
@@ -1062,6 +1097,9 @@ class BenchmarkRunner:
 
             wait_task = asyncio.create_task(process.wait())
             lost_task = asyncio.create_task(client.wait_for_sandbox_lost(lease))
+            api_retry_task = asyncio.create_task(
+                self._wait_for_path_or_exit(process, api_retry_signal)
+            )
             capture_task = (
                 asyncio.create_task(
                     self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
@@ -1072,7 +1110,7 @@ class BenchmarkRunner:
 
             try:
                 done, pending = await asyncio.wait(
-                    {wait_task, lost_task},
+                    {wait_task, lost_task, api_retry_task},
                     timeout=timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -1095,9 +1133,17 @@ class BenchmarkRunner:
                     await capture_task
                 raise
             finally:
-                for task in (wait_task, lost_task):
+                for task in (wait_task, lost_task, api_retry_task):
                     if not task.done():
                         task.cancel()
+
+            # Check the file itself as well as the watcher task. This closes the race where the
+            # agent writes the signal immediately before exiting and process.wait() wins the loop.
+            if api_retry_signal.exists():
+                await self._kill(process)
+                if capture_task is not None:
+                    await capture_task
+                raise ApiRetriesExhausted(self._api_retry_exhaustion_message(api_retry_signal))
 
             if lost_task in done:
                 await self._kill(process)
@@ -1137,6 +1183,31 @@ class BenchmarkRunner:
                 _manifest_field(run_dir / ATTEMPT_MANIFEST, "winning_attempt_key") or ""
             )
         return result
+
+    @staticmethod
+    async def _wait_for_path_or_exit(
+        process: asyncio.subprocess.Process, path: Path
+    ) -> bool:
+        """Return promptly when an attempt-local signal appears or its process exits."""
+        while process.returncode is None:
+            if path.exists():
+                return True
+            await asyncio.sleep(0.1)
+        return path.exists()
+
+    @staticmethod
+    def _api_retry_exhaustion_message(path: Path) -> str:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "transient API retry budget exhausted"
+        attempts = payload.get("attempts")
+        error_type = payload.get("error_type") or "API error"
+        error = payload.get("error") or "transient endpoint failure"
+        prefix = f"transient API retry budget exhausted after {attempts} attempts" if attempts else (
+            "transient API retry budget exhausted"
+        )
+        return f"{prefix} ({error_type}: {error})"
 
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""

@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 from loguru import logger
 from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from PIL import Image
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 
 from agent_core.contracts import JSON_BLOCK_PATTERN
 from agent_core.models import agent_model
@@ -126,13 +128,60 @@ def build_content(*parts) -> list:
 
 API_MAX_ATTEMPTS = 10
 API_RETRY_DELAYS = (1, 2, 4, 8, 15, 30, 30, 30, 30)
+API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
+
+
+def _signal_api_retry_exhaustion(error: Exception) -> None:
+    """Tell a supervising bench runner that a transient API outage exhausted its budget.
+
+    Standalone runs do not set the signal path and retain their existing behavior. The distributed
+    runner sets it to an attempt-local file and watches for that file so it can stop and requeue the
+    attempt even when an intermediate agent layer would otherwise turn the exception into a normal
+    unsuccessful leg.
+    """
+    raw_path = os.getenv(API_RETRY_EXHAUSTED_PATH_ENV)
+    if not raw_path:
+        return
+
+    signal_path = Path(raw_path)
+    temporary = signal_path.with_name(
+        f".{signal_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    payload = {
+        "attempts": API_MAX_ATTEMPTS,
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "signaled_at": time.time(),
+    }
+    try:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, signal_path)
+    except OSError as signal_error:
+        logger.error(f"[api-retry] could not write exhaustion signal: {signal_error}")
 
 
 def is_transient_api_error(error: Exception) -> bool:
-    if isinstance(error, (APIConnectionError, RateLimitError, TimeoutError, ConnectionError)):
+    if isinstance(
+        error,
+        (
+            APIConnectionError,
+            RateLimitError,
+            RequestsConnectionError,
+            RequestsTimeout,
+            TimeoutError,
+            ConnectionError,
+        ),
+    ):
         return True
     if isinstance(error, APIStatusError):
         return error.status_code in (408, 409, 429) or error.status_code >= 500
+    # Raw requests callers raise HTTPError, whose status lives on its response rather than the
+    # exception. Keep this structural so the shared retry helper is not tied to one HTTP client.
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code in (408, 409, 429) or status_code >= 500
     return False
 
 
@@ -147,6 +196,8 @@ def call_with_api_retries(operation):
         except Exception as error:
             remaining = API_MAX_ATTEMPTS - (attempt + 1)
             if not is_transient_api_error(error) or attempt + 1 == API_MAX_ATTEMPTS:
+                if is_transient_api_error(error):
+                    _signal_api_retry_exhaustion(error)
                 logger.error(
                     f"[api-retry] attempt {attempt + 1}/{API_MAX_ATTEMPTS} failed "
                     f"({type(error).__name__}: {error}); giving up, {remaining} tries left"
