@@ -622,7 +622,7 @@ const apiAggregate = attempts => {
 const fmtApiAggregate = value => !value.total ? "—"
   : value.known === value.total ? fmtNum(value.sum)
   : value.known ? `${fmtNum(value.sum)} (${value.known}/${value.total} metered)`
-  : `unknown (0/${value.total} metered)`;
+  : "?";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isLive = a => a.state === "starting" || a.state === "running";
 
@@ -1388,7 +1388,7 @@ function renderOverview(state) {
       const button = td.firstElementChild;
       const cls = `cell ${st.code}`;
       if (td.className !== cls) td.className = cls;
-      setText(button, a ? `${st.glyph} · ${hasApiCalls(a) ? fmtNum(a.api_calls) : "?"}` : st.glyph);
+      setText(button, st.glyph);
       button.dataset.key = a ? a.key : "";
       button.title = a ? `${a.key} — ${st.label}` : "not run";
       if (!a) continue;
