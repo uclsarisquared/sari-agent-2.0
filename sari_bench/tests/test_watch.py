@@ -223,7 +223,8 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         battery = Path(temp) / "b"
         run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(6), pid=999_999_998)
         _stamp(run_dir, {"killed_by": "watcher", "lease_id": "lease-1", "tokens_in": 0})
-        _write(run_dir / "tokens.json", json.dumps({"tokens_in": 900, "tokens_out": 40}))
+        _write(run_dir / "tokens.json", json.dumps({
+            "tokens_in": 900, "tokens_out": 40, "api_calls": 12}))
         state = WatchState(bench_root=Path(temp), fixed_battery=battery,
                            discord=Discord(enabled=False), min_interval=0.0)
 
@@ -240,6 +241,7 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         assert manifest["end_reason"] == "runner_gone" and manifest["exit_code"] is None
         assert manifest["closed_out_by"] == "watcher", manifest
         assert manifest["tokens_in"] == 900, manifest["tokens_in"]
+        assert manifest["api_calls"] == 12, manifest
         # Measured to the run dir's last sign of life, not to the click: an orphan closed out a week
         # after it was abandoned did not run for a week.
         assert 55.0 <= manifest["wall_seconds"] <= 65.0, manifest["wall_seconds"]
@@ -248,6 +250,13 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         rows = [json.loads(line) for line in
                 (battery / "attempts.jsonl").read_text(encoding="utf-8").splitlines() if line]
         assert [(r["prompt_id"], r["attempt"], r["outcome"]) for r in rows] == [("p", 1, "operator_kill")]
+        assert rows[0]["api_calls"] == 12, rows[0]
+        closed = scan.scan_battery(battery, time.time()).as_dict()["attempts"][0]
+        assert closed["api_calls"] == 12, closed
+
+        from sari_bench.report import collect
+        exported, _legs = collect(battery)
+        assert exported[0]["api_calls"] == 12, exported[0]
         assert rows[0]["tokens_in"] == 900
 
         # And it is now an ordinary finished attempt: reviewable, and no longer killable.
@@ -613,6 +622,59 @@ def test_snapshot_exposes_log_size_for_change_driven_terminals() -> None:
         second = scan.scan_battery(battery, time.time()).as_dict()["attempts"][0]
         assert second["log_bytes"] > first["log_bytes"]
         print("ok  snapshots expose late log growth after an orphan transition")
+
+
+def test_api_calls_preserve_unknown_zero_and_mixed_coverage() -> None:
+    """Legacy absence is unknown, measured zero survives, and excluded verdicts stay identifiable."""
+    import csv
+
+    from sari_bench.report import ATTEMPT_COLUMNS, _write_csv, collect
+
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        fixtures = [
+            ("legacy", "pass", None),
+            ("zero", "fail", 0),
+            ("known", "pass", 14),
+            ("invalid", "invalid", 99),
+            ("unreviewed", "", 77),
+        ]
+        for prompt_id, verdict, api_calls in fixtures:
+            run_dir = make_attempt(
+                battery, prompt_id, 1, steps=healthy_steps(2), state="finished",
+                outcome="completed", success=verdict == "pass",
+            )
+            if verdict:
+                _stamp(run_dir, {"verified_verdict": verdict, "verified_by": "tester"})
+            tokens = {"tokens_in": 10, "tokens_out": 2, "calls": 1}
+            if api_calls is not None:
+                tokens["api_calls"] = api_calls
+            _write(run_dir / "tokens.json", json.dumps(tokens))
+
+        attempts = {row["prompt_id"]: row for row in
+                    scan.scan_battery(battery, time.time()).as_dict()["attempts"]}
+        assert attempts["legacy"]["api_calls"] is None, attempts["legacy"]
+        assert attempts["zero"]["api_calls"] == 0, attempts["zero"]
+        assert attempts["known"]["api_calls"] == 14, attempts["known"]
+
+        rows, _legs = collect(battery)
+        exported = {row["prompt_id"]: row["api_calls"] for row in rows}
+        assert exported == {
+            "invalid": 99, "known": 14, "legacy": None, "unreviewed": 77, "zero": 0,
+        }, exported
+        csv_path = battery / "attempts.csv"
+        _write_csv(csv_path, ATTEMPT_COLUMNS, rows)
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            csv_calls = {row["prompt_id"]: row["api_calls"] for row in csv.DictReader(handle)}
+        assert csv_calls["legacy"] == "" and csv_calls["zero"] == "0", csv_calls
+
+        dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
+        assert "API calls<br>pass only / pass+fail" in dashboard
+        assert "[\"pass\", \"fail\"].includes(verdictOf(a))" in dashboard
+        assert "metered" in dashboard and "unknown (0/" in dashboard
+        assert dashboard.count('data-ref="apiCalls"') == 3  # live card, detail, hover
+        assert "`${st.glyph} · ${hasApiCalls(a)" in dashboard
+    print("ok  API-call coverage keeps legacy unknown, measured zero, and mixed data honest")
 
 
 def test_log_query_params_are_clamped() -> None:
@@ -1709,8 +1771,8 @@ def test_roles_grain_reports_per_reasoner_token_spend() -> None:
         _write(metered / "tokens.json", json.dumps({
             "tokens_in": 900, "tokens_out": 100, "calls": 6, "untracked_calls": 0,
             "by_role": {
-                "guard": {"tokens_in": 300, "tokens_out": 20, "calls": 2},
-                "actor": {"tokens_in": 600, "tokens_out": 80, "calls": 4},
+                "guard": {"tokens_in": 300, "tokens_out": 20, "calls": 2, "api_calls": 3},
+                "actor": {"tokens_in": 600, "tokens_out": 80, "calls": 4, "api_calls": 5},
             },
             "tokens_total": 1000,
         }))
@@ -1726,6 +1788,7 @@ def test_roles_grain_reports_per_reasoner_token_spend() -> None:
         assert [row["role"] for row in rows] == ["actor", "guard"], rows
         assert [row["tokens_total"] for row in rows] == [680, 320], rows
         assert [row["calls"] for row in rows] == [4, 2], rows
+        assert [row["api_calls"] for row in rows] == [5, 3], rows
         assert round(sum(row["share_in"] for row in rows), 6) == 1.0, rows
         # The join key back to attempts.csv, and the arm an ablation groups by.
         assert rows[0]["run_dir"] == str(metered) and rows[0]["arm"] == "graph"
@@ -1827,6 +1890,7 @@ def main() -> int:
     test_log_cursor_appends_only_what_is_new()
     test_full_log_is_not_limited_by_tail_window()
     test_snapshot_exposes_log_size_for_change_driven_terminals()
+    test_api_calls_preserve_unknown_zero_and_mixed_coverage()
     test_log_query_params_are_clamped()
     test_report_and_kill_stamp()
     test_target_bitrate_math()

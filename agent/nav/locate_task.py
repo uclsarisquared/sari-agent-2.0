@@ -134,6 +134,15 @@ def _meter(model, body):
         pass
 
 
+def _meter_api_call():
+    """Count the raw OpenAI-compatible transport attempt before it is sent."""
+    try:
+        from agent_core import token_meter
+        token_meter.record_api_call()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="medium",
                 timeout=240.0):
     """One `claude -p` call -> (dict, envelope). Images ride via absolute paths in the prompt +
@@ -209,6 +218,7 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
         "temperature": 0.0,
     }
     headers = {"Authorization": f"Bearer {key}"} if key else {}
+    _meter_api_call()
     resp = requests.post(url, json=payload, timeout=timeout, headers=headers)
     resp.raise_for_status()
     body = resp.json()

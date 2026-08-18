@@ -19,8 +19,10 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from openai import OpenAI
+import requests
 
 from agent_core import token_meter
+from nav import locate_task
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -53,8 +55,32 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
-def _server():
-    server = HTTPServer(("127.0.0.1", 0), _Handler)
+class _RetryHandler(_Handler):
+    attempts = 0
+
+    def do_POST(self):  # noqa: N802
+        type(self).attempts += 1
+        if type(self).attempts == 1:
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_POST()
+
+
+class _FailHandler(_Handler):
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self.send_response(500)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def _server(handler=_Handler):
+    server = HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}/v1"
 
@@ -78,6 +104,7 @@ def test_counts_every_sdk_call_and_splits_by_model():
 
     totals = token_meter.totals()
     assert totals["calls"] == 3, totals
+    assert totals["api_calls"] == 3, totals
     assert totals["tokens_in"] == 300, totals
     assert totals["tokens_out"] == 60, totals
     assert totals["tokens_total"] == 360, totals
@@ -100,9 +127,46 @@ def test_delta_measures_one_leg():
         server.shutdown()
 
     leg = token_meter.delta(before)
-    assert leg == {"tokens_in": 200, "tokens_out": 40, "calls": 2,
+    assert leg == {"tokens_in": 200, "tokens_out": 40, "calls": 2, "api_calls": 2,
                    "by_role": {token_meter.UNATTRIBUTED:
-                               {"tokens_in": 200, "tokens_out": 40, "calls": 2}}}, leg
+                               {"tokens_in": 200, "tokens_out": 40, "calls": 2,
+                                "api_calls": 2}}}, leg
+
+
+def test_sdk_retry_counts_each_http_attempt_but_tokens_once():
+    token_meter.install()
+    token_meter.reset()
+    _RetryHandler.attempts = 0
+    server, base_url = _server(_RetryHandler)
+    try:
+        _call(OpenAI(base_url=base_url, api_key="test", max_retries=1))
+    finally:
+        server.shutdown()
+
+    totals = token_meter.totals()
+    assert totals["api_calls"] == 2, totals
+    assert totals["calls"] == 1, totals
+    assert (totals["tokens_in"], totals["tokens_out"]) == (100, 20), totals
+
+
+def test_failed_sdk_requests_still_count_transport_attempts():
+    token_meter.install()
+    token_meter.reset()
+    server, base_url = _server(_FailHandler)
+    try:
+        try:
+            _call(OpenAI(base_url=base_url, api_key="test", max_retries=1))
+        except Exception:
+            pass
+        else:
+            raise AssertionError("the all-500 request unexpectedly succeeded")
+    finally:
+        server.shutdown()
+
+    totals = token_meter.totals()
+    assert totals["api_calls"] == 2, totals
+    assert totals["calls"] == 0, totals
+    assert totals["tokens_total"] == 0, totals
 
 
 def test_roles_attribute_calls_and_total_to_the_whole():
@@ -122,9 +186,12 @@ def test_roles_attribute_calls_and_total_to_the_whole():
         server.shutdown()
 
     by_role = token_meter.totals()["by_role"]
-    assert by_role[token_meter.ROLE_ACTOR] == {"tokens_in": 200, "tokens_out": 40, "calls": 2}
-    assert by_role[token_meter.ROLE_GUARD] == {"tokens_in": 100, "tokens_out": 20, "calls": 1}
-    assert by_role[token_meter.UNATTRIBUTED] == {"tokens_in": 100, "tokens_out": 20, "calls": 1}
+    assert by_role[token_meter.ROLE_ACTOR] == {
+        "tokens_in": 200, "tokens_out": 40, "calls": 2, "api_calls": 2}
+    assert by_role[token_meter.ROLE_GUARD] == {
+        "tokens_in": 100, "tokens_out": 20, "calls": 1, "api_calls": 1}
+    assert by_role[token_meter.UNATTRIBUTED] == {
+        "tokens_in": 100, "tokens_out": 20, "calls": 1, "api_calls": 1}
     # The rows must re-total to the whole, or a share column computed from them is a lie.
     assert sum(row["calls"] for row in by_role.values()) == token_meter.totals()["calls"]
     assert sum(row["tokens_in"] for row in by_role.values()) == token_meter.totals()["tokens_in"]
@@ -164,16 +231,39 @@ def test_record_external_counts_the_raw_http_backends():
     without this path the advisor and the map resolver are missing from the totals entirely."""
     token_meter.install()
     token_meter.reset()
+    token_meter.record_api_call(token_meter.ROLE_ADVISOR)
     token_meter.record_external("Qwen/Qwen3.6-27B",
                                 {"prompt_tokens": 700, "completion_tokens": 30},
                                 token_meter.ROLE_ADVISOR)
     totals = token_meter.totals()
     assert totals["calls"] == 1, totals
+    assert totals["api_calls"] == 1, totals
     assert totals["tokens_total"] == 730, totals
     assert totals["by_role"][token_meter.ROLE_ADVISOR]["tokens_in"] == 700, totals["by_role"]
     # A body with no usage block is counted as untracked, exactly like a streamed SDK response.
     token_meter.record_external("Qwen/Qwen3.6-27B", None, token_meter.ROLE_ADVISOR)
     assert token_meter.totals()["untracked_calls"] == 1, token_meter.totals()
+
+
+def test_raw_http_request_counts_before_a_failed_send(monkeypatch):
+    token_meter.install()
+    token_meter.reset()
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(requests, "post", fail)
+    try:
+        locate_task.qwen_json("system", "prompt", {"type": "object"},
+                              base_url="http://127.0.0.1:1", api_key="test")
+    except requests.ConnectionError:
+        pass
+    else:
+        raise AssertionError("the raw HTTP request unexpectedly succeeded")
+
+    totals = token_meter.totals()
+    assert totals["api_calls"] == 1, totals
+    assert totals["calls"] == 0, totals
 
 
 def test_responder_has_a_dedicated_token_role():
@@ -210,6 +300,7 @@ def test_dump_writes_tokens_json():
     assert payload["tokens_in"] == 100, payload
     assert payload["tokens_out"] == 20, payload
     assert payload["tokens_total"] == 120, payload
+    assert payload["api_calls"] == 1, payload
 
 
 def test_install_is_idempotent():
@@ -223,6 +314,7 @@ def test_install_is_idempotent():
     finally:
         server.shutdown()
     assert token_meter.totals()["calls"] == 1, token_meter.totals()
+    assert token_meter.totals()["api_calls"] == 1, token_meter.totals()
 
 
 def _run():

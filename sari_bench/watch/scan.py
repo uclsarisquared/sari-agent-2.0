@@ -102,6 +102,9 @@ class AttemptView:
     # live attempt's spend is visible while it runs and not only once it exits.
     tokens_in: int = 0
     tokens_out: int = 0
+    # None is deliberately distinct from zero: legacy attempts have no request meter, while a
+    # newly metered attempt can genuinely make zero OpenAI-compatible requests.
+    api_calls: int | None = None
     # The same spend split by which reasoner made the call: role -> {tokens_in, tokens_out, calls}.
     # Empty for an attempt run before roles existed (or one whose agent died before its first
     # tokens.json write), which readers must show as "unknown", never as a battery of zeroes - the
@@ -172,7 +175,7 @@ ROLE_ORDER = ("decomposer", "resolver", "actor", "semantic", "episodic", "adviso
 
 
 def normalize_by_role(raw: Any) -> dict[str, dict[str, int]]:
-    """Coerces a tokens.json ``by_role`` block into role -> {tokens_in, tokens_out, calls} ints.
+    """Coerces a tokens.json role block, retaining response and request call counts.
 
     Defensive because it parses a file another process is rewriting under it, and because run dirs
     predating per-role accounting have no block at all. Returns {} rather than a zero-filled skeleton
@@ -186,8 +189,11 @@ def normalize_by_role(raw: Any) -> dict[str, dict[str, int]]:
         if not isinstance(row, dict):
             continue
         try:
-            rows[str(name)] = {field_name: int(row.get(field_name) or 0)
-                               for field_name in ("tokens_in", "tokens_out", "calls")}
+            normalized = {field_name: int(row.get(field_name) or 0)
+                          for field_name in ("tokens_in", "tokens_out", "calls")}
+            if "api_calls" in row:
+                normalized["api_calls"] = int(row.get("api_calls") or 0)
+            rows[str(name)] = normalized
         except (TypeError, ValueError):
             continue
     return rows
@@ -421,6 +427,11 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
     tokens = _read_json(run_dir / "tokens.json")
     view.tokens_in = int(tokens.get("tokens_in") or manifest.get("tokens_in") or 0)
     view.tokens_out = int(tokens.get("tokens_out") or manifest.get("tokens_out") or 0)
+    raw_api_calls = (
+        tokens.get("api_calls")
+        if tokens.get("api_calls") is not None else manifest.get("api_calls")
+    )
+    view.api_calls = int(raw_api_calls) if raw_api_calls is not None else None
     view.tokens_by_role = normalize_by_role(tokens.get("by_role") or manifest.get("tokens_by_role"))
 
     started = manifest.get("started_epoch")

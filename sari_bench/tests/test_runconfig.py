@@ -2,13 +2,53 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tomli
 
 from sari_bench.runner import BenchmarkRunner, async_main
 from sari_runconfig import RunConfigError, load_run_config
+
+
+def test_context_ablation_configs_are_five_try_and_runner_is_complete() -> None:
+    root = Path(__file__).resolve().parents[2]
+    config_dir = root / "configs" / "context-ablation"
+    names = [
+        "baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4",
+        "a7-no-stop-guard", "hard-baseline",
+    ]
+    configs = {}
+    for name in names:
+        with (config_dir / f"{name}.toml").open("rb") as handle:
+            configs[name] = tomli.load(handle)["bench"]
+        assert configs[name]["tries"] == 5, name
+
+    a7 = dict(configs["a7-no-stop-guard"])
+    baseline = dict(configs["baseline"])
+    assert a7["context_policy"] == "baseline"
+    assert a7["completion_guard"] == "none"
+    assert baseline["completion_guard"] == "vlm"
+    a7.pop("name")
+    baseline.pop("name")
+    a7.pop("completion_guard")
+    baseline.pop("completion_guard")
+    assert a7 == baseline, "A7 must differ from the fresh baseline only in name and guard"
+
+    from agent.agent_core.context_policy import CONTEXT_POLICIES
+    assert "a7-no-stop-guard" not in CONTEXT_POLICIES
+
+    runner = config_dir / "run_all.sh"
+    text = runner.read_text(encoding="utf-8")
+    match = re.search(r"policies=\(([^)]*)\)", text)
+    assert match is not None
+    scheduled = match.group(1).split()
+    assert scheduled == names
+    assert len(scheduled) == len(set(scheduled))
+    assert os.access(runner, os.X_OK), "the ablation runner lost its executable bit"
 
 
 def test_loader_resolves_paths_from_the_config_and_rejects_typos(tmp_path: Path) -> None:

@@ -632,6 +632,8 @@ class WatchState:
                   "end_reasons": end_reasons} if summary else {},
             tokens_in=int(tokens.get("tokens_in") or 0),
             tokens_out=int(tokens.get("tokens_out") or 0),
+            api_calls=(int(tokens.get("api_calls") or 0)
+                       if "api_calls" in tokens and tokens.get("api_calls") is not None else None),
             tokens_by_role=scan.normalize_by_role(tokens.get("by_role")),
             llm_calls=int(summary.get("llm_calls") or 0),
         )
@@ -646,6 +648,7 @@ class WatchState:
             "wall_seconds": result.wall_seconds,
             "tokens_in": result.tokens_in,
             "tokens_out": result.tokens_out,
+            "api_calls": result.api_calls,
             "tokens_by_role": result.tokens_by_role,
             "ended_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ended)),
             "finalized_at": stamped,

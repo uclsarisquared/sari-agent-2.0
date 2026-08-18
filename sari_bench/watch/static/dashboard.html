@@ -496,6 +496,7 @@
         <dt>held</dt><dd data-ref="held"></dd>
         <dt>elapsed</dt><dd data-ref="elapsed"></dd>
         <dt>tokens</dt><dd data-ref="tokens"></dd>
+        <dt>API calls</dt><dd data-ref="apiCalls"></dd>
         <dt>sandbox</dt><dd data-ref="sandbox"></dd>
         <dt data-ref="endLabel" hidden>end</dt><dd data-ref="end" hidden></dd>
       </dl>
@@ -610,6 +611,18 @@ const fmtMin = s => (s === null || s === undefined) ? "—"
   : (s < 0 ? "-" : "") + Math.floor(Math.abs(s) / 60) + "m" + String(Math.floor(Math.abs(s) % 60)).padStart(2, "0") + "s";
 const fmtNum = n => Number(n || 0).toLocaleString();
 const fmtTok = a => `${fmtNum(a.tokens_in)} in / ${fmtNum(a.tokens_out)} out`;
+const hasApiCalls = a => !!a && a.api_calls !== null && a.api_calls !== undefined;
+const fmtApiCalls = a => hasApiCalls(a) ? fmtNum(a.api_calls) : "unknown";
+const apiAggregate = attempts => {
+  const eligible = attempts || [];
+  const known = eligible.filter(hasApiCalls);
+  return { sum: known.reduce((sum, a) => sum + Number(a.api_calls), 0),
+           known: known.length, total: eligible.length };
+};
+const fmtApiAggregate = value => !value.total ? "—"
+  : value.known === value.total ? fmtNum(value.sum)
+  : value.known ? `${fmtNum(value.sum)} (${value.known}/${value.total} metered)`
+  : `unknown (0/${value.total} metered)`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isLive = a => a.state === "starting" || a.state === "running";
 
@@ -924,6 +937,7 @@ const CARD_HTML = `
     <dt>at</dt><dd data-ref="at"></dd>
     <dt>held</dt><dd data-ref="held"></dd>
     <dt>elapsed</dt><dd data-ref="elapsed"></dd>
+    <dt>API calls</dt><dd data-ref="apiCalls"></dd>
     <dt>sandbox</dt><dd data-ref="sandbox"></dd>
     <dt data-ref="endLabel" hidden>end</dt><dd data-ref="end" hidden></dd>
   </dl>
@@ -993,6 +1007,7 @@ function setRows(refs, a) {
   setText(refs.held, a.gripped_name ?? a.gripped ?? "—");
   setText(refs.elapsed, fmtMin(a.elapsed_seconds)
     + (live && a.remaining_seconds !== null ? " · " + fmtMin(a.remaining_seconds) + " left" : ""));
+  setText(refs.apiCalls, fmtApiCalls(a));
   setTok(refs.tokens, a);
   setText(refs.sandbox, a.sandbox_id || "—");
   refs.endLabel.hidden = refs.end.hidden = !a.end_reason;
@@ -1239,7 +1254,7 @@ function setTok(el, a) {
   el.title = addRoles(totals, a.tokens_by_role) ? roleLines(totals)
     : "no per-role token accounting recorded for this attempt";
 }
-const ovRows = new Map();        // prompt_id -> { tr, cells[], res, stime, tokens }
+const ovRows = new Map();        // prompt_id -> { tr, cells[], res, stime, tokens, apiCalls }
 const ovIndex = new Map();       // attempt key -> AttemptView, for the hover card and the overlay
 let ovShape = "";                // battery id + try count; a change rebuilds the table outright
 
@@ -1276,7 +1291,9 @@ function ovBuildTable(tries) {
   const table = document.getElementById("ov-table");
   const heads = ['<th class="task">task</th>', "<th>prompt</th>"];
   for (let t = 1; t <= tries; t++) heads.push(`<th class="num">try ${t}</th>`);
-  heads.push("<th>success?</th>", '<th class="num">success time</th>', '<th class="num">tokens in / out</th>');
+  heads.push("<th>success?</th>", '<th class="num">success time</th>',
+    '<th class="num">tokens in / out</th>',
+    '<th class="num">API calls<br>pass only / pass+fail</th>');
   table.innerHTML = `<thead><tr>${heads.join("")}</tr></thead><tbody></tbody><tfoot></tfoot>`;
   ovRows.clear();
   return table;
@@ -1287,7 +1304,8 @@ function ovBuildRow(prompt, tries) {
   const cellHTML = '<td class="cell none"><button class="cellbtn" data-act="detail"></button></td>';
   tr.innerHTML = `<td class="task"></td><td class="ptext"></td>`
     + cellHTML.repeat(tries)
-    + `<td class="res"></td><td class="num stime"></td><td class="num tok"></td>`;
+    + `<td class="res"></td><td class="num stime"></td><td class="num tok"></td>`
+    + `<td class="num api-calls"></td>`;
   const entry = {
     tr,
     task: tr.children[0],
@@ -1296,6 +1314,7 @@ function ovBuildRow(prompt, tries) {
     res: tr.querySelector("td.res"),
     stime: tr.querySelector("td.stime"),
     tokens: tr.querySelector("td.tok"),
+    apiCalls: tr.querySelector("td.api-calls"),
   };
   setText(entry.task, prompt.id);
   setText(entry.prompt, prompt.prompt || "");
@@ -1332,6 +1351,7 @@ function renderOverview(state) {
   }
 
   let solved = 0, reliabilitySum = 0, reliabilityN = 0, winIn = 0, winOut = 0;
+  const batteryPassApi = [], batteryJudgedApi = [];
   // Elapsed of the first passing try, over the prompts that have one. An attempt whose elapsed was
   // never recorded is left out of the mean rather than counted as an instant win.
   let winTime = 0, winTimeN = 0;
@@ -1368,7 +1388,7 @@ function renderOverview(state) {
       const button = td.firstElementChild;
       const cls = `cell ${st.code}`;
       if (td.className !== cls) td.className = cls;
-      setText(button, st.glyph);
+      setText(button, a ? `${st.glyph} · ${hasApiCalls(a) ? fmtNum(a.api_calls) : "?"}` : st.glyph);
       button.dataset.key = a ? a.key : "";
       button.title = a ? `${a.key} — ${st.label}` : "not run";
       if (!a) continue;
@@ -1419,6 +1439,15 @@ function renderOverview(state) {
     // always about one prompt at a time. The battery-wide split is in the footer.
     entry.tokens.title = rowRoles.size ? roleLines(rowRoles)
       : "no per-role token accounting recorded for this prompt's tries";
+    const judged = [...byTry.values()].filter(a => a.prompt_id === prompt.id
+      && ["pass", "fail"].includes(verdictOf(a)));
+    const passing = judged.filter(a => verdictOf(a) === "pass");
+    const passApi = apiAggregate(passing), judgedApi = apiAggregate(judged);
+    setText(entry.apiCalls, `${fmtApiAggregate(passApi)} / ${fmtApiAggregate(judgedApi)}`);
+    entry.apiCalls.title = "actual OpenAI-compatible HTTP attempts\n"
+      + `pass only: ${fmtApiAggregate(passApi)}\npass+fail: ${fmtApiAggregate(judgedApi)}`;
+    batteryPassApi.push(...passing);
+    batteryJudgedApi.push(...judged);
 
     totalIn += tokIn;
     totalOut += tokOut;
@@ -1460,7 +1489,7 @@ function renderOverview(state) {
         roleTries < ranTries
           ? `, over the ${roleTries} of ${ranTries} dispatched tr(ies) that recorded roles`
           : ""}</td>
-      <td colspan="3">${fmtNum(roleSum)} total</td>
+      <td colspan="4">${fmtNum(roleSum)} total</td>
     </tr>` + roleNames.map(name => {
       const row = roleTotals.get(name);
       const share = roleSum ? (row.in + row.out) / roleSum : 0;
@@ -1476,36 +1505,41 @@ function renderOverview(state) {
     <tr class="role" ${tip}>
       <td class="lbl" colspan="${span}">${esc(name)}<span class="bar" style="width:${
         (share * 22).toFixed(2)}em"></span></td>
-      <td colspan="3">${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
+      <td colspan="4">${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
         (share * 100).toFixed(1)}% · ${fmtNum(row.calls)} call(s)</span></td>
     </tr>`;
     }).join("");
   setHTML(table.querySelector("tfoot"), `
     <tr>
       <td class="lbl" colspan="${span}">success rate — prompts with at least one human-verified pass</td>
-      <td colspan="3">${solved} / ${prompts.length} · ${pct}%</td>
+      <td colspan="4">${solved} / ${prompts.length} · ${pct}%</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg success time — mean elapsed of the first passing try over ${winTimeN} solved prompt(s)</td>
-      <td colspan="3">${winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—"}</td>
+      <td colspan="4">${winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg time per run — mean elapsed over ${
         allTimeTries === ranTries ? `all ${ranTries}` : `the ${allTimeTries} of ${ranTries}`
       } dispatched tr(ies) that finished, passing or not · ${fmtMin(Math.round(allTime))} in total</td>
-      <td colspan="3">${allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—"}</td>
+      <td colspan="4">${allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">reliability — mean of (passing tries / tries counted, invalid excluded) over ${reliabilityN} dispatched prompt(s)</td>
-      <td colspan="3">${reliabilityN ? rel + "%" : "—"}</td>
+      <td colspan="4">${reliabilityN ? rel + "%" : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg tokens per solved prompt — all its tries, failed and invalid ones included</td>
-      <td colspan="3">${solved ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out` : "—"}</td>
+      <td colspan="4">${solved ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out` : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">total tokens — every try in this battery, failed and invalid ones included</td>
-      <td colspan="3">${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out</td>
+      <td colspan="4">${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out</td>
+    </tr>
+    <tr>
+      <td class="lbl" colspan="${span}">API calls — human-verified pass only / pass+fail</td>
+      <td colspan="4">${fmtApiAggregate(apiAggregate(batteryPassApi))} / ${
+        fmtApiAggregate(apiAggregate(batteryJudgedApi))}</td>
     </tr>${roleFoot}`);
 }
 
@@ -1549,6 +1583,7 @@ tip.innerHTML = `
       <dt>elapsed</dt><dd data-ref="elapsed"></dd>
       <dt>step</dt><dd data-ref="step"></dd>
       <dt>tokens</dt><dd data-ref="tokens"></dd>
+      <dt>API calls</dt><dd data-ref="apiCalls"></dd>
       <dt>end</dt><dd data-ref="end"></dd>
       <dt>sandbox</dt><dd data-ref="sandbox"></dd>
     </dl>
@@ -1572,6 +1607,7 @@ function showTip(key) {
   setText(tipRefs.step, `${a.step || 0}${a.max_steps ? " / " + a.max_steps : ""}`
     + (a.leg === null || a.leg === undefined ? "" : ` · leg ${a.leg}`));
   setTok(tipRefs.tokens, a);
+  setText(tipRefs.apiCalls, fmtApiCalls(a));
   setText(tipRefs.end, a.end_reason || a.outcome || a.state || "—");
   setText(tipRefs.sandbox, a.sandbox_id || "—");
   setResponse(tipRefs.resp, tipRefs.respText, a);

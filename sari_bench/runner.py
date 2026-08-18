@@ -150,6 +150,9 @@ class AttemptResult:
     tokens_in: int = 0
     tokens_out: int = 0
     llm_calls: int = 0
+    # Actual OpenAI-compatible HTTP sends. None means the attempt predates request metering (or
+    # ended before its first meter snapshot); measured zero remains a real zero.
+    api_calls: int | None = None
     # role -> {tokens_in, tokens_out, calls}, from the same source as the totals above. Empty for an
     # attempt whose agent predates per-role accounting; see scan.normalize_by_role on why that is
     # not zero-filled.
@@ -943,6 +946,7 @@ class BenchmarkRunner:
                     "wall_seconds": result.wall_seconds,
                     "tokens_in": result.tokens_in,
                     "tokens_out": result.tokens_out,
+                    "api_calls": result.api_calls,
                     "tokens_by_role": result.tokens_by_role,
                     "ended_at": datetime.now().isoformat(timespec="seconds"),
                 },
@@ -955,7 +959,8 @@ class BenchmarkRunner:
             _log(
                 f"[w{index}] {prompt_id} try {attempt}: {result.outcome} "
                 f"(success={result.success}, {result.wall_seconds}s, "
-                f"tokens {result.tokens_in}in/{result.tokens_out}out)"
+                f"tokens {result.tokens_in}in/{result.tokens_out}out, "
+                f"api calls {result.api_calls if result.api_calls is not None else 'unknown'})"
             )
 
     async def _spawn_agent(
@@ -1409,6 +1414,9 @@ class BenchmarkRunner:
 
         result.tokens_in = int(source.get("tokens_in") or 0)
         result.tokens_out = int(source.get("tokens_out") or 0)
+        result.api_calls = (
+            int(source.get("api_calls") or 0) if source.get("api_calls") is not None else None
+        )
         result.tokens_by_role = scan.normalize_by_role(source.get("by_role"))
         if not result.llm_calls:
             result.llm_calls = int(source.get("calls") or 0)
@@ -1455,12 +1463,17 @@ class BenchmarkRunner:
                     "sandboxes": [],
                     "tokens_in": 0,
                     "tokens_out": 0,
+                    "api_calls": 0,
+                    "api_calls_measured_attempts": 0,
                 },
             )
             row["attempts"] += 1
             row["successes"] += int(result.success)
             row["tokens_in"] += result.tokens_in
             row["tokens_out"] += result.tokens_out
+            if result.api_calls is not None:
+                row["api_calls"] += result.api_calls
+                row["api_calls_measured_attempts"] += 1
             row["outcomes"][result.outcome] = row["outcomes"].get(result.outcome, 0) + 1
             if result.end_reason:
                 row["end_reasons"][result.end_reason] = row["end_reasons"].get(result.end_reason, 0) + 1
@@ -1473,19 +1486,32 @@ class BenchmarkRunner:
             # sandbox-lost requeues and --only are in play - the totals alone don't compare.
             row["tokens_in_avg"] = round(row["tokens_in"] / row["attempts"]) if row["attempts"] else 0
             row["tokens_out_avg"] = round(row["tokens_out"] / row["attempts"]) if row["attempts"] else 0
+            row["api_calls_coverage"] = {
+                "known": row["api_calls_measured_attempts"],
+                "total": row["attempts"],
+            }
 
         total_in = sum(result.tokens_in for result in results)
         total_out = sum(result.tokens_out for result in results)
+        metered_api_calls = [result.api_calls for result in results if result.api_calls is not None]
         # Battery-wide cost per reasoner: the number an ablation compares across arms. Attempts that
         # recorded no roles simply contribute nothing here, so this can total less than `tokens_in`
         # above - which is why the two are kept as separate lines rather than one being derived.
-        tokens_by_role: dict[str, dict[str, int]] = {}
+        tokens_by_role: dict[str, dict[str, Any]] = {}
+        role_api_coverage: dict[str, dict[str, int]] = {}
         for result in results:
             for name, row in (result.tokens_by_role or {}).items():
                 into = tokens_by_role.setdefault(
-                    name, {"tokens_in": 0, "tokens_out": 0, "calls": 0})
-                for field_name in into:
+                    name, {"tokens_in": 0, "tokens_out": 0, "calls": 0, "api_calls": 0})
+                for field_name in ("tokens_in", "tokens_out", "calls"):
                     into[field_name] += int(row.get(field_name) or 0)
+                coverage = role_api_coverage.setdefault(name, {"known": 0, "total": 0})
+                coverage["total"] += 1
+                if "api_calls" in row:
+                    into["api_calls"] += int(row.get("api_calls") or 0)
+                    coverage["known"] += 1
+        for name, row in tokens_by_role.items():
+            row["api_calls_coverage"] = role_api_coverage[name]
         summary = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "wall_seconds": round(
@@ -1507,6 +1533,8 @@ class BenchmarkRunner:
             "tokens_in": total_in,
             "tokens_out": total_out,
             "tokens_total": total_in + total_out,
+            "api_calls": sum(metered_api_calls),
+            "api_calls_coverage": {"known": len(metered_api_calls), "total": len(results)},
             "tokens_by_role": {name: tokens_by_role[name]
                                for name in scan.sorted_roles(tokens_by_role)},
             "llm_calls": sum(result.llm_calls for result in results),

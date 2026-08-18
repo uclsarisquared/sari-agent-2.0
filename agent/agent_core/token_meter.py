@@ -5,9 +5,9 @@ call sites in agent_core.agent (actor + semantic/episodic learner + advisor), vi
 (bbox/centering/OCR reasoning), vision.md_tools' qwen fallback, orchestrator.subtask_agents
 (decomposer + findings summary + final responder), orchestrator.pickup_vlm_guard's completion guards,
 mapping.drivers.vlm_planner and the map resolver. Most go through the OpenAI SDK's
-``chat.completions.create`` against the same OpenAI-compatible endpoint, so patching that single
-method counts them - including the retries inside ``BaseAgent._api_call_with_retry``, which a
-per-call-site counter would silently miss even though the endpoint was really billed for them.
+``chat.completions.create`` against the same OpenAI-compatible endpoint. The response wrapper counts
+token-bearing completions; a separate transport wrapper counts every actual HTTP send, including
+failed requests and retries performed inside either the SDK or ``BaseAgent._api_call_with_retry``.
 
 WHY ROLES ON TOP OF THAT: the totals alone answer "what did this attempt cost", never "what did the
 advisor cost" - so an ablation that removes a component cannot tell from them whether the component
@@ -25,8 +25,9 @@ the main thread happened to be inside at the time.
 NOT COUNTED BY THE PATCH: nav.locate_task's ``qwen_json`` posts to /v1/chat/completions with
 ``requests`` and never touches the SDK - the advisor and the map resolver both run through it, and
 before roles existed BOTH were missing from the totals entirely despite this docstring once claiming
-otherwise. They now report themselves through ``record_external``. ``claude_json`` (the claude-cli
-backend) is billed to a different account altogether and is still not counted here.
+otherwise. They now call ``record_api_call`` before the send and report response usage through
+``record_external``. ``claude_json`` (the claude-cli backend) is billed to a different account
+altogether and is still not counted here.
 
 NOT COUNTED, deliberately: moondream (vision/md_tools) is a different API that reports no token
 usage at all, so there is nothing to add up; its qwen ERROR-fallback path does go through the SDK
@@ -41,7 +42,7 @@ Usage (see run_agent.py):
         ...                           # every SDK call in here is billed to the actor
     before = token_meter.snapshot()
     ...
-    token_meter.delta(before)         # {"tokens_in": .., "tokens_out": .., "calls": .., "by_role": {..}}
+    token_meter.delta(before)         # adds api_calls beside token-bearing calls
     token_meter.dump()                # tokens.json, also auto-dumped every DUMP_INTERVAL_S
 
 ``install`` is idempotent, so importing this from two places cannot double-count.
@@ -98,9 +99,10 @@ _totals: dict[str, Any] = {
     "tokens_in": 0,          # prompt tokens billed to the server
     "tokens_out": 0,         # completion tokens (reasoning tokens included, per the server's count)
     "calls": 0,              # SDK calls that reported usage
+    "api_calls": 0,          # actual OpenAI-compatible HTTP attempts, including failures/retries
     "untracked_calls": 0,    # SDK calls with no usage on the response (streaming); see module docstring
     "by_model": {},          # model_id -> {"tokens_in", "tokens_out", "calls"}
-    "by_role": {},           # role -> {"tokens_in", "tokens_out", "calls"}; totals to the whole
+    "by_role": {},           # role -> token-bearing calls plus optional api_calls
 }
 
 
@@ -125,7 +127,7 @@ def current_role() -> str:
 
 
 def install(run_dir: Optional[str] = None) -> None:
-    """Patches the OpenAI SDK so every chat completion is counted. Safe to call more than once."""
+    """Patches the OpenAI SDK's completion and transport paths. Safe to call more than once."""
     global _installed, _run_dir, _totals, _role_var
 
     if run_dir:
@@ -135,6 +137,7 @@ def install(run_dir: Optional[str] = None) -> None:
         return
 
     try:
+        from openai import _base_client
         from openai.resources.chat import completions as _completions
     except ImportError:  # noqa: BLE001 - counting is bookkeeping, never a reason to fail a run
         return
@@ -148,10 +151,35 @@ def install(run_dir: Optional[str] = None) -> None:
         # block - through EITHER copy sees the same run. Adopting the counters without the var
         # would send this copy's roles nowhere and file all its calls as unattributed.
         _totals = original_create._sari_totals
+        _totals.setdefault("api_calls", 0)
         _totals.setdefault("by_role", {})  # the installing copy may predate role accounting
         _role_var = getattr(original_create, "_sari_role_var", _role_var)
         _installed = True
         return
+
+    def _patch_transport(client_class, *, asynchronous: bool) -> None:
+        original_send = client_class.send
+        if getattr(original_send, "_sari_api_call_meter", False):
+            return
+
+        if asynchronous:
+            async def send(self, request, *args, **kwargs):
+                _record_api_call()
+                return await original_send(self, request, *args, **kwargs)
+        else:
+            def send(self, request, *args, **kwargs):
+                _record_api_call()
+                return original_send(self, request, *args, **kwargs)
+
+        send.__wrapped__ = original_send
+        send._sari_api_call_meter = True
+        client_class.send = send
+
+    # OpenAI's default clients inherit httpx.send without overriding it. Patching these SDK-owned
+    # wrappers (rather than httpx globally) counts every retry send without touching OCR, depth,
+    # Moondream, Discord, or any other HTTP traffic in this process.
+    _patch_transport(_base_client.SyncHttpxClientWrapper, asynchronous=False)
+    _patch_transport(_base_client.AsyncHttpxClientWrapper, asynchronous=True)
 
     def create(self, *args, **kwargs):
         response = original_create(self, *args, **kwargs)
@@ -170,7 +198,7 @@ def install(run_dir: Optional[str] = None) -> None:
 
 
 def record_external(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
-    """Counts one call that did NOT go through the patched SDK.
+    """Counts one token-bearing response that did NOT go through the patched SDK.
 
     nav.locate_task's qwen backend posts to /v1/chat/completions with ``requests`` (it predates the
     meter and stayed on raw HTTP because the claude-cli backend's argv limit forced the split), so
@@ -178,12 +206,38 @@ def record_external(model: Any, usage: Any, role_name: Optional[str] = None) -> 
     overrides the ambient role for callers that know which reasoner they are serving but cannot wrap
     the call site.
 
-    Never call this for a request that also went through the SDK - that double-counts.
+    The caller separately invokes ``record_api_call`` before its raw send. Never call this for a
+    response that also went through the SDK - that double-counts its token-bearing ``calls`` row.
     """
     try:
         _record(model, usage, role_name=role_name)
     except Exception:  # noqa: BLE001 - accounting never breaks a call that succeeded
         pass
+
+
+def record_api_call(role_name: Optional[str] = None) -> None:
+    """Counts one raw-HTTP OpenAI-compatible request immediately before its transport send."""
+    try:
+        _record_api_call(role_name=role_name)
+    except Exception:  # noqa: BLE001 - accounting never prevents the request itself
+        pass
+
+
+def _record_api_call(role_name: Optional[str] = None) -> None:
+    """Internal request-attempt counter shared by the SDK and raw-HTTP paths."""
+    global _last_dump
+    billed_to = str(role_name or _role_var.get() or UNATTRIBUTED)
+    with _lock:
+        _totals["api_calls"] = int(_totals.get("api_calls") or 0) + 1
+        row = _totals["by_role"].setdefault(
+            billed_to, {"tokens_in": 0, "tokens_out": 0, "calls": 0, "api_calls": 0})
+        row["api_calls"] = int(row.get("api_calls") or 0) + 1
+        due = time.monotonic() - _last_dump >= DUMP_INTERVAL_S
+        totals = _copy_locked()
+
+    if due and _run_dir:
+        _last_dump = time.monotonic()
+        _write(totals)
 
 
 def _record(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
@@ -251,14 +305,15 @@ def delta(before: dict[str, Any]) -> dict[str, Any]:
     by_role: dict[str, dict[str, int]] = {}
     for name, row in now["by_role"].items():
         was = before_roles.get(name) or {}
-        spent = {field: int(row[field]) - int(was.get(field, 0))
-                 for field in ("tokens_in", "tokens_out", "calls")}
+        spent = {field: int(row.get(field, 0)) - int(was.get(field, 0))
+                 for field in ("tokens_in", "tokens_out", "calls", "api_calls")}
         if any(spent.values()):
             by_role[name] = spent
     return {
         "tokens_in": now["tokens_in"] - int(before.get("tokens_in", 0)),
         "tokens_out": now["tokens_out"] - int(before.get("tokens_out", 0)),
         "calls": now["calls"] - int(before.get("calls", 0)),
+        "api_calls": now["api_calls"] - int(before.get("api_calls", 0)),
         "by_role": by_role,
     }
 
@@ -305,6 +360,7 @@ def reset() -> None:
         _totals["tokens_in"] = 0
         _totals["tokens_out"] = 0
         _totals["calls"] = 0
+        _totals["api_calls"] = 0
         _totals["untracked_calls"] = 0
         _totals["by_model"] = {}
         _totals["by_role"] = {}

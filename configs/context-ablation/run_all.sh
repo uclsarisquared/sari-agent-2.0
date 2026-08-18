@@ -8,7 +8,7 @@ run_stamp=$(date +%Y%m%d_%H%M%S)
 log_dir="$script_dir/logs/$run_stamp"
 mkdir -p "$log_dir"
 
-policies=(a5 a6-2 a6-4 a2c a1 a3 a4 hard-baseline)
+policies=(baseline a1 a2c a3 a4 a5 a6-2 a6-4 a7-no-stop-guard hard-baseline)
 statuses=()
 failed=0
 
@@ -18,7 +18,7 @@ for policy in "${policies[@]}"; do
     config="$script_dir/$policy.toml"
     log="$log_dir/$policy.log"
     status_file="$log_dir/$policy.status"
-    printf 'Running %-8s -> %s\n' "$policy" "$log"
+    printf 'Running %-18s -> %s\n' "$policy" "$log"
     (
         cd "$repo_root"
         uv run python -m sari_bench run --config "$config"
@@ -31,15 +31,15 @@ for policy in "${policies[@]}"; do
     fi
 done
 
-printf '\n%-10s %s\n' "POLICY" "STATUS"
-printf '%-10s %s\n' "----------" "------"
+printf '\n%-18s %s\n' "CONFIGURATION" "STATUS"
+printf '%-18s %s\n' "------------------" "------"
 for index in "${!policies[@]}"; do
     status=${statuses[$index]}
     label="ok"
     if (( status != 0 )); then
         label="failed ($status)"
     fi
-    printf '%-10s %s\n' "${policies[$index]}" "$label"
+    printf '%-18s %s\n' "${policies[$index]}" "$label"
 done
 printf '\nLogs and status files: %s\n' "$log_dir"
 

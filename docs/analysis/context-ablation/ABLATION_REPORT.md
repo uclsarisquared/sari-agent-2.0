@@ -525,3 +525,40 @@ when this report was written** — `hard_14/try02` and `try03` were in flight, 4
 uses a different prompt set (`hard_prompts.json`, 18 prompts) from the ablation
 arms (`context_window_ablation.json`, 6 prompts), so it is not a control for
 anything here regardless. `collect.py` records it; every comparison drops it.
+
+---
+
+## Next five-try run (prospective)
+
+This section specifies the next run only. It does not revise the three-try results above and does
+not report outcomes that have not been observed.
+
+The new **A7 — no stop guard** arm uses the baseline context policy unchanged and sets only
+`completion_guard = "none"` (`configs/context-ablation/a7-no-stop-guard.toml`). Its hypothesis is
+that removing completion-guard model checks reduces request cost without reducing the rate of tasks
+that a human reviewer judges genuinely complete. Because this changes stop orchestration rather
+than retained context, A7 is deliberately not a `CONTEXT_POLICIES` entry.
+
+Every main arm now runs the same six prompts five times: **30 attempts per arm**. The comparable set
+is the fresh baseline, A1, A2c, A3, A4, A5, A6-2, A6-4, and A7: **270 attempts across nine arms**.
+The hard-baseline configuration remains a separate battery on its different prompt set and is not
+part of that 270-attempt comparison. No earlier three-try battery is reused as the new baseline.
+
+The A7 seam invariant is exact: the meter's `guard` role must record **zero completion-guard API
+calls**. Other roles still make requests, so A7's attempt-wide request count is not expected to be
+zero.
+
+The three call metrics answer different questions:
+
+- `api_calls` counts actual outbound OpenAI-compatible HTTP attempts immediately before transport.
+  Failed attempts, OpenAI SDK automatic retries, application retries, and the raw-HTTP Qwen
+  resolver/advisor each count once per send. Claude CLI, Moondream, the depth service, OCR, and
+  other non-OpenAI-compatible traffic are excluded.
+- `llm_calls` is the orchestrator's existing logical-work counter. One logical call may cause more
+  than one `api_calls` attempt when it is retried.
+- `calls` is the token meter's existing count of responses that carried a usage block. Failed sends
+  have no response tokens, so they increase `api_calls` but not `calls`.
+
+Historical attempts with no `api_calls` field are unmetered, not zero. New summaries and the
+dashboard therefore retain an unknown value and show the metered-attempt coverage whenever known
+and historical data are mixed.

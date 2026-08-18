@@ -60,9 +60,11 @@ with open(os.path.join(run_dir, "liveness.json"), "w") as f:
 # The real agent's token_meter rewrites this every few seconds, so it exists even for an attempt
 # that never reaches summary.json.
 with open(os.path.join(run_dir, "tokens.json"), "w") as f:
-    json.dump({"tokens_in": 1200, "tokens_out": 300, "calls": 4,
-               "by_role": {"actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2},
-                           "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2}}}, f)
+    json.dump({"tokens_in": 1200, "tokens_out": 300, "calls": 4, "api_calls": 5,
+               "by_role": {"actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2,
+                                      "api_calls": 3},
+                           "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2,
+                                      "api_calls": 2}}}, f)
 
 mode = os.environ.get("STUB_MODE", "ok")
 if mode == "crash":
@@ -77,13 +79,16 @@ with open(os.path.join(run_dir, "summary.json"), "w") as f:
     json.dump({"task": task, "success": True, "legs_planned": 1, "legs_completed": 1,
                "response": "Done — the requested task was completed.",
                "response_source": "model",
-               "llm_calls": 6,
+               "llm_calls": 6, "api_calls": 8,
                "tokens_in": 2000, "tokens_out": 500,
                "tokens": {"tokens_in": 2000, "tokens_out": 500, "calls": 6,
-                          "by_role": {"actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4},
-                                      "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2}}},
+                          "api_calls": 8,
+                          "by_role": {"actor": {"tokens_in": 1400, "tokens_out": 350,
+                                                  "calls": 4, "api_calls": 5},
+                                      "guard": {"tokens_in": 600, "tokens_out": 150,
+                                                  "calls": 2, "api_calls": 3}}},
                "legs": [{"end_reason": "halt_granted", "success": True,
-                         "tokens_in": 2000, "tokens_out": 500}]}, f)
+                         "tokens_in": 2000, "tokens_out": 500, "api_calls": 8}]}, f)
 with open(os.path.join(run_dir, "liveness.json"), "r+") as f:
     data = json.load(f); data["end"] = time.time()
     f.seek(0); json.dump(data, f); f.truncate()
@@ -794,20 +799,29 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             # summary.json wins over tokens.json: it is the agent's final word.
             assert (attempt["tokens_in"], attempt["tokens_out"]) == (2000, 500), attempt
             assert attempt["llm_calls"] == 6, attempt
+            assert attempt["api_calls"] == 8, attempt
             assert summary["tokens_in"] == 2000 and summary["tokens_out"] == 500, summary
             assert summary["tokens_total"] == 2500, summary
+            assert summary["api_calls"] == 8, summary
+            assert summary["api_calls_coverage"] == {"known": 1, "total": 1}, summary
             row = summary["prompts"][0]
             assert (row["tokens_in"], row["tokens_out"]) == (2000, 500), row
             assert (row["tokens_in_avg"], row["tokens_out_avg"]) == (2000, 500), row
+            assert row["api_calls"] == 8, row
 
             # Per-reasoner attribution follows the same authority chain as the totals, and the role
             # rows must re-total to them - a breakdown that does not add up to the number beside it
             # is worse than no breakdown.
             assert attempt["tokens_by_role"] == {
-                "actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4},
-                "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2},
+                "actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4,
+                          "api_calls": 5},
+                "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2,
+                          "api_calls": 3},
             }, attempt
             assert summary["tokens_by_role"]["actor"]["tokens_in"] == 1400, summary
+            assert summary["tokens_by_role"]["guard"]["api_calls"] == 3, summary
+            assert summary["tokens_by_role"]["guard"]["api_calls_coverage"] == {
+                "known": 1, "total": 1}, summary
             assert sum(r["tokens_in"] for r in summary["tokens_by_role"].values()) == 2000, summary
             # Pipeline order, so the battery summary reads as the agent's own pipeline.
             assert list(summary["tokens_by_role"]) == ["actor", "guard"], summary
@@ -816,6 +830,7 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             manifest = json.loads(
                 (workspace / "runs" / "p1" / "try01" / "attempt.json").read_text(encoding="utf-8"))
             assert (manifest["tokens_in"], manifest["tokens_out"]) == (2000, 500), manifest
+            assert manifest["api_calls"] == 8, manifest
             assert manifest["tokens_by_role"]["guard"]["calls"] == 2, manifest
         finally:
             await sandbox.close()
@@ -846,9 +861,12 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             # does which reasoner spent them, which is the case an ablation most wants: the attempts
             # that ran to the wall are the expensive ones.
             assert (attempt["tokens_in"], attempt["tokens_out"]) == (1200, 300), attempt
+            assert attempt["api_calls"] == 5, attempt
             assert attempt["tokens_by_role"] == {
-                "actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2},
-                "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2},
+                "actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2,
+                          "api_calls": 3},
+                "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2,
+                          "api_calls": 2},
             }, attempt
         finally:
             await sandbox.close()

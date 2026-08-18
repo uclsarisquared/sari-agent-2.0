@@ -303,6 +303,7 @@ def _record_leg_attempt(state, leg, leg_index, attempt, metrics, tokens_before):
             "attempt": attempt,
             "tokens_in": leg_tokens["tokens_in"],
             "tokens_out": leg_tokens["tokens_out"],
+            "api_calls": leg_tokens.get("api_calls", 0),
             "tokens_by_role": leg_tokens["by_role"],
         }
     )
@@ -457,6 +458,7 @@ def _build_summary(state, response, response_source):
         "llm_calls": state.llm_calls,
         "tokens_in": token_totals["tokens_in"],
         "tokens_out": token_totals["tokens_out"],
+        "api_calls": token_totals.get("api_calls", 0),
         "tokens": token_totals,
         "wall_s": round(time.time() - state.started_at, 1),
         "legs": state.leg_rows,
