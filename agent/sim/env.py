@@ -207,10 +207,21 @@ def TransformAgent(translation: Tuple[float],
 
     lines, extracted_state = _v1_or_raise(result, "TransformAgent", 2, 3)
     is_colliding = lines[2].split(": ")[-1].strip() == "True"
+    recovery_count = None
+    for line in lines[3:]:
+        match = re.fullmatch(
+            r"\s*Out-of-bounds recovery count:\s*(\d+)\s*", line
+        )
+        if match:
+            recovery_count = int(match.group(1))
+            break
     agent_state = {
         'translation': tuple(map(float, extracted_state[0].split(', '))),
         'rotation': tuple(map(float, extracted_state[1].split(', '))),
-        'isColliding': is_colliding
+        'isColliding': is_colliding,
+        # Older sandboxes omit this parse-safe fourth V1 line.  None means that the peer does
+        # not expose the authoritative recovery protocol, not that its counter is zero.
+        'out_of_bounds_recovery_count': recovery_count,
     }
     return agent_state
 

@@ -368,6 +368,7 @@ def _dispatch_and_observe(session, step):
         metrics=session.metrics,
         started_at=session.started_at,
         read_state=_fresh_agent_state,
+        previous_state=session.state,
     )
 
     # Evaluate the refreshed state and emit one assembled record for the completed step.

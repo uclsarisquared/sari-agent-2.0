@@ -36,6 +36,8 @@ def fresh_agent_state() -> dict:
         "last_inspection": None,
         "last_halt_refused": None,
         "nearest_checkpoint": None,
+        "position_recovery": None,
+        "out_of_bounds_recovery_count": None,
         "goal_check": None,
         "gripped_name": None,
         "mode": "perception",
@@ -218,6 +220,7 @@ def reconcile_after_actions(
     metrics,
     started_at,
     read_state=fresh_agent_state,
+    previous_state=None,
 ):
     """Read live state and merge durable effects from the dispatched action batch."""
     state = read_state()
@@ -232,6 +235,10 @@ def reconcile_after_actions(
         state["last_checkout"] = outcome.checkout_result
         if metrics["t_checkout"] is None:
             metrics["t_checkout"] = round(time.time() - started_at, 1)
+    elif isinstance(previous_state, dict) and previous_state.get("last_checkout") is not None:
+        # Checkout is durable task evidence, not a location-dependent observation.  Keep the
+        # latest measured result across ordinary reconciliation and recovery alike.
+        state["last_checkout"] = previous_state["last_checkout"]
     if last_inspection_result is not None:
         state["last_inspection"] = last_inspection_result
 
@@ -240,6 +247,37 @@ def reconcile_after_actions(
         (state["translation"][0], state["translation"][2])
     )
     state["nearest_checkpoint"] = near
+
+    # A recovery count is authoritative only when both adjacent live snapshots support the
+    # protocol and the monotonic counter increased.  Missing support and controller recreation
+    # (a lower/reset count) establish a new baseline without fabricating a recovery event.
+    previous_count = (
+        previous_state.get("out_of_bounds_recovery_count")
+        if isinstance(previous_state, dict)
+        else None
+    )
+    live_count = state.get("out_of_bounds_recovery_count")
+    if (
+        isinstance(previous_count, int)
+        and not isinstance(previous_count, bool)
+        and isinstance(live_count, int)
+        and not isinstance(live_count, bool)
+        and live_count > previous_count
+    ):
+        state["position_recovery"] = {
+            "count": live_count,
+            "position": state["translation"],
+            "nearest_checkpoint": near,
+        }
+        # These observations describe the pre-teleport pose.  Grip state, item identity,
+        # inspection/checkout evidence, and checkpoint history remain valid and are reconciled
+        # below as usual.
+        state["last_center"] = None
+        state["last_reach"] = None
+        state["last_grab_failed"] = False
+    else:
+        state["position_recovery"] = None
+
     visited.add(near)
     state["visited_checkpoints"] = set(visited)
 

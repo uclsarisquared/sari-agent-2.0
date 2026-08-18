@@ -153,6 +153,7 @@ class LegEventLogger:
             reach=outcome.last_reach,
             near_cp=context.near_checkpoint,
             pos=state.get("translation"),
+            position_recovery=state.get("position_recovery"),
             hovered=[state.get("leftHoveredObject"), state.get("rightHoveredObject")],
             gripped=[state.get("leftGrippedState"), state.get("rightGrippedState")],
             gripped_names=dict(session.grip_tracker.names),
