@@ -24,7 +24,7 @@ GRAB_DISTANCE_THRESHOLD = 2.0  # units; beyond this, retrieve_item refuses to gr
 # OpenRouter retired on 402). This is the bounding-box/centering client - the endpoint's VL model
 # replaces Gemini here, identically in BOTH A/B arms; bbox quality vs Gemini is unmeasured and
 # shared, so it cannot skew the arms.
-from agent_core.llm import call_with_api_retries, endpoint_creds
+from agent_core.llm import MalformedContentError, call_with_api_retries, endpoint_creds
 from agent_core.models import agent_model
 from agent_core.prompt_loader import load_prompt, render_prompt
 # Every LLM call in this module is perception's cost - bbox, centering and OCR-bbox reasoning alike.
@@ -111,25 +111,34 @@ def extract_text_from_image(image_path):
 
 def find_most_similar_bbox_to_target_name(target_name, ocr_result):
     bboxes = '\n'.join([f'* {box}' for box in ocr_result])
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        resp = call_with_api_retries(
-            lambda: CLIENT.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": f"{FIND_MOST_SIMILAR_OCR_BBOX_PROMPT}\n\ntarget_name={target_name}\n\n{bboxes}"}],
-                temperature=0.5,
-                max_tokens=400,
-                extra_body={'chat_template_kwargs': {'enable_thinking': False}},
-            )
-        )
-    annotated_bbox = resp.choices[0].message.content
+    def request():
+        return CLIENT.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": f"{FIND_MOST_SIMILAR_OCR_BBOX_PROMPT}\n\ntarget_name={target_name}\n\n{bboxes}"}],
+            temperature=0.5,
+            max_tokens=400,
+            extra_body={'chat_template_kwargs': {'enable_thinking': False}},
+        ).choices[0].message.content
 
-    match = re.search(EXTRACTABLE_JSON_PATTERN, annotated_bbox)
-    if match:
-        extracted = match.group(1)
-        box_2d = ast.literal_eval(extracted)
-        box_2d = box_2d['box_2d']
-        return box_2d
-    return None
+    def validate(content):
+        match = re.search(EXTRACTABLE_JSON_PATTERN, content or "")
+        try:
+            parsed = ast.literal_eval(match.group(1) if match else str(content or "").strip())
+            box = parsed["box_2d"]
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                raise ValueError("box_2d must contain four coordinates")
+        except (KeyError, TypeError, SyntaxError, ValueError) as error:
+            raise MalformedContentError(
+                f"OCR box-match response was malformed: {error}", content=content
+            ) from error
+        return box
+
+    with token_meter.role(token_meter.ROLE_PERCEPTION):
+        return call_with_api_retries(
+            request,
+            call_name="perception.ocr_box_match",
+            validator=validate,
+        )
 
 def transform_paddle_result_to_coco_label_format(paddle_result):
     return [(b[0][0][0],b[0][0][1], b[0][2][0], b[0][2][1], b[1][0]) for b in paddle_result[0]]
@@ -211,10 +220,7 @@ def _draw_debug_frame(frame_source, boxes, chosen, aim_xy, out_path):
         print(f"[CENTER] debug frame save failed: {type(e).__name__}: {e}")
 
 
-DETECTION_PARSE_MAX_ATTEMPTS = 3
-
-
-class BBoxResponseParseError(ValueError):
+class BBoxResponseParseError(MalformedContentError):
     """The VLM replied, but its bbox payload was malformed or truncated."""
 
 
@@ -274,38 +280,31 @@ def _bbox_dict_px(box_2d):
 
 
 def _bbox_request(image, target_info, prompt, max_tokens, temperature):
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        return call_with_api_retries(
-            lambda: CLIENT.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": [
-                    _encode_image(image),
-                    {"type": "text", "text": f"{prompt}\n\ntarget_info={target_info}\n\n"},
-                ]}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra_body={'chat_template_kwargs': {'enable_thinking': False}},
-            )
-        ).choices[0].message.content
+    return CLIENT.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": [
+            _encode_image(image),
+            {"type": "text", "text": f"{prompt}\n\ntarget_info={target_info}\n\n"},
+        ]}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra_body={'chat_template_kwargs': {'enable_thinking': False}},
+    ).choices[0].message.content
 
 
 def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):
-    last_error = None
-    for attempt in range(1, DETECTION_PARSE_MAX_ATTEMPTS + 1):
+    def request_and_parse():
         content = _bbox_request(image, target_info, prompt, max_tokens, temperature)
         print(f"[DETECT OBJECT IN FRAME] Response: {content}")
         try:
             return [_bbox_dict_px(entry) for entry in _bbox_payload(content)]
         except BBoxResponseParseError as error:
-            last_error = error
-            print(
-                f"[DETECT OBJECT IN FRAME] malformed bbox response "
-                f"({attempt}/{DETECTION_PARSE_MAX_ATTEMPTS}): {error}"
-            )
-    raise BBoxResponseParseError(
-        f"bbox response remained malformed after {DETECTION_PARSE_MAX_ATTEMPTS} attempts: "
-        f"{last_error}"
-    ) from last_error
+            raise BBoxResponseParseError(str(error), content=content) from error
+
+    with token_meter.role(token_meter.ROLE_PERCEPTION):
+        return call_with_api_retries(
+            request_and_parse, call_name="perception.bounding_boxes"
+        )
 
 
 def _detect_bbox_px(image, target_info, temperature=0.0):
@@ -1034,45 +1033,17 @@ def place_held_item(hand="auto", aim_norm=None, max_approach_iters=4, max_extend
 
 
 def detect_object_via_gemini(target_name):
-    # config.env is loaded once at module import; the redundant CWD-relative reload here was a no-op.
-    client = CLIENT  # the configured endpoint (name kept for call sites; Gemini retired with OpenRouter)
-    model_name = MODEL_NAME
-    original_width = 1920
-    original_height = 1080
+    # Compatibility name retained; this uses the configured OpenAI-compatible endpoint.
     screenshot = RequestScreenshot(save_image=True)
     im = Image.open(BytesIO(screenshot["image"]))
     im.load()
     prompt = render_prompt("vision/detect_legacy", TARGET_NAME=target_name)
 
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        resp = call_with_api_retries(
-            lambda: client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": [
-                    _encode_image(im),
-                    {"type": "text", "text": prompt},
-                ]}],
-                temperature=0.5,
-                max_tokens=400,
-                extra_body={'chat_template_kwargs': {'enable_thinking': False}},
-            )
-        )
-    annotated_bbox = resp.choices[0].message.content
-
-    json_pattern = r'```json\n(.*?)\n```'
-    match = re.search(json_pattern, annotated_bbox, re.DOTALL)
-    if match:
-        json_str = match.group(1)
-        box_2d = ast.literal_eval(json_str)
-        if type(box_2d) == list:
-            box_2d = box_2d[0]
-        coords = box_2d.get('box_2d') or box_2d.get('bbox_2d')
-        xmin = coords[0] / 1000 * original_width   # [xmin, ymin, xmax, ymax] - Qwen order
-        ymin = coords[1] / 1000 * original_height
-        xmax = coords[2] / 1000 * original_width
-        ymax = coords[3] / 1000 * original_height
-    else:
+    entries = _parsed_bbox_response(im, target_name, prompt, 400, 0.5)
+    if not entries:
         return None
+    first = entries[0]
+    xmin, ymin, xmax, ymax = first['xmin'], first['ymin'], first['xmax'], first['ymax']
     annotate_target(ymin, xmin, ymax, xmax, source_image=im)
     return {'box': {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}}
 

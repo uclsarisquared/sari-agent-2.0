@@ -24,7 +24,7 @@ python run_agent.py --config ../runconfig.toml \
 ```
 
 If no task is given on the command line, it prompts interactively (`Task: `).
-The root `runconfig.toml` documents the standalone settings under `[agent]`, `[limits]`,
+The root `runconfig.toml` documents the standalone settings under `[api_retry]`, `[agent]`, `[limits]`,
 `[environment]`, and `[output]`, plus distributed-runner settings under `[bench]`. Explicit flags
 override configured values. Paths in TOML are resolved relative to that file.
 
@@ -42,6 +42,7 @@ prompts for it interactively.
 | `--max-steps N` | `0` | Step cap **per leg** (not per task); `0` means no limit |
 | `--max-minutes M` | `0` | Wall-clock cap per leg, in minutes; `0` means no limit |
 | `--leg-retries N` | `1` | How many times a failed leg is retried (with the failure reason fed into the retry's context) before the whole task aborts; `0` restores abort-on-first-failure |
+| `--api-max-attempts N` | `10` | Total attempts per OpenAI-compatible model call, including the initial request. Transport and malformed structured responses share this budget |
 | `--resolver-backend {endpoint, claude-cli}` | `endpoint` | Backend for the plan-time map target resolver. `endpoint` is the configured OpenAI-compatible endpoint on `$SARI_MODEL` — the same model the rest of the run uses; `claude-cli` shells out to `claude -p` instead. `qwen` is a deprecated alias for `endpoint` — accepted, but it warns and will be removed |
 | `--completion-guard {deterministic,vlm,none}` | `deterministic` | Completion verification backend. `none` runs no completion verifier and accepts an explicit STOP; it also disables the completion nudge/backstop |
 | `--output-dir DIR` | `mapping/output` | Which mapping map (topology / annotations / grid) to load — defaults to the frozen baseline map |

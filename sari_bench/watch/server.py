@@ -823,6 +823,8 @@ class WatchState:
                 leg_retries=config["leg_retries"],
                 completion_guard=config["completion_guard"],
                 context_policy=config["context_policy"],
+                api_max_attempts=config["api_max_attempts"],
+                max_api_requeues=config["max_api_requeues"],
                 timeout_grace=config["timeout_grace"],
                 sandbox_startup_timeout=config["sandbox_startup_timeout"],
                 capture_interval=config["capture_interval"],
@@ -897,6 +899,18 @@ class WatchState:
                 source_manifest.get("context_policy")
                 or plan.get("context_policy")
                 or option("--context-policy", "baseline")
+            ),
+            "api_max_attempts": int(
+                source_manifest.get("api_max_attempts")
+                or plan.get("api_max_attempts")
+                or option("--api-max-attempts", 10)
+            ),
+            "max_api_requeues": int(
+                source_manifest.get("max_api_requeues")
+                if source_manifest.get("max_api_requeues") is not None
+                else plan.get("max_api_requeues")
+                if plan.get("max_api_requeues") is not None
+                else option("--max-api-requeues", 3)
             ),
             "ocr_url": str(
                 source_manifest.get("ocr_url")

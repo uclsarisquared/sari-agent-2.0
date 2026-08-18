@@ -45,7 +45,8 @@ The simulator WebSocket defaults to `ws://localhost:8080/commands`; override `ws
 
 ## Configuration
 
-- `runconfig.toml` controls the agent, limits, map, outputs, and benchmark. CLI flags override it.
+- `runconfig.toml` controls the shared API retry policy, agent, limits, map, outputs, and benchmark.
+  CLI flags override it.
 - `config.env` holds credentials and machine-specific paths and is gitignored.
 - `config.env.example` documents every supported environment variable.
 - `--help` on the agent or `python -m sari_bench <command> --help` is the authoritative flag list.

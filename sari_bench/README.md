@@ -58,10 +58,13 @@ To continue an interrupted battery, keep the same prompt and attempt settings, s
 directory as `output_dir`, and enable `resume` in `runconfig.toml`. The harness restarts incomplete
 attempts; it does not resume them mid-step.
 
-Transient OpenAI-compatible API failures are retried 10 times inside the agent. If that budget is
-exhausted, a distributed run stops the current process and re-queues the same logical attempt up to
-three times. Each discarded process is retained beside the active try as `tryNN.requeueNN`; after
-the re-queue budget is exhausted, the final result is recorded as `api_retry_exhausted`.
+OpenAI-compatible failures are retried according to `[api_retry].max_attempts` (default 10), with
+structured-response validation inside the same budget. If one call exhausts it, a distributed run
+stops the current process and re-queues the same logical attempt according to
+`[bench].max_api_requeues` (default 3). The equivalent CLI overrides are `--api-max-attempts` and
+`--max-api-requeues`. Each discarded process is retained beside the active try as
+`tryNN.requeueNN`; after the re-queue budget is exhausted, the final result is recorded as
+`api_retry_exhausted`.
 
 The dashboard can grade, kill, and retry attempts. It has no authentication, so keep its default
 localhost binding unless the network is trusted.

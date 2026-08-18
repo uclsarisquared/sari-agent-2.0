@@ -194,7 +194,11 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside
     $OPENAI_API_URL in the repo-root config.env."""
     import requests
-    from agent_core.llm import call_with_api_retries, normalize_endpoint_root
+    from agent_core.llm import (
+        MalformedContentError,
+        call_with_api_retries,
+        normalize_endpoint_root,
+    )
     model = model or agent_model()
     endpoint = base_url or os.environ.get("OPENAI_API_URL")
     key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -219,20 +223,65 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
     }
     headers = {"Authorization": f"Bearer {key}"} if key else {}
 
+    call_name = (
+        "resolver" if schema is RESOLVE_SCHEMA else
+        "advisor" if schema.get("properties", {}).get("next_checkpoint") else
+        "perception_verifier"
+    )
+
+    def validate_schema(value, contract, path="response"):
+        expected = contract.get("type")
+        if expected == "object":
+            if not isinstance(value, dict):
+                raise ValueError(f"{path} must be an object")
+            for key in contract.get("required", []):
+                if key not in value:
+                    raise ValueError(f"{path} is missing {key}")
+            for key, child in contract.get("properties", {}).items():
+                if key in value:
+                    validate_schema(value[key], child, f"{path}.{key}")
+        elif expected == "array":
+            if not isinstance(value, list):
+                raise ValueError(f"{path} must be an array")
+            for index, item in enumerate(value):
+                validate_schema(item, contract.get("items", {}), f"{path}[{index}]")
+        elif expected == "string" and not isinstance(value, str):
+            raise ValueError(f"{path} must be a string")
+        elif expected == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"{path} must be an integer")
+        elif expected == "boolean" and type(value) is not bool:
+            raise ValueError(f"{path} must be a boolean")
+        elif isinstance(expected, list):
+            allowed = {
+                "string": isinstance(value, str),
+                "null": value is None,
+            }
+            if not any(allowed.get(kind, False) for kind in expected):
+                raise ValueError(f"{path} has the wrong type")
+        if "enum" in contract and value not in contract["enum"]:
+            raise ValueError(f"{path} must be one of {contract['enum']}")
+
     def request():
         _meter_api_call()
         response = requests.post(url, json=payload, timeout=timeout, headers=headers)
         response.raise_for_status()
-        return response
+        try:
+            body = response.json()
+            text = body["choices"][0]["message"]["content"]
+            start, end = text.find("{"), text.rfind("}")
+            if start < 0 or end < 0:
+                raise ValueError(f"reply had no JSON object: {text[:200]!r}")
+            result = json.loads(text[start:end + 1])
+            validate_schema(result, schema)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            content = locals().get("text", locals().get("body"))
+            raise MalformedContentError(
+                f"{call_name} response violated its schema: {error}", content=content
+            ) from error
+        _meter(model, body)
+        return result, body
 
-    resp = call_with_api_retries(request)
-    body = resp.json()
-    _meter(model, body)
-    text = body["choices"][0]["message"]["content"]
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < 0:
-        raise RuntimeError(f"qwen reply had no JSON object: {text[:200]!r}")
-    return json.loads(text[start:end + 1]), body
+    return call_with_api_retries(request, call_name=call_name)
 
 
 def backend_callable(backend: str):

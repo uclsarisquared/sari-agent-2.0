@@ -1268,6 +1268,8 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
                 "coordinator": "ws://127.0.0.1:9000",
                 "completion_guard": "vlm",
                 "context_policy": "a5",
+                "api_max_attempts": 7,
+                "max_api_requeues": 0,
             }),
         )
         state = WatchState(
@@ -1279,6 +1281,8 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
         config = state._retry_config(battery, {"command": []})
         assert config["completion_guard"] == "vlm", config
         assert config["context_policy"] == "a5", config
+        assert config["api_max_attempts"] == 7, config
+        assert config["max_api_requeues"] == 0, config
     print("ok  watcher retry preserves completion guard and context policy")
 
 

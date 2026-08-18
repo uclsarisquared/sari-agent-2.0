@@ -82,6 +82,12 @@ def main(argv=None):
                     help="how many times to RETRY a failed leg with the failure reason in context "
                          "before aborting the task (orchestrator-level self-correction; 0 restores "
                          "the old abort-on-first-failure behaviour)")
+    ap.add_argument(
+        "--api-max-attempts",
+        type=int,
+        default=configured("api_retry", "max_attempts", 10),
+        help="total attempts per OpenAI-compatible model call, including the initial request",
+    )
     ap.add_argument("--reset-start", action=argparse.BooleanOptionalAction,
                     default=configured("environment", "reset_start", False),
                     help="drive to the fixed spawn pose once before starting (eval-reproducibility; "
@@ -105,6 +111,8 @@ def main(argv=None):
              "http://127.0.0.1:9100.",
     )
     args = ap.parse_args(argv)
+    if args.api_max_attempts < 1:
+        ap.error("--api-max-attempts must be at least 1")
 
     # Must be set before anything reads it. sim.env resolves the default per call, not at import,
     # so setting it here still takes effect in the already-imported module.
@@ -127,4 +135,11 @@ def main(argv=None):
         completion_guard=args.completion_guard,
         ocr_url=args.ocr_url,
         context_policy=args.context_policy,
+        api_max_attempts=args.api_max_attempts,
+        max_api_requeues=int(
+            os.getenv(
+                "SARI_MAX_API_REQUEUES",
+                str(configured("bench", "max_api_requeues", 3)),
+            )
+        ),
     ))

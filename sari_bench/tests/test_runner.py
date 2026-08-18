@@ -74,7 +74,8 @@ if mode == "hang":
 if mode == "api_retry_exhausted":
     with open(os.environ["SARI_API_RETRY_EXHAUSTED_PATH"], "w") as f:
         json.dump({"attempts": 10, "error_type": "TimeoutError",
-                   "error": "server stayed down"}, f)
+                   "error": "server stayed down", "call_name": "semantic_reasoning",
+                   "failure_kind": "timeout"}, f)
     time.sleep(600)
 if mode == "cancel_siblings" and task == "winner prompt" and not run_dir.endswith("try01"):
     time.sleep(600)
@@ -184,6 +185,8 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
             workspace,
             completion_guard="vlm",
             context_policy="a5",
+            api_max_attempts=6,
+            max_api_requeues=2,
         )
         lease = type("LeaseStub", (), {"commands_uri": "ws://127.0.0.1:51001/commands"})()
         command = runner._agent_command(
@@ -191,6 +194,10 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         index = command.index("--completion-guard")
         assert command[index + 1] == "vlm", command
         assert runner._semantic_config()["completion_guard"] == "vlm"
+        retry_index = command.index("--api-max-attempts")
+        assert command[retry_index + 1] == "6"
+        assert runner._semantic_config()["api_max_attempts"] == 6
+        assert runner._semantic_config()["max_api_requeues"] == 2
         policy_index = command.index("--context-policy")
         assert command[policy_index + 1] == "a5"
         assert runner._semantic_config()["context_policy"] == "a5"
@@ -202,6 +209,8 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         battery = json.loads((runner.output_dir / "battery.json").read_text())
         assert battery["completion_guard"] == "vlm"
         assert battery["context_policy"] == "a5"
+        assert battery["api_max_attempts"] == 6
+        assert battery["max_api_requeues"] == 2
         assert battery["ocr_url"] == "http://127.0.0.1:9100"
 
         disabled = _runner(
@@ -556,6 +565,46 @@ async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
             await sandbox.close()
             await coordinator.stop()
     print("ok  exhausted API retries requeue the logical attempt with a finite budget")
+
+
+async def test_zero_api_requeues_records_first_exhaustion() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="do not requeue")],
+                        workspace,
+                        concurrency=1,
+                        api_max_attempts=4,
+                        max_api_requeues=0,
+                    ).run(),
+                    timeout=60,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            attempt = summary["attempts"][0]
+            assert attempt["outcome"] == "api_retry_exhausted", attempt
+            assert attempt["requeues"] == 0 and attempt["api_requeues"] == 0
+            assert attempt["api_max_attempts"] == 4
+            assert attempt["max_api_requeues"] == 0
+            assert sandbox.reset_count == 1
+            manifest = json.loads(
+                (workspace / "runs" / "p1" / "try01" / "attempt.json").read_text()
+            )
+            assert manifest["api_max_attempts"] == 4
+            assert manifest["max_api_requeues"] == 0
+        finally:
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  zero API requeues records the first exhausted process")
 
 
 async def test_capture_lifecycle_follows_the_agent_process() -> None:
@@ -1303,6 +1352,7 @@ async def main() -> int:
         test_overrunning_attempt_is_killed_and_recorded,
         test_crashed_agent_still_releases_its_sandbox,
         test_api_retry_exhaustion_requeues_the_logical_attempt,
+        test_zero_api_requeues_records_first_exhaustion,
         test_capture_lifecycle_follows_the_agent_process,
         test_cancelling_runner_kills_agent_and_releases_sandbox,
         test_human_success_stops_running_and_skips_queued_siblings,

@@ -12,6 +12,7 @@ from pathlib import Path
 from sim import chime
 from sim.env import TransformAgent, init_logger
 from agent_core import token_meter
+from agent_core.llm import configure_api_retries
 from agent_core.runtime import EmbodiedAgent
 from agent_core.context_policy import resolve_context_policy
 from orchestrator.leg_runner import run_leg
@@ -98,6 +99,8 @@ class OrchestrationConfig:
     ocr_url: str | None = None
     runs_dir: str | None = None
     context_policy: str = "baseline"
+    api_max_attempts: int = 10
+    max_api_requeues: int = 3
 
 
 @dataclass
@@ -127,6 +130,7 @@ class _RunState:
 
 def _new_run_state(config):
     """Create the run directory and persist the request before external setup."""
+    configure_api_retries(config.api_max_attempts)
     policy = resolve_context_policy(config.context_policy)
     run_dir = _resolve_run_dir(
         config.run_dir, config.arm, runs_dir=config.runs_dir
@@ -435,6 +439,8 @@ def _build_summary(state, response, response_source):
         "arm": config.arm,
         "context_policy": asdict(state.policy),
         "completion_guard": config.completion_guard,
+        "api_max_attempts": config.api_max_attempts,
+        "max_api_requeues": config.max_api_requeues,
         "ocr_url": state.resolved_ocr_url,
         "run_config": {
             "arm": config.arm,
@@ -448,6 +454,8 @@ def _build_summary(state, response, response_source):
             "reset_start": config.reset_start,
             "restart_env": config.restart_env,
             "ocr_url": state.resolved_ocr_url,
+            "api_max_attempts": config.api_max_attempts,
+            "max_api_requeues": config.max_api_requeues,
         },
         "success": state.success,
         "response": response,

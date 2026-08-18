@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import ast
+import json
+import re
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -12,7 +15,7 @@ from PIL import Image
 from agent_core import token_meter
 from agent_core.context import SemanticLog
 from agent_core.context_policy import ContextPolicy, validate_context_policy
-from agent_core.llm import BaseAgent, LLMConfig, build_content
+from agent_core.llm import BaseAgent, LLMConfig, MalformedContentError, build_content
 from agent_core.sys_inst import SYS_INST_VLM_LEAN
 
 
@@ -66,8 +69,37 @@ class VLMAgent(BaseAgent):
             {"role": "system", "content": SYS_INST_VLM_LEAN},
             *self._outbound_history(),
         ]
-        with token_meter.role(token_meter.ROLE_ACTOR):
-            reply = self._api_call_with_retry(self.client, messages)
+        def validate(raw: str) -> str:
+            match = self.extractable_json_structured_output.search(raw or "")
+            blob = match.group(1) if match else str(raw or "").strip()
+            parsed = None
+            for parser in (ast.literal_eval, json.loads):
+                try:
+                    candidate = parser(blob)
+                except Exception:  # the actor contract also permits the legacy salvage form
+                    continue
+                if isinstance(candidate, dict) and "actions" in candidate:
+                    parsed = candidate
+                    break
+            if parsed is None:
+                actions = re.search(r"['\"]actions['\"]\s*:\s*\[([^\[\]]*)\]", blob, re.DOTALL)
+                times = re.search(r"['\"]times['\"]\s*:\s*\[([^\[\]]*)\]", blob, re.DOTALL)
+                action_items = re.findall(r"['\"]([^'\"]+)['\"]", actions.group(1)) if actions else []
+                time_items = re.findall(r"-?\d+", times.group(1)) if times else []
+                if not action_items or len(action_items) != len(time_items):
+                    raise MalformedContentError(
+                        "actor response did not contain usable actions and times", content=raw
+                    )
+            return raw
+
+        try:
+            with token_meter.role(token_meter.ROLE_ACTOR):
+                reply = self._api_call_with_retry(
+                    self.client, messages, call_name="actor_reasoning", validator=validate
+                )
+        except MalformedContentError as error:
+            # Preserve the existing actor-step error path after the shared budget is exhausted.
+            reply = str(error.content or "")
         self.history.append({"role": "assistant", "content": reply})
         return reply
 

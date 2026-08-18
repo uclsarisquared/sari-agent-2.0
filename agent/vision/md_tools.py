@@ -30,28 +30,42 @@ _URI = "ws://localhost:8080/commands"
 
 def _point_via_qwen(image: Image.Image, name: str):
     """Fallback pointer: qwen bbox -> center, normalized 0-1 like moondream's points."""
-    from agent_core.llm import call_with_api_retries
+    from agent_core.llm import MalformedContentError, call_with_api_retries
     from agent_core import token_meter
     from vision.perception import CLIENT, MODEL_NAME, _encode_image
     prompt = render_prompt("vision/qwen_point", TARGET_NAME=name)
     # Billed to perception, not to a role of its own: this is the same pointing job moondream was
     # doing, just on the fallback path, and an ablation of pointing wants both halves in one number.
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        resp = call_with_api_retries(
-            lambda: CLIENT.chat.completions.create(
+    def request():
+        return CLIENT.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[{"role": "user", "content": [_encode_image(image),
                                                        {"type": "text", "text": prompt}]}],
                 temperature=0.0, max_tokens=200,
-                extra_body={'chat_template_kwargs': {'enable_thinking': False}})
+                extra_body={'chat_template_kwargs': {'enable_thinking': False}}
+            ).choices[0].message.content
+
+    def validate(text):
+        if str(text or "").strip() == "[]":
+            return []
+        match = _re.search(r"\{[\s\S]*\}", text or "")
+        try:
+            box = _json.loads(match.group(0)).get("box_2d") if match else None
+            if not isinstance(box, list) or len(box) != 4:
+                raise ValueError("box_2d must contain four coordinates")
+        except (TypeError, ValueError, _json.JSONDecodeError) as error:
+            raise MalformedContentError(
+                f"pointing response was malformed: {error}", content=text
+            ) from error
+        ymin, xmin, ymax, xmax = box
+        return [{"x": (xmin + xmax) / 2000.0, "y": (ymin + ymax) / 2000.0}]
+
+    with token_meter.role(token_meter.ROLE_PERCEPTION):
+        return call_with_api_retries(
+            request,
+            call_name="perception.pointing",
+            validator=validate,
         )
-    text = resp.choices[0].message.content
-    mt = _re.search(r"\{[\s\S]*\}", text)
-    box = _json.loads(mt.group(0)).get("box_2d") if mt else None
-    if not box:
-        return []
-    ymin, xmin, ymax, xmax = box
-    return [{"x": (xmin + xmax) / 2000.0, "y": (ymin + ymax) / 2000.0}]
 
 
 def reach_item_in_view(name: str, use_right_hand: bool) -> dict:

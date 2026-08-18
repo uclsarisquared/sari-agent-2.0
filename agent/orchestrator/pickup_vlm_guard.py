@@ -9,10 +9,11 @@ import json
 import time
 
 from agent_core import token_meter
+from agent_core.llm import MalformedContentError, call_with_api_retries
 from agent_core.prompt_loader import load_prompt
 
 
-def _guard_call(client, kwargs):
+def _guard_call(client, kwargs, call_name):
     """One classifier request, billed to the `guard` role.
 
     Disables the OpenAI SDK's own automatic retries without mutating the shared actor client;
@@ -23,8 +24,28 @@ def _guard_call(client, kwargs):
     """
     request_client = (client.with_options(max_retries=0)
                       if callable(getattr(client, "with_options", None)) else client)
+    def request():
+        return request_client.chat.completions.create(**kwargs).choices[0].message.content
+
+    def validate(content):
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise MalformedContentError(
+                f"completion guard did not return JSON: {error}", content=content
+            ) from error
+        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
+                or type(parsed.get("match")) is not bool
+                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
+            raise MalformedContentError(
+                "expected a strict boolean match and non-empty string reason", content=content
+            )
+        return parsed
+
     with token_meter.role(token_meter.ROLE_GUARD):
-        return request_client.chat.completions.create(**kwargs)
+        return call_with_api_retries(
+            request, call_name=call_name, validator=validate
+        )
 
 
 GUARD_SYSTEM = load_prompt("orchestrator/pickup_guard")
@@ -92,16 +113,11 @@ def classify_pickup(client, model, config, image_b64, held_sku, target,
     if extra_body:
         kwargs["extra_body"] = extra_body
     try:
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.pickup")
         latency = (time.monotonic() - started) * 1000
         return {"match": parsed["match"], "reason": parsed["reason"].strip(),
                 "conclusive": True, "latency_ms": round(latency, 1), "sku": held_sku}
-    except Exception as exc:  # timeout, API, response shape, and JSON all fail closed; no retry
+    except Exception as exc:  # exhaustion and fail-fast errors retain the fail-closed contract
         latency = (time.monotonic() - started) * 1000
         return _refusal(f"VLM guard unavailable ({type(exc).__name__}: {exc})", latency, held_sku)
 
@@ -161,12 +177,7 @@ def classify_inspection(client, model, config, image_b64, query, answer, auxilia
     if extra_body:
         kwargs["extra_body"] = extra_body
     try:
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.inspection")
         latency = (time.monotonic() - started) * 1000
         return {"match": parsed["match"], "reason": parsed["reason"].strip(),
                 "conclusive": True, "latency_ms": round(latency, 1)}
@@ -213,12 +224,7 @@ def classify_inspection_visibility(client, model, config, image_b64, query,
     if extra_body:
         kwargs["extra_body"] = extra_body
     try:
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.inspection_visibility")
         latency = (time.monotonic() - started) * 1000
         return {
             "match": parsed["match"],
@@ -274,12 +280,7 @@ def classify_inspection_label_presence(client, model, config, image_b64, query,
     if extra_body:
         kwargs["extra_body"] = extra_body
     try:
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.inspection_label_presence")
         latency = (time.monotonic() - started) * 1000
         return {
             "match": parsed["match"],
@@ -346,12 +347,7 @@ def classify_compare(client, model, config, candidate_frames, criterion, answer,
         extra_body = getattr(config, "extra_body", None)
         if extra_body:
             kwargs["extra_body"] = extra_body
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.compare")
         latency = (time.monotonic() - started) * 1000
         return {"match": parsed["match"], "reason": parsed["reason"].strip(),
                 "conclusive": True, "latency_ms": round(latency, 1)}
@@ -394,12 +390,7 @@ def classify_unknown(client, model, config, image_b64, task, claim, auxiliary_co
     if extra_body:
         kwargs["extra_body"] = extra_body
     try:
-        response = _guard_call(client, kwargs)
-        parsed = json.loads(response.choices[0].message.content)
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise ValueError("expected a strict boolean match and non-empty string reason")
+        parsed = _guard_call(client, kwargs, "completion_guard.unknown")
         latency = (time.monotonic() - started) * 1000
         return {"match": parsed["match"], "reason": parsed["reason"].strip(),
                 "conclusive": True, "latency_ms": round(latency, 1)}

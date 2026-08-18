@@ -12,6 +12,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from vision import perception as p
+from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, configure_api_retries
 
 
 def _png_bytes():
@@ -34,6 +35,7 @@ def test_valid_empty_bbox_is_a_real_negative_without_retry():
 
 
 def test_malformed_bbox_is_retried_then_succeeds():
+    configure_api_retries(2)
     replies = iter([
         "[{'box_2d': [1, 2, 3",  # truncated
         "[{'box_2d': [100, 200, 300, 400], 'label': 'item'}]",
@@ -44,27 +46,32 @@ def test_malformed_bbox_is_retried_then_succeeds():
         calls.append(args)
         return next(replies)
 
-    with patch.object(p, "_bbox_request", request):
+    with (patch.object(p, "_bbox_request", request),
+          patch("agent_core.llm.time.sleep", return_value=None)):
         boxes = p._detect_boxes_px(object(), "target")
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
     assert len(calls) == 2
     assert boxes[0]["label"] == "item"
 
 
 def test_invalid_bbox_shape_is_retried_and_eventually_raises():
+    configure_api_retries(3)
     calls = []
 
     def request(*args):
         calls.append(args)
         return "[{'box_2d': [100, 200, 300]}]"
 
-    with patch.object(p, "_bbox_request", request):
+    with (patch.object(p, "_bbox_request", request),
+          patch("agent_core.llm.time.sleep", return_value=None)):
         try:
             p._detect_boxes_px(object(), "target")
         except p.BBoxResponseParseError as error:
-            assert "after 3 attempts" in str(error)
+            assert "four-value box_2d" in str(error)
         else:
             raise AssertionError("malformed bbox response did not raise")
-    assert len(calls) == p.DETECTION_PARSE_MAX_ATTEMPTS
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
+    assert len(calls) == 3
 
 
 def test_center_surfaces_parse_exhaustion_as_detection_error():

@@ -4,6 +4,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 _ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "agent")
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -21,6 +23,15 @@ from orchestrator.pickup_vlm_guard import (
     make_inspect_guard,
     make_unknown_guard,
 )
+from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, configure_api_retries
+
+
+@pytest.fixture(autouse=True)
+def _fast_retry_policy(monkeypatch):
+    configure_api_retries(1)
+    monkeypatch.setattr("agent_core.llm.time.sleep", lambda _delay: None)
+    yield
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
 
 
 class _Completions:
@@ -61,7 +72,19 @@ def test_valid_json_and_runtime_config():
 def test_malformed_json_fails_closed():
     result = classify_pickup(_Client("not json"), "m", CONFIG, "abc", "SKU", "target")
     assert result["match"] is False and result["conclusive"] is False
-    assert "JSONDecodeError" in result["reason"]
+    assert "MalformedContentError" in result["reason"]
+
+
+def test_malformed_json_retries_then_recovers():
+    configure_api_retries(3)
+    client = _Client(
+        "not json",
+        '{"match": "true", "reason": "wrong type"}',
+        '{"match": false, "reason": "not a match"}',
+    )
+    result = classify_pickup(client, "m", CONFIG, "abc", "SKU", "target")
+    assert result["match"] is False and result["conclusive"] is True
+    assert len(client.completions.calls) == 3
 
 
 def test_timeout_and_api_failure_fail_closed_without_retry():

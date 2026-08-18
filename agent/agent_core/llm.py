@@ -10,12 +10,12 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from loguru import logger
-from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 from PIL import Image
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout as RequestsTimeout
@@ -126,12 +126,43 @@ def build_content(*parts) -> list:
     return content
 
 
-API_MAX_ATTEMPTS = 10
-API_RETRY_DELAYS = (1, 2, 4, 8, 15, 30, 30, 30, 30)
+DEFAULT_API_MAX_ATTEMPTS = 10
+API_RETRY_DELAYS = (1, 2, 4, 8, 15)
 API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
+_api_max_attempts = DEFAULT_API_MAX_ATTEMPTS
 
 
-def _signal_api_retry_exhaustion(error: Exception) -> None:
+class MalformedContentError(ValueError):
+    """A model response arrived successfully but did not satisfy its caller's contract."""
+
+    def __init__(self, message: str, *, content: Any = None) -> None:
+        super().__init__(message)
+        self.content = content
+
+
+def configure_api_retries(max_attempts: int) -> None:
+    """Set the per-call attempt budget for this process."""
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+        raise ValueError("api max attempts must be an integer of at least 1")
+    global _api_max_attempts
+    _api_max_attempts = max_attempts
+
+
+def api_max_attempts() -> int:
+    """Return the active process-wide per-call attempt budget."""
+    return _api_max_attempts
+
+
+def api_retry_delay(retry_index: int) -> int:
+    """Return the fixed wait before retry number ``retry_index`` (zero based)."""
+    if retry_index < 0:
+        raise ValueError("retry index cannot be negative")
+    return API_RETRY_DELAYS[retry_index] if retry_index < len(API_RETRY_DELAYS) else 30
+
+
+def _signal_api_retry_exhaustion(
+    error: Exception, *, call_name: str, failure_kind: str, attempts: int
+) -> None:
     """Tell a supervising bench runner that a transient API outage exhausted its budget.
 
     Standalone runs do not set the signal path and retain their existing behavior. The distributed
@@ -148,7 +179,9 @@ def _signal_api_retry_exhaustion(error: Exception) -> None:
         f".{signal_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     )
     payload = {
-        "attempts": API_MAX_ATTEMPTS,
+        "attempts": attempts,
+        "call_name": call_name,
+        "failure_kind": failure_kind,
         "error_type": type(error).__name__,
         "error": str(error),
         "signaled_at": time.time(),
@@ -185,27 +218,74 @@ def is_transient_api_error(error: Exception) -> bool:
     return False
 
 
-def call_with_api_retries(operation):
-    """Retry transient endpoint failures and re-raise the final original error."""
-    for attempt in range(API_MAX_ATTEMPTS):
+def api_failure_kind(error: Exception) -> str | None:
+    """Normalize retryable failures for logs and Bench exhaustion diagnostics."""
+    if isinstance(error, MalformedContentError):
+        return "malformed_content"
+    if isinstance(error, (APITimeoutError, RequestsTimeout, TimeoutError)):
+        return "timeout"
+    if isinstance(error, RateLimitError):
+        return "rate_limit"
+    if isinstance(error, (APIConnectionError, RequestsConnectionError, ConnectionError)):
+        return "connection"
+    if isinstance(error, APIStatusError):
+        if error.status_code in (408, 409, 429) or error.status_code >= 500:
+            return "rate_limit" if error.status_code == 429 else "http_status"
+        return None
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and (
+        status_code in (408, 409, 429) or status_code >= 500
+    ):
+        return "rate_limit" if status_code == 429 else "http_status"
+    return None
+
+
+def call_with_api_retries(
+    operation: Callable[[], Any],
+    *,
+    call_name: str = "model_call",
+    validator: Callable[[Any], Any] | None = None,
+):
+    """Retry endpoint and malformed-content failures under one configured budget.
+
+    ``validator`` runs before an attempt is considered successful and may return a transformed
+    result. It must raise :class:`MalformedContentError` for retryable response-contract failures;
+    ordinary exceptions remain programming errors and fail immediately.
+    """
+    max_attempts = api_max_attempts()
+    for attempt in range(max_attempts):
         try:
             result = operation()
+            if validator is not None:
+                result = validator(result)
             if attempt:
-                logger.info(f"[api-retry] attempt {attempt + 1}/{API_MAX_ATTEMPTS} succeeded")
+                logger.info(
+                    f"[api-retry] call={call_name} attempt={attempt + 1}/{max_attempts} "
+                    "succeeded"
+                )
             return result
         except Exception as error:
-            remaining = API_MAX_ATTEMPTS - (attempt + 1)
-            if not is_transient_api_error(error) or attempt + 1 == API_MAX_ATTEMPTS:
-                if is_transient_api_error(error):
-                    _signal_api_retry_exhaustion(error)
+            failure_kind = api_failure_kind(error)
+            remaining = max_attempts - (attempt + 1)
+            if failure_kind is None or attempt + 1 == max_attempts:
+                if failure_kind is not None:
+                    _signal_api_retry_exhaustion(
+                        error,
+                        call_name=call_name,
+                        failure_kind=failure_kind,
+                        attempts=max_attempts,
+                    )
                 logger.error(
-                    f"[api-retry] attempt {attempt + 1}/{API_MAX_ATTEMPTS} failed "
+                    f"[api-retry] call={call_name} failure_kind={failure_kind or 'non_retryable'} "
+                    f"attempt={attempt + 1}/{max_attempts} failed "
                     f"({type(error).__name__}: {error}); giving up, {remaining} tries left"
                 )
                 raise
-            delay = API_RETRY_DELAYS[attempt]
+            delay = api_retry_delay(attempt)
             logger.warning(
-                f"[api-retry] attempt {attempt + 1}/{API_MAX_ATTEMPTS} failed "
+                f"[api-retry] call={call_name} failure_kind={failure_kind} "
+                f"attempt={attempt + 1}/{max_attempts} failed "
                 f"({type(error).__name__}: {error}); retrying in {delay}s, {remaining} tries left"
             )
             time.sleep(delay)
@@ -222,7 +302,14 @@ class BaseAgent(ABC):
     def extractable_json_structured_output(self):
         return JSON_BLOCK_PATTERN
 
-    def _api_call_with_retry(self, client: OpenAI, messages: list) -> str:
+    def _api_call_with_retry(
+        self,
+        client: OpenAI,
+        messages: list,
+        *,
+        call_name: str = "model_call",
+        validator: Callable[[str], Any] | None = None,
+    ) -> str:
         def request():
             response = client.chat.completions.create(
                 model=self.config.model_id,
@@ -233,4 +320,4 @@ class BaseAgent(ABC):
             )
             return response.choices[0].message.content
 
-        return call_with_api_retries(request)
+        return call_with_api_retries(request, call_name=call_name, validator=validator)

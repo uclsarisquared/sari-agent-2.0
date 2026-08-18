@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ast
 from dataclasses import dataclass
 from io import BytesIO
 import os
@@ -26,7 +27,7 @@ from agent_core.contracts import (
     stop_response,
 )
 from agent_core.hands import HandController
-from agent_core.llm import LLMConfig, build_content
+from agent_core.llm import LLMConfig, MalformedContentError, build_content
 from agent_core.memory_runtime import MemoryRuntime
 from agent_core.navigation import GraphNavigator
 from agent_core.sys_inst import SYS_INST_ASSOCIATIVE_EPISODIC, SYS_INST_ASSOCIATIVE_SEMANTIC
@@ -397,25 +398,70 @@ class EmbodiedAgent:
     ) -> str:
         """Run one image-aware semantic learner pass with semantic token attribution."""
         content = build_content(image, "## CURRENT OBSERVATION\n", text)
-        with token_meter.role(token_meter.ROLE_SEMANTIC):
-            return self.associative_learner._api_call_with_retry(
-                self.associative_learner.client,
-                [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": content},
-                ],
-            )
+        def validate(raw: str) -> str:
+            try:
+                parsed = ast.literal_eval(
+                    self.associative_learner.extractable_json_structured_output.search(raw).group(1)
+                    if self.associative_learner.extractable_json_structured_output.search(raw)
+                    else str(raw or "").strip()
+                )
+            except (AttributeError, SyntaxError, ValueError, TypeError) as error:
+                raise MalformedContentError(
+                    f"semantic response was not a valid mapping: {error}", content=raw
+                ) from error
+            if not isinstance(parsed, dict) or "mode" not in parsed:
+                raise MalformedContentError(
+                    "semantic response must be a mapping containing mode", content=raw
+                )
+            return raw
+
+        try:
+            with token_meter.role(token_meter.ROLE_SEMANTIC):
+                return self.associative_learner._api_call_with_retry(
+                    self.associative_learner.client,
+                    [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": content},
+                    ],
+                    call_name="semantic_reasoning",
+                    validator=validate,
+                )
+        except MalformedContentError as error:
+            # Standalone keeps the historical navigation fallback. Bench observes the exhaustion
+            # signal and terminates before this fallback can turn bad model output into a score.
+            return str(error.content or "")
 
     def _call_episodic(self, history_text: str) -> str:
         """Run one episodic-reflection pass over compact conversation history."""
-        with token_meter.role(token_meter.ROLE_EPISODIC):
-            return self.associative_learner._api_call_with_retry(
-                self.associative_learner.client,
-                [
-                    {"role": "system", "content": SYS_INST_ASSOCIATIVE_EPISODIC},
-                    {"role": "user", "content": history_text},
-                ],
-            )
+        def validate(raw: str) -> str:
+            pattern = self.associative_learner.extractable_json_structured_output
+            match = pattern.search(raw or "")
+            try:
+                parsed = ast.literal_eval(match.group(1) if match else str(raw or "").strip())
+            except (SyntaxError, ValueError, TypeError) as error:
+                raise MalformedContentError(
+                    f"episodic response was not a valid mapping: {error}", content=raw
+                ) from error
+            required = {"dense_summary", "what_worked", "what_to_avoid"}
+            if not isinstance(parsed, dict) or not required.issubset(parsed):
+                raise MalformedContentError(
+                    "episodic response is missing required reflection fields", content=raw
+                )
+            return raw
+
+        try:
+            with token_meter.role(token_meter.ROLE_EPISODIC):
+                return self.associative_learner._api_call_with_retry(
+                    self.associative_learner.client,
+                    [
+                        {"role": "system", "content": SYS_INST_ASSOCIATIVE_EPISODIC},
+                        {"role": "user", "content": history_text},
+                    ],
+                    call_name="episodic_reflection",
+                    validator=validate,
+                )
+        except MalformedContentError as error:
+            return str(error.content or "")
 
     def _semantic_prompt(self, step: StepRequest) -> str:
         """Build the learner prompt, including episodic context after the first step."""

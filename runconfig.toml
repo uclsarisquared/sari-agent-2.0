@@ -12,6 +12,12 @@
 # A step is one observe-decide-act iteration inside a leg: the agent receives a fresh observation,
 # chooses and executes an action batch, and then updates state. A leg usually contains many steps.
 
+[api_retry]
+# Total attempts per OpenAI-compatible model call, including the initial request. Retries wait
+# 1, 2, 4, 8, 15, then 30 seconds for every remaining retry. With 10 attempts the nine waits total
+# 150 seconds; request timeouts are additional. Transport and malformed-content failures share it.
+max_attempts = 10
+
 [agent]
 # Optional fixed task. Usually leave this commented and pass the prompt on the command line.
 # task = "Pick up Ritz Crackers"
@@ -59,6 +65,10 @@ restart_env = true
 # summary = "agent/runs/debug/summary.json"
 
 [bench]
+# Whole-process launches allowed after a call exhausts [api_retry].max_attempts. Three requeues
+# permit four launches in total; the next exhaustion is recorded as api_retry_exhausted.
+max_api_requeues = 3
+
 # Prompt battery and attempts per prompt.
 prompts = "sari_bench/prompts/context_window_ablation.json"
 tries = 3

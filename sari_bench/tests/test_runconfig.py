@@ -60,12 +60,16 @@ def test_loader_resolves_paths_from_the_config_and_rejects_typos(tmp_path: Path)
 navigation_strategy = "graph-advised"
 completion_guard = "none"
 
+[api_retry]
+max_attempts = 6
+
 [environment]
 map_dir = "../maps/frozen"
 
 [bench]
 prompts = "../prompts/battery.json"
 tries = 2
+max_api_requeues = 0
 """,
         encoding="utf-8",
     )
@@ -73,6 +77,8 @@ tries = 2
     config = load_run_config(config_path)
     assert config.get("agent", "navigation_strategy") == "graph-advised"
     assert config.get("agent", "completion_guard") == "none"
+    assert config.get("api_retry", "max_attempts") == 6
+    assert config.get("bench", "max_api_requeues") == 0
     assert config.get("environment", "map_dir") == str(tmp_path / "maps" / "frozen")
     assert config.get("bench", "prompts") == str(tmp_path / "prompts" / "battery.json")
 
@@ -114,6 +120,8 @@ def test_deprecated_agent_arm_key_loads_and_warns(tmp_path: Path, capsys) -> Non
         ('[agent]\nresolver_backend = "gpt"\n', "agent.resolver_backend must be one of"),
         ("[limits]\nmax_steps = true\n", "limits.max_steps must be an integer"),
         ("[bench]\ntries = 0\n", "bench.tries must be at least 1"),
+        ("[api_retry]\nmax_attempts = 0\n", "api_retry.max_attempts must be at least 1"),
+        ("[bench]\nmax_api_requeues = -1\n", "bench.max_api_requeues cannot be negative"),
         ("[mystery]\nvalue = 1\n", r"unknown section\(s\)"),
     ],
 )
@@ -140,6 +148,10 @@ arm = "vlm"
 context_policy = "a5"
 completion_guard = "vlm"
 name = "from-config"
+max_api_requeues = 1
+
+[api_retry]
+max_attempts = 7
 """,
         encoding="utf-8",
     )
@@ -155,6 +167,8 @@ name = "from-config"
             arm=runner.arm,
             context_policy=runner.context_policy,
             completion_guard=runner.completion_guard,
+            api_max_attempts=runner.api_max_attempts,
+            max_api_requeues=runner.max_api_requeues,
         )
         return {}
 
@@ -170,6 +184,10 @@ name = "from-config"
                     "graph",
                     "--context-policy",
                     "a6-2",
+                    "--api-max-attempts",
+                    "5",
+                    "--max-api-requeues",
+                    "2",
                 ]
             )
         )
@@ -183,6 +201,8 @@ name = "from-config"
         "arm": "graph",
         "context_policy": "a6-2",
         "completion_guard": "vlm",
+        "api_max_attempts": 5,
+        "max_api_requeues": 2,
     }
 
 
@@ -199,6 +219,12 @@ context_policy = "a5"
 resolver_backend = "claude-cli"
 completion_guard = "none"
 leg_retries = 3
+
+[api_retry]
+max_attempts = 7
+
+[bench]
+max_api_requeues = 2
 
 [limits]
 max_steps = 21
@@ -232,6 +258,8 @@ summary = "runs/one/result.json"
                 "--context-policy",
                 "a6-4",
                 "--no-reset-start",
+                "--api-max-attempts",
+                "4",
             ]
         )
 
@@ -242,6 +270,8 @@ summary = "runs/one/result.json"
     assert seen["resolver_backend"] == "claude-cli"
     assert seen["completion_guard"] == "none"
     assert seen["leg_retries"] == 3
+    assert seen["api_max_attempts"] == 4
+    assert seen["max_api_requeues"] == 2
     assert seen["output_dir"] == str(tmp_path / "map")
     assert seen["run_dir"] == str(tmp_path / "runs" / "one")
     assert seen["out"] == str(tmp_path / "runs" / "one" / "result.json")

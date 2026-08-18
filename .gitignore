@@ -26,3 +26,6 @@ agent/subtask_run_outputs
 agent/depth_image.png
 # Distributed Sari Bench results (one dir per battery, screenshots + JSONL inside)
 bench_runs/
+
+# Pre-refactor codebase kept locally for reference/run data, never tracked in git
+overhaul/

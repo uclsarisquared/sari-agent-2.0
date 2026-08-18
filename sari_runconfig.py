@@ -16,6 +16,9 @@ class RunConfigError(ValueError):
 
 
 _SCHEMA: dict[str, dict[str, object]] = {
+    "api_retry": {
+        "max_attempts": int,
+    },
     "agent": {
         "task": str,
         "navigation_strategy": {"vlm", "graph", "graph-advised"},
@@ -63,6 +66,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "ocr_url": str,
         "leg_retries": int,
         "completion_guard": {"deterministic", "vlm", "none"},
+        "max_api_requeues": int,
     },
 }
 
@@ -137,9 +141,9 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
             f"{path}: {label} must be {article} {name}, got {type(value).__name__}"
         )
 
-    if key in {"max_steps", "tries", "concurrency"} and value < 1:
+    if key in {"max_steps", "tries", "concurrency", "max_attempts"} and value < 1:
         raise RunConfigError(f"{path}: {label} must be at least 1")
-    if key == "leg_retries" and value < 0:
+    if key in {"leg_retries", "max_api_requeues"} and value < 0:
         raise RunConfigError(f"{path}: {label} cannot be negative")
     if key in {
         "max_minutes",

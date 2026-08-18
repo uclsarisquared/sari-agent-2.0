@@ -12,7 +12,21 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from agent_core.agent import BaseAgent, OpenRouterConfig
-from agent_core.llm import agent_vlm_config, endpoint_creds
+from agent_core.llm import (
+    DEFAULT_API_MAX_ATTEMPTS,
+    MalformedContentError,
+    agent_vlm_config,
+    call_with_api_retries,
+    configure_api_retries,
+    endpoint_creds,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_retry_policy():
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
+    yield
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
 
 
 class _Completions:
@@ -93,6 +107,8 @@ def test_api_call_raises_original_error_after_ten_attempts(monkeypatch, caplog, 
     assert caplog.records == []
     signal = json.loads(signal_path.read_text(encoding="utf-8"))
     assert signal["attempts"] == 10
+    assert signal["call_name"] == "model_call"
+    assert signal["failure_kind"] == "timeout"
     assert signal["error_type"] == "TimeoutError"
     assert signal["error"] == "server stayed down"
 
@@ -109,3 +125,34 @@ def test_non_transient_programming_error_fails_immediately(monkeypatch):
     assert raised.value is error
     assert client.completions.calls == 1
     assert sleeps == []
+
+
+def test_configurable_attempts_and_exact_capped_delay_sequence(monkeypatch):
+    configure_api_retries(10)
+    sleeps = []
+    monkeypatch.setattr("agent_core.llm.time.sleep", sleeps.append)
+    outcomes = iter([TimeoutError("down")] * 9 + ["ok"])
+
+    def operation():
+        outcome = next(outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    assert call_with_api_retries(operation, call_name="semantic") == "ok"
+    assert sleeps == [1, 2, 4, 8, 15, 30, 30, 30, 30]
+
+
+def test_malformed_content_retries_inside_same_budget(monkeypatch):
+    configure_api_retries(3)
+    monkeypatch.setattr("agent_core.llm.time.sleep", lambda _delay: None)
+    outcomes = iter(["bad", "still bad", "valid"])
+
+    def validate(content):
+        if content != "valid":
+            raise MalformedContentError("invalid JSON", content=content)
+        return content
+
+    assert call_with_api_retries(
+        lambda: next(outcomes), call_name="resolver", validator=validate
+    ) == "valid"

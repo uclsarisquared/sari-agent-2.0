@@ -60,7 +60,8 @@ TERMINATE_GRACE_SECONDS = 20.0
 # An attempt whose sandbox died is retried this many times before being recorded as failed. Guards
 # against a permanently sick machine turning into an infinite requeue loop.
 MAX_SANDBOX_LOST_REQUEUES = 3
-MAX_API_EXHAUSTED_REQUEUES = 3
+DEFAULT_MAX_API_REQUEUES = 3
+DEFAULT_API_MAX_ATTEMPTS = 10
 API_RETRY_EXHAUSTED_SIGNAL = "api_retry_exhausted.json"
 API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
@@ -148,6 +149,9 @@ class AttemptResult:
     wall_seconds: float = 0.0
     run_dir: str = ""
     requeues: int = 0
+    api_requeues: int = 0
+    api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS
+    max_api_requeues: int = DEFAULT_MAX_API_REQUEUES
     error: str = ""
     winning_attempt_key: str = ""
     legs: dict[str, Any] = field(default_factory=dict)
@@ -218,6 +222,8 @@ class BenchmarkRunner:
         map_dir: str | None,
         leg_retries: int,
         completion_guard: str = "deterministic",
+        api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
+        max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
         context_policy: str = "baseline",
         per_leg_minutes: float | None = None,
         timeout_grace: float = DEFAULT_TIMEOUT_GRACE_SECONDS,
@@ -256,6 +262,12 @@ class BenchmarkRunner:
         if completion_guard not in {"deterministic", "vlm", "none"}:
             raise ValueError(f"unsupported completion guard: {completion_guard!r}")
         self.completion_guard = completion_guard
+        if api_max_attempts < 1:
+            raise ValueError("api_max_attempts must be at least 1")
+        if max_api_requeues < 0:
+            raise ValueError("max_api_requeues cannot be negative")
+        self.api_max_attempts = api_max_attempts
+        self.max_api_requeues = max_api_requeues
         self.timeout_grace = timeout_grace
         self.sandbox_startup_timeout = sandbox_startup_timeout
         self.capture_interval = capture_interval
@@ -271,7 +283,7 @@ class BenchmarkRunner:
         self.ocr_url = resolve_ocr_url(ocr_url)
         self.ocr_health_check = ocr_health_check
 
-        self._queue: asyncio.Queue[tuple[str, int, int]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, int, int, int]] = asyncio.Queue()
         self._results: list[AttemptResult] = []
         self._results_lock = asyncio.Lock()
         self._started_at = 0.0
@@ -307,7 +319,7 @@ class BenchmarkRunner:
         for prompt_id, attempt in work_items:
             if prompt_id not in self.prompts:
                 raise ValueError(f"unknown work-item prompt: {prompt_id}")
-            self._queue.put_nowait((prompt_id, attempt, 0))
+            self._queue.put_nowait((prompt_id, attempt, 0, 0))
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         total = self._queue.qsize()
@@ -474,6 +486,8 @@ class BenchmarkRunner:
             "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
             "leg_retries": self.leg_retries,
             "completion_guard": self.completion_guard,
+            "api_max_attempts": self.api_max_attempts,
+            "max_api_requeues": self.max_api_requeues,
             "ocr_url": self.ocr_url,
             "timeout_grace_seconds": self.timeout_grace,
             "agent_entry": self.agent_entry,
@@ -493,6 +507,10 @@ class BenchmarkRunner:
                 return "baseline"
             if key == "ocr_url" and key not in battery:
                 return resolve_ocr_url()
+            if key == "api_max_attempts" and key not in battery:
+                return DEFAULT_API_MAX_ATTEMPTS
+            if key == "max_api_requeues" and key not in battery:
+                return DEFAULT_MAX_API_REQUEUES
             return battery.get(key)
 
         mismatches = [
@@ -543,6 +561,15 @@ class BenchmarkRunner:
         result.wall_seconds = float(manifest.get("wall_seconds") or 0.0)
         result.run_dir = str(run_dir)
         result.requeues = int(manifest.get("requeues") or 0)
+        result.api_requeues = int(manifest.get("api_requeues") or 0)
+        result.api_max_attempts = int(
+            manifest.get("api_max_attempts") or self.api_max_attempts
+        )
+        result.max_api_requeues = int(
+            manifest.get("max_api_requeues")
+            if manifest.get("max_api_requeues") is not None
+            else self.max_api_requeues
+        )
         result.winning_attempt_key = str(manifest.get("winning_attempt_key") or "")
         return result
 
@@ -821,6 +848,8 @@ class BenchmarkRunner:
                 "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
                 "leg_retries": self.leg_retries,
                 "completion_guard": self.completion_guard,
+                "api_max_attempts": self.api_max_attempts,
+                "max_api_requeues": self.max_api_requeues,
                 "ocr_url": self.ocr_url,
                 "timeout_grace_seconds": self.timeout_grace,
                 "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
@@ -855,7 +884,8 @@ class BenchmarkRunner:
     async def _worker(self, index: int) -> None:
         """One worker owns one coordinator connection, and therefore one lease at a time."""
         while True:
-            prompt_id, attempt, requeues = await self._queue.get()
+            prompt_id, attempt, api_requeues, sandbox_requeues = await self._queue.get()
+            requeues = api_requeues + sandbox_requeues
             try:
                 winner = self._human_verified_winner(prompt_id)
                 if winner is not None:
@@ -865,7 +895,9 @@ class BenchmarkRunner:
                         f"{winner['winning_attempt_key']} is human-verified successful"
                     )
                     continue
-                await self._run_attempt(index, prompt_id, attempt, requeues)
+                await self._run_attempt(
+                    index, prompt_id, attempt, api_requeues, sandbox_requeues
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - one bad attempt must not stop the battery
@@ -884,8 +916,16 @@ class BenchmarkRunner:
             finally:
                 self._queue.task_done()
 
-    async def _run_attempt(self, index: int, prompt_id: str, attempt: int, requeues: int) -> None:
+    async def _run_attempt(
+        self,
+        index: int,
+        prompt_id: str,
+        attempt: int,
+        api_requeues: int,
+        sandbox_requeues: int,
+    ) -> None:
         prompt = self.prompts[prompt_id]
+        requeues = api_requeues + sandbox_requeues
         run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
 
         async with CoordinatorClient(self.coordinator_url) as client:
@@ -908,11 +948,15 @@ class BenchmarkRunner:
 
             started = time.monotonic()
             try:
-                result = await self._spawn_agent(client, lease, prompt, attempt, run_dir)
+                result = await self._spawn_agent(
+                    client, lease, prompt, attempt, run_dir,
+                    api_requeues=api_requeues,
+                    sandbox_requeues=sandbox_requeues,
+                )
             except ApiRetriesExhausted as exhausted:
                 # Endpoint availability is infrastructure state, not an agent result. Preserve the
                 # failed process as an archive and retry the same logical attempt after reset.
-                if requeues < MAX_API_EXHAUSTED_REQUEUES:
+                if api_requeues < self.max_api_requeues:
                     _patch_json(
                         run_dir / ATTEMPT_MANIFEST,
                         {
@@ -925,7 +969,9 @@ class BenchmarkRunner:
                     _log(
                         f"[w{index}] {prompt_id} try {attempt}: {exhausted}; requeueing"
                     )
-                    self._queue.put_nowait((prompt_id, attempt, requeues + 1))
+                    self._queue.put_nowait(
+                        (prompt_id, attempt, api_requeues + 1, sandbox_requeues)
+                    )
                     return
                 result = self._result_from_run_dir(
                     prompt,
@@ -937,9 +983,11 @@ class BenchmarkRunner:
                 result.error = str(exhausted)
             except SandboxLost as lost:
                 # The machine went away, not the agent. Put the attempt back rather than scoring it.
-                if requeues < MAX_SANDBOX_LOST_REQUEUES:
+                if sandbox_requeues < MAX_SANDBOX_LOST_REQUEUES:
                     _log(f"[w{index}] {prompt_id} try {attempt}: {lost}; requeueing")
-                    self._queue.put_nowait((prompt_id, attempt, requeues + 1))
+                    self._queue.put_nowait(
+                        (prompt_id, attempt, api_requeues, sandbox_requeues + 1)
+                    )
                     return
                 result = AttemptResult(
                     prompt_id=prompt_id,
@@ -960,6 +1008,9 @@ class BenchmarkRunner:
             result.ocr_url = self.ocr_url
             result.wall_seconds = round(time.monotonic() - started, 1)
             result.requeues = requeues
+            result.api_requeues = api_requeues
+            result.api_max_attempts = self.api_max_attempts
+            result.max_api_requeues = self.max_api_requeues
             result.run_dir = str(run_dir)
             if _manifest_field(run_dir / ATTEMPT_MANIFEST, "stop_reason") == ALREADY_SUCCESSFUL:
                 result.end_reason = ALREADY_SUCCESSFUL
@@ -980,6 +1031,10 @@ class BenchmarkRunner:
                     "tokens_in": result.tokens_in,
                     "tokens_out": result.tokens_out,
                     "api_calls": result.api_calls,
+                    "requeues": result.requeues,
+                    "api_requeues": result.api_requeues,
+                    "api_max_attempts": self.api_max_attempts,
+                    "max_api_requeues": self.max_api_requeues,
                     "tokens_by_role": result.tokens_by_role,
                     "ended_at": datetime.now().isoformat(timespec="seconds"),
                 },
@@ -1003,6 +1058,9 @@ class BenchmarkRunner:
         prompt: Prompt,
         attempt: int,
         run_dir: Path,
+        *,
+        api_requeues: int = 0,
+        sandbox_requeues: int = 0,
     ) -> AttemptResult:
         self._rotate_run_dir(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1016,6 +1074,7 @@ class BenchmarkRunner:
         # How the agent finds its sandbox. sim/env.py reads this for every command's default URI.
         env["SARI_WS_URI"] = lease.commands_uri
         env["SARI_OCR_URL"] = self.ocr_url
+        env["SARI_MAX_API_REQUEUES"] = str(self.max_api_requeues)
         api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
         env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)
         if self.map_dir:
@@ -1042,6 +1101,10 @@ class BenchmarkRunner:
                 "arm": self.arm,
                 "context_policy": self.context_policy,
                 "completion_guard": self.completion_guard,
+                "api_max_attempts": self.api_max_attempts,
+                "max_api_requeues": self.max_api_requeues,
+                "api_requeues": api_requeues,
+                "sandbox_requeues": sandbox_requeues,
                 "ocr_url": self.ocr_url,
                 "sandbox_id": lease.sandbox_id,
                 "commands_uri": lease.commands_uri,
@@ -1202,12 +1265,17 @@ class BenchmarkRunner:
         except (OSError, ValueError):
             return "transient API retry budget exhausted"
         attempts = payload.get("attempts")
+        call_name = payload.get("call_name") or "model_call"
+        failure_kind = payload.get("failure_kind") or "unknown"
         error_type = payload.get("error_type") or "API error"
         error = payload.get("error") or "transient endpoint failure"
         prefix = f"transient API retry budget exhausted after {attempts} attempts" if attempts else (
             "transient API retry budget exhausted"
         )
-        return f"{prefix} ({error_type}: {error})"
+        return (
+            f"{prefix} (call={call_name}, failure_kind={failure_kind}, "
+            f"{error_type}: {error})"
+        )
 
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""
@@ -1291,6 +1359,8 @@ class BenchmarkRunner:
                 "attempt": attempt,
                 "arm": self.arm,
                 "context_policy": self.context_policy,
+                "api_max_attempts": self.api_max_attempts,
+                "max_api_requeues": self.max_api_requeues,
                 "ocr_url": self.ocr_url,
                 "run_dir": str(run_dir),
                 "state": "finished",
@@ -1372,6 +1442,8 @@ class BenchmarkRunner:
             str(self.leg_retries),
             "--completion-guard",
             self.completion_guard,
+            "--api-max-attempts",
+            str(self.api_max_attempts),
             "--ws-uri",
             lease.commands_uri,
             "--ocr-url",
@@ -1495,6 +1567,8 @@ class BenchmarkRunner:
     async def _record(self, result: AttemptResult) -> None:
         async with self._results_lock:
             result.context_policy = self.context_policy
+            result.api_max_attempts = self.api_max_attempts
+            result.max_api_requeues = self.max_api_requeues
             self._results.append(result)
             # Written incrementally and atomically so an interrupted battery remains usable, while
             # one logical prompt/attempt slot always has exactly one canonical row.
@@ -1599,6 +1673,8 @@ class BenchmarkRunner:
             "max_steps": self.max_steps,
             "arm": self.arm,
             "context_policy": self.context_policy,
+            "api_max_attempts": self.api_max_attempts,
+            "max_api_requeues": self.max_api_requeues,
             "total_attempts": len(results),
             "total_successes": sum(1 for r in results if r.success),
             "tokens_in": total_in,
@@ -1640,6 +1716,9 @@ async def async_main(argv: list[str] | None = None) -> int:
 
     def configured(key: str, fallback: Any = None) -> Any:
         return config.get("bench", key, fallback) if config else fallback
+
+    def api_configured(key: str, fallback: Any = None) -> Any:
+        return config.get("api_retry", key, fallback) if config else fallback
 
     parser = argparse.ArgumentParser(description="Run a prompt battery across a sandbox fleet.")
     parser.add_argument(
@@ -1730,6 +1809,18 @@ async def async_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--leg-retries", type=int, default=configured("leg_retries", 1))
     parser.add_argument(
+        "--api-max-attempts",
+        type=int,
+        default=api_configured("max_attempts", DEFAULT_API_MAX_ATTEMPTS),
+        help="total attempts per OpenAI-compatible model call, including the initial request",
+    )
+    parser.add_argument(
+        "--max-api-requeues",
+        type=int,
+        default=configured("max_api_requeues", DEFAULT_MAX_API_REQUEUES),
+        help="whole-process requeues after one model call exhausts its attempt budget",
+    )
+    parser.add_argument(
         "--completion-guard",
         choices=["deterministic", "vlm", "none"],
         default=configured("completion_guard", "deterministic"),
@@ -1754,6 +1845,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         parser.error("--sandbox-startup-timeout cannot be negative")
     if args.capture_interval < 0:
         parser.error("--capture-interval cannot be negative")
+    if args.api_max_attempts < 1:
+        parser.error("--api-max-attempts must be at least 1")
+    if args.max_api_requeues < 0:
+        parser.error("--max-api-requeues cannot be negative")
     if args.resume and args.output_dir is None:
         parser.error("--resume requires an explicit --output-dir")
     if args.map_dir:
@@ -1793,6 +1888,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         map_dir=args.map_dir,
         leg_retries=max(0, args.leg_retries),
         completion_guard=args.completion_guard,
+        api_max_attempts=args.api_max_attempts,
+        max_api_requeues=args.max_api_requeues,
         ocr_url=args.ocr_url,
         sandbox_startup_timeout=args.sandbox_startup_timeout,
         capture_interval=args.capture_interval,

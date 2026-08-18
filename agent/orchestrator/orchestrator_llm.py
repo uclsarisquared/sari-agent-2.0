@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from agent_core import token_meter
-from agent_core.llm import call_with_api_retries, agent_vlm_config
+from agent_core.llm import MalformedContentError, call_with_api_retries, agent_vlm_config
 from agent_core.context_policy import ContextPolicy
 from agent_core.models import agent_model
 from agent_core.prompt_loader import load_prompt
@@ -37,13 +37,13 @@ def _llm_client() -> OpenAI:
     return OpenAI(base_url=f"{endpoint}/v1", api_key=key, max_retries=0)
 
 
-def _llm_call(client: OpenAI, system: str, user: str, role: str) -> str:
+def _llm_call(client: OpenAI, system: str, user: str, role: str, validator=None) -> str:
     """One orchestrator-level completion. `role` is which reasoner to bill it to - this helper serves
     the decomposer, findings reporter, and final responder, which are separately measurable, so the
     caller must say which one it is rather than letting them pool into one unreadable number."""
     with token_meter.role(role):
-        resp = call_with_api_retries(
-            lambda: client.chat.completions.create(
+        def request():
+            response = client.chat.completions.create(
                 model=ORCHESTRATOR_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -52,8 +52,18 @@ def _llm_call(client: OpenAI, system: str, user: str, role: str) -> str:
                 temperature=0.3,
                 timeout=120,
             )
+            return response.choices[0].message.content
+
+        def validate(content):
+            if not isinstance(content, str) or not content.strip():
+                raise MalformedContentError("model response was empty", content=content)
+            return validator(content) if validator is not None else content
+
+        return call_with_api_retries(
+            request,
+            call_name=role,
+            validator=validate,
         )
-    return resp.choices[0].message.content
 
 
 def decompose_task(client: OpenAI, task: str) -> list:
@@ -63,7 +73,32 @@ def decompose_task(client: OpenAI, task: str) -> list:
     goto); any untypeable element degrades to `{"type": "unknown"}` inside parse_decomposition, which
     run_leg then handles with the OLD keyword guards. The A/B that validated this prompt lives in
     validation/evals/decomposition.py (11/11 clean on the four-family battery, 2026-07-23)."""
-    raw = _llm_call(client, TYPED_DECOMPOSER_SYSTEM, f"Task: {task}", token_meter.ROLE_DECOMPOSER)
+    def validate(raw):
+        import re
+
+        match = re.search(r"\[[\s\S]*\]", raw or "")
+        try:
+            items = json.loads(match.group(0)) if match else None
+        except (json.JSONDecodeError, ValueError) as error:
+            raise MalformedContentError(
+                f"decomposition was not valid JSON: {error}", content=raw
+            ) from error
+        if not isinstance(items, list) or not items:
+            raise MalformedContentError(
+                "decomposition must be a non-empty JSON array", content=raw
+            )
+        return raw
+
+    try:
+        raw = _llm_call(
+            client,
+            TYPED_DECOMPOSER_SYSTEM,
+            f"Task: {task}",
+            token_meter.ROLE_DECOMPOSER,
+            validator=validate,
+        )
+    except MalformedContentError as error:
+        raw = str(error.content or "")
     subtasks = parse_decomposition(raw, task)
     if any(s.get("type") == "unknown" for s in subtasks):
         print("[WARN] Decomposition had untypeable element(s) — those legs fall back to keyword guards "
