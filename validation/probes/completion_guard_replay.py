@@ -142,7 +142,7 @@ def main():
     parser.add_argument("--out", required=True, help="result report JSON to write")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--api-key", default=None)
-    parser.add_argument("--model", default=None, help="defaults to $SARI_MODEL")
+    parser.add_argument("--model", default=None, help="defaults to $OPENAI_MODEL")
     args = parser.parse_args()
     run(args.manifest, args.out, args.base_url, args.api_key, args.model)
 

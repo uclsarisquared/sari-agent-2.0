@@ -79,7 +79,7 @@ CWD-relative by `agent_core.agent`; run everything from `agent/`).
   first — quality was only ever measured on sonnet. The AGENT RUNTIME (per-step VLM/learner calls)
   runs against an **OpenAI API compatible endpoint** (`$OPENAI_API_URL/v1`, bearer
   `$OPENAI_API_KEY`) — OpenRouter was retired for agent calls when its credits ran out.
-- **Model ids are config, not code.** `$SARI_MODEL` (and `$SARI_ANNOTATOR_MODEL` for the qwen
+- **Model ids are config, not code.** `$OPENAI_MODEL` (and `$OPENAI_ANNOTATOR_MODEL` for the qwen
   annotator backend) in the repo-root `config.env` select what the endpoint is asked for; code
   reads them via `agent_core/models.py`, which holds the ONLY hardcoded default in the tree
   (`Qwen/Qwen3.6-27B`, the measured baseline). Don't reintroduce model literals at call sites.

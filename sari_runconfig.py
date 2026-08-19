@@ -23,7 +23,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "task": str,
         "navigation_strategy": {"vlm", "graph", "graph-advised"},
         "context_policy": set(CONTEXT_POLICY_NAMES),
-        # "endpoint" = the configured OpenAI-compatible endpoint on $SARI_MODEL (renamed from
+        # "endpoint" = the configured OpenAI-compatible endpoint on $OPENAI_MODEL (renamed from
         # "qwen" 2026-08-05: the model is config, not a vendor, so the value now names the
         # transport like its sibling does). The old spelling still loads - see
         # _DEPRECATED_VALUES.
@@ -76,7 +76,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
 # rather than failing: an old battery config should still run, just noisily.
 _DEPRECATED_VALUES: dict[tuple[str, str], dict[str, str]] = {
     # 2026-08-05: the resolver's endpoint backend was named after the model that happened to be
-    # behind the endpoint. The model is $SARI_MODEL's business, so the value names the transport.
+    # behind the endpoint. The model is $OPENAI_MODEL's business, so the value names the transport.
     ("agent", "resolver_backend"): {"qwen": "endpoint"},
 }
 

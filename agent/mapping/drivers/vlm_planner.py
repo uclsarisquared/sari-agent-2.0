@@ -113,7 +113,7 @@ from annotate_probe import image_content_block, resolve_api_key, resolve_base_ur
 from agent_core.models import agent_model  # noqa: E402
 from agent_core.prompt_loader import load_prompt  # noqa: E402
 
-DEFAULT_MODEL = agent_model()  # $SARI_MODEL in config.env
+DEFAULT_MODEL = agent_model()  # $OPENAI_MODEL in config.env
 
 # Distance sanity bound on a proposed waypoint, in meters. Not a correction - a classification.
 # A* waypoints are line-of-sight hops off a simplified path and are never absurd; a VLM asked for

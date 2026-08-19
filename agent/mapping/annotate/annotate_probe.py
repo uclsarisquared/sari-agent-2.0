@@ -19,7 +19,7 @@ and the two most informative inputs are already on disk from the capture walk:
            Stage 1 exists for; ~40% of shelf checkpoints look like this.
 
 Endpoint: an OpenAI API compatible server over Chat Completions at <OPENAI_API_URL>/v1.
-Model id comes from $SARI_ANNOTATOR_MODEL (falling back to $SARI_MODEL) in the repo-root config.env.
+Model id comes from $OPENAI_ANNOTATOR_MODEL (falling back to $OPENAI_MODEL) in the repo-root config.env.
 """
 import argparse
 import base64
@@ -53,7 +53,7 @@ from annotator_sys_inst import (  # noqa: E402
 from agent_core.models import annotator_model  # noqa: E402
 from agent_core.llm import normalize_endpoint_root  # noqa: E402
 
-DEFAULT_MODEL = annotator_model()  # $SARI_ANNOTATOR_MODEL / $SARI_MODEL in config.env
+DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in config.env
 
 
 def image_content_block(model, mime_type, base64_data):

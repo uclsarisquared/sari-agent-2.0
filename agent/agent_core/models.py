@@ -5,12 +5,16 @@ bearer `$OPENAI_API_KEY`) — nothing here is tied to a particular vendor or hos
 endpoint should be asked for is configuration, not a code constant, so it lives in the repo-root
 `config.env`:
 
-    SARI_MODEL            the model every agent-runtime reasoner uses (orchestrator, actor,
-                          associative memory, perception, item resolver, planners, probes)
-    SARI_ANNOTATOR_MODEL  the offline annotator's model when it runs on the OpenAI-compatible
-                          endpoint (`--backend qwen`); falls back to SARI_MODEL when unset.
-                          The `claude-cli` annotator backend is unaffected — it carries its own
-                          `--model` (sonnet, the frozen quality baseline; see CLAUDE.md).
+    OPENAI_MODEL            the model every agent-runtime reasoner uses (orchestrator, actor,
+                            associative memory, perception, item resolver, planners, probes)
+    OPENAI_ANNOTATOR_MODEL  the offline annotator's model when it runs on the OpenAI-compatible
+                            endpoint (`--backend qwen`); falls back to OPENAI_MODEL when unset.
+                            The `claude-cli` annotator backend is unaffected — it carries its own
+                            `--model` (sonnet, the frozen quality baseline; see CLAUDE.md).
+
+Both are named for the OpenAI Chat Completions `model` request field they populate, and pair with
+the `$OPENAI_API_URL`/`$OPENAI_API_KEY` that address the endpoint (renamed from `SARI_MODEL` /
+`SARI_ANNOTATOR_MODEL` 2026-08-18; the old names are no longer read anywhere).
 
 `DEFAULT_MODEL` below is the fallback for a checkout with no `config.env` entry, and is the ONLY
 model id hardcoded in the tree. Point the endpoint somewhere else by setting the env var; no code
@@ -29,16 +33,16 @@ from dotenv import load_dotenv
 # __file__ so it loads regardless of CWD or checkout location. Mirrors agent_core.agent.
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
 
-# The one hardcoded model id in the tree; SARI_MODEL in config.env overrides it.
+# The one hardcoded model id in the tree; OPENAI_MODEL in config.env overrides it.
 DEFAULT_MODEL = "Qwen/Qwen3.6-27B"
 
 
 def agent_model() -> str:
-    """The model every agent-runtime reasoner asks the endpoint for ($SARI_MODEL)."""
-    return os.getenv("SARI_MODEL") or DEFAULT_MODEL
+    """The model every agent-runtime reasoner asks the endpoint for ($OPENAI_MODEL)."""
+    return os.getenv("OPENAI_MODEL") or DEFAULT_MODEL
 
 
 def annotator_model() -> str:
-    """The offline annotator's model on the OpenAI-compatible endpoint ($SARI_ANNOTATOR_MODEL,
+    """The offline annotator's model on the OpenAI-compatible endpoint ($OPENAI_ANNOTATOR_MODEL,
     defaulting to the agent model)."""
-    return os.getenv("SARI_ANNOTATOR_MODEL") or agent_model()
+    return os.getenv("OPENAI_ANNOTATOR_MODEL") or agent_model()

@@ -27,7 +27,7 @@ _CP_RE = re.compile(r'(?:checkpoint|cp)\s*#?\s*(\d+)', re.IGNORECASE)
 def make_resolve_call(backend: str = "endpoint"):
     """A resolver callable matching agent._graph_navigate's shape: (system, prompt, schema, images)
     -> (dict, envelope). Default 'endpoint' - the configured OpenAI-compatible endpoint on
-    $SARI_MODEL, i.e. the same model the rest of the run uses; 'claude-cli' is the annotator path,
+    $OPENAI_MODEL, i.e. the same model the rest of the run uses; 'claude-cli' is the annotator path,
     not the agent's, so only pass it deliberately."""
     from nav import locate_task
     return locate_task.backend_callable(backend)

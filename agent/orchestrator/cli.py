@@ -66,7 +66,7 @@ def main(argv=None):
                                                    source="--resolver-backend"),
                     default=configured("agent", "resolver_backend", "endpoint"),
                     help="plan-time map target resolver. 'endpoint' (default) uses the configured "
-                         "OpenAI-compatible endpoint on $SARI_MODEL - the same model as the rest of "
+                         "OpenAI-compatible endpoint on $OPENAI_MODEL - the same model as the rest of "
                          "the run; 'claude-cli' shells out to `claude -p` instead. ('qwen' is a "
                          "DEPRECATED alias for 'endpoint'.)")
     ap.add_argument("--completion-guard", choices=["deterministic", "vlm", "none"],

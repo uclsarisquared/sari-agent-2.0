@@ -16,7 +16,7 @@ from orchestrator.subtask_completion import TYPED_DECOMPOSER_SYSTEM, parse_decom
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
 
 
-ORCHESTRATOR_MODEL = agent_model()  # $SARI_MODEL in config.env (OpenRouter retired 2026-07-19)
+ORCHESTRATOR_MODEL = agent_model()  # $OPENAI_MODEL in config.env (OpenRouter retired 2026-07-19)
 
 # Every reasoner runs on the OpenAI API compatible endpoint from config.env (OpenRouter fully
 # retired 2026-07-21). agent_vlm_config carries the load-bearing enable_thinking=False +

@@ -245,7 +245,7 @@ class PipelineApp:
             backend = self.ann_backend.get()
             flags = ["--backend", backend]
             if backend == "claude-cli":
-                # model/effort apply to claude only; qwen uses its own default ($SARI_ANNOTATOR_MODEL).
+                # model/effort apply to claude only; qwen uses its own default ($OPENAI_ANNOTATOR_MODEL).
                 flags += ["--model", self.ann_model.get(), "--effort", self.ann_effort.get()]
             jobs = self.ann_jobs.get().strip()
             if jobs and jobs != "0":  # 0/blank = let annotate_pass pick the backend default (8/4)

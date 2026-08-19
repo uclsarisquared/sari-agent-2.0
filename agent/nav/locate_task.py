@@ -18,7 +18,7 @@ Backends (--backend):
   claude-cli  (default) `claude -p` - same billing path as annotate_pass: the claude.ai
               subscription, NOT API credits. Do not switch silently (CLAUDE.md).
   qwen        the OpenAI API compatible endpoint (Chat Completions at $OPENAI_API_URL/v1);
-              model id from $SARI_MODEL. Credentials come from the repo-root config.env.
+              model id from $OPENAI_MODEL. Credentials come from the repo-root config.env.
 
 Outputs land in --run-dir: every screenshot, every verifier verdict, locate_report.json.
 """
@@ -188,7 +188,7 @@ def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="
 def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
               base_url=None, api_key=None):
     """One logical Chat Completions call against the configured endpoint -> (dict, envelope-ish).
-    `model` defaults to $SARI_MODEL. MEASURED (see CLAUDE.md): vLLM has silently ignored
+    `model` defaults to $OPENAI_MODEL. MEASURED (see CLAUDE.md): vLLM has silently ignored
     guided_json before - the schema is stated in the prompt AND parsed defensively, never
     trusted to be enforced server-side. The endpoint requires a bearer key
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside

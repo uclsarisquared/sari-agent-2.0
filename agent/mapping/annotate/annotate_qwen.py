@@ -50,7 +50,7 @@ from annotator_sys_inst import (  # noqa: E402
     build_annotation_instructions, schema_for, effective_kind,
 )
 
-DEFAULT_MODEL = annotator_model()  # $SARI_ANNOTATOR_MODEL / $SARI_MODEL in config.env
+DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in config.env
 DEFAULT_TIMEOUT_S = 300.0
 _MAX_TOKENS = 4096
 _RETRIES = 2

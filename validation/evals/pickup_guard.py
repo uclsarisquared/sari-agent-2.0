@@ -28,7 +28,7 @@ DEFAULT_FRAME = (
 )
 DEFAULT_SKU = "LESLIE_S_CLOVER_CHIPS_CHEESE_24G"
 DEFAULT_TARGET = "Clover Chips"
-DEFAULT_MODEL = agent_model()  # $SARI_MODEL in config.env
+DEFAULT_MODEL = agent_model()  # $OPENAI_MODEL in config.env
 
 
 def _client(base_url=None, api_key=None):

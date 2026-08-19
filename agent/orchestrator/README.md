@@ -8,7 +8,7 @@ summary carried forward between legs.
 ## Prerequisites
 
 - The Unity sim must be in **Play mode**.
-- The OpenAI API compatible endpoint must be reachable (credentials and `$SARI_MODEL` are loaded
+- The OpenAI API compatible endpoint must be reachable (credentials and `$OPENAI_MODEL` are loaded
   from `config.env` at the repository root).
 - Run from the `agent` directory:
 
@@ -43,7 +43,7 @@ prompts for it interactively.
 | `--max-minutes M` | `0` | Wall-clock cap per leg, in minutes; `0` means no limit |
 | `--leg-retries N` | `1` | How many times a failed leg is retried (with the failure reason fed into the retry's context) before the whole task aborts; `0` restores abort-on-first-failure |
 | `--api-max-attempts N` | `10` | Total attempts per OpenAI-compatible model call, including the initial request. Transport and malformed structured responses share this budget |
-| `--resolver-backend {endpoint, claude-cli}` | `endpoint` | Backend for the plan-time map target resolver. `endpoint` is the configured OpenAI-compatible endpoint on `$SARI_MODEL` — the same model the rest of the run uses; `claude-cli` shells out to `claude -p` instead. `qwen` is a deprecated alias for `endpoint` — accepted, but it warns and will be removed |
+| `--resolver-backend {endpoint, claude-cli}` | `endpoint` | Backend for the plan-time map target resolver. `endpoint` is the configured OpenAI-compatible endpoint on `$OPENAI_MODEL` — the same model the rest of the run uses; `claude-cli` shells out to `claude -p` instead. `qwen` is a deprecated alias for `endpoint` — accepted, but it warns and will be removed |
 | `--completion-guard {deterministic,vlm,none}` | `deterministic` | Completion verification backend. `none` runs no completion verifier and accepts an explicit STOP; it also disables the completion nudge/backstop |
 | `--output-dir DIR` | `mapping/output` | Which mapping map (topology / annotations / grid) to load — defaults to the frozen baseline map |
 | `--run-dir DIR` | auto | Directory for this run's logs and per-step screenshots |

@@ -424,7 +424,7 @@ def write_derived_outputs(annotations, topology, ann_path, prod_path, map_path,
 
 def run(args):
     # Resolve the backend: its annotate() and its default model. --model overrides the default,
-    # so `--backend qwen` without --model uses $SARI_ANNOTATOR_MODEL, not sonnet.
+    # so `--backend qwen` without --model uses $OPENAI_ANNOTATOR_MODEL, not sonnet.
     annotate_fn = resolve_annotate_fn(args)
 
     topo_path = os.path.join(args.output_dir, f"topology_{args.topology_tag}.json")
