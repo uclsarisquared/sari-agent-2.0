@@ -91,7 +91,7 @@ name = ""
 resume = false
 
 # Maximum parallel attempts. If omitted, concurrency fills the registered sandbox fleet.
-# concurrency = 4
+concurrency = 5
 
 # Supplementary screenshot interval in seconds. Zero disables supplementary capture.
 capture_interval = 0.25
