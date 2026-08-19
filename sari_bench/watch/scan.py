@@ -63,6 +63,7 @@ class AttemptView:
 
     state: str = "unknown"        # starting | running | finished | requeued | orphaned
     outcome: str = ""
+    pending_retry: bool = False
     success: bool = False
     end_reason: str = ""
     exit_code: int | None = None
@@ -402,6 +403,7 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
         run_dir=str(run_dir),
         state=str(manifest.get("state") or "unknown"),
         outcome=outcome,
+        pending_retry=bool(manifest.get("pending_retry", False)),
         # Repair old affected manifests at read time as well as preventing new ones in the runner.
         success=bool(manifest.get("success")) if outcome == "completed" else False,
         end_reason=str(manifest.get("end_reason") or ""),
@@ -621,7 +623,11 @@ def scan_battery(battery: Path, now: float, *, discovered: list[Path] | None = N
 
     counts: dict[str, int] = {}
     for attempt in attempts:
-        bucket = attempt.outcome if attempt.state == "finished" else attempt.state
+        bucket = (
+            "pending_retry"
+            if attempt.pending_retry
+            else (attempt.outcome if attempt.state == "finished" else attempt.state)
+        )
         counts[bucket] = counts.get(bucket, 0) + 1
         if attempt.success:
             counts["success"] = counts.get("success", 0) + 1

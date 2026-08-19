@@ -723,6 +723,16 @@ class WatchState:
             canonical_key = f"{prompt_id}/try{attempt:02d}"
             attempt_view = scan.scan_attempt(selected, battery, time.time()).as_dict()
 
+        canonical_manifest = scan._read_json(
+            battery / prompt_id / f"try{attempt:02d}" / scan.ATTEMPT_MANIFEST
+        )
+        if canonical_manifest.get("pending_retry"):
+            return {
+                "ok": False,
+                "error": "battery runner retry already pending",
+                "key": canonical_key,
+            }
+
         with self._lock:
             existing = self._retry_jobs.get(canonical_key)
             if existing and existing.get("state") != "error":

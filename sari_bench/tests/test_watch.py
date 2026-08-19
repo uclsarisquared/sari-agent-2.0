@@ -466,6 +466,54 @@ def test_rotated_requeue_dir_stays_separate() -> None:
         print("ok  a rotated-aside requeue dir does not merge into its replacement")
 
 
+def test_pending_retry_scan_contract_and_legacy_default() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        legacy = make_attempt(
+            battery, "legacy", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        pending = make_attempt(
+            battery, "pending", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        _stamp(pending, {"pending_retry": True, "requeue_reason": "api_retry_exhausted"})
+        archived = make_attempt(
+            battery, "archived", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        _stamp(archived, {"pending_retry": False, "requeue_reason": "sandbox_lost"})
+        archived.rename(archived.with_name("try01.requeue00"))
+
+        view = scan.scan_battery(battery, time.time()).as_dict()
+        attempts = {attempt["key"]: attempt for attempt in view["attempts"]}
+        assert attempts["legacy/try01"]["pending_retry"] is False
+        assert attempts["pending/try01"]["pending_retry"] is True
+        assert attempts["archived/try01.requeue00"]["pending_retry"] is False
+        assert view["counts"]["pending_retry"] == 1, view["counts"]
+        assert view["counts"]["requeued"] == 2, view["counts"]
+
+        state = WatchState(
+            bench_root=Path(temp), fixed_battery=battery,
+            discord=Discord(enabled=False), min_interval=0.0,
+        )
+        refused = state.retry("pending/try01")
+        assert refused["ok"] is False
+        assert refused["error"] == "battery runner retry already pending"
+        print("ok  scanner separates pending retries and defaults legacy manifests to false")
+
+
+def test_dashboard_pending_retry_contract() -> None:
+    dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
+    assert 'code: "w", glyph: "↻", label: "waiting to retry"' in dashboard
+    assert ".cell.w .cellbtn" in dashboard and ".badge.waiting" in dashboard
+    assert 'if (st.code === "w") pendingRetry += 1' in dashboard
+    assert "awaitingReview || live || pendingRetry" in dashboard
+    assert "c.pending_retry" in dashboard and "retryWaiting" in dashboard
+    assert "refs.retry.disabled = runnerRetryPending" in dashboard
+    assert "!a.pending_retry" in dashboard
+    assert "a.state === \"retrying\" || a.pending_retry" in dashboard
+    assert "Battery-runner retries appear as ↻" in dashboard
+    print("ok  dashboard renders and rolls up pending retries separately")
+
+
 def test_http_surface_and_traversal_refusal() -> None:
     import urllib.request
     from http.server import ThreadingHTTPServer
@@ -1890,6 +1938,8 @@ def main() -> int:
     test_a_browser_can_read_a_battery_the_watcher_is_not_watching()
     test_a_running_battery_is_marked_live()
     test_rotated_requeue_dir_stays_separate()
+    test_pending_retry_scan_contract_and_legacy_default()
+    test_dashboard_pending_retry_contract()
     test_http_surface_and_traversal_refusal()
     test_log_cursor_appends_only_what_is_new()
     test_full_log_is_not_limited_by_tail_window()

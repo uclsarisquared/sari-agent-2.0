@@ -23,6 +23,7 @@ import signal
 import socket
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,6 +43,7 @@ from sari_bench.runner import (
 from sari_bench.tests.test_coordinator import FakeSandbox
 from sari_bench.watch.notify import Discord
 from sari_bench.watch.server import WatchState
+from sari_bench.watch import scan
 
 # Records its own liveness window so the test can prove two agents overlapped (or did not), and
 # honours the run-dir contract the runner reads results back out of.
@@ -565,6 +567,120 @@ async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
             await sandbox.close()
             await coordinator.stop()
     print("ok  exhausted API retries requeue the logical attempt with a finite budget")
+
+
+async def test_api_requeue_is_pending_until_redispatch() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001, auto_ready=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        run_task: asyncio.Task[dict] | None = None
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            runner = _runner(
+                url,
+                [Prompt(id="p1", prompt="wait for the endpoint")],
+                workspace,
+                concurrency=1,
+                max_api_requeues=1,
+            )
+            run_task = asyncio.create_task(runner.run())
+
+            await asyncio.wait_for(sandbox.reset_requested.wait(), timeout=10)
+            run_dir = workspace / "runs" / "p1" / "try01"
+            pending = json.loads((run_dir / "attempt.json").read_text())
+            assert pending["state"] == "requeued" and pending["outcome"] == "requeued"
+            assert pending["pending_retry"] is True
+            assert pending["requeue_reason"] == "api_retry_exhausted"
+            view = scan.scan_battery(workspace / "runs", time.time()).as_dict()
+            assert view["attempts"][0]["pending_retry"] is True
+            assert view["counts"]["pending_retry"] == 1
+            assert view["counts"].get("requeued", 0) == 0
+
+            os.environ["STUB_MODE"] = "ok"
+            await sandbox.report_ready()
+            await asyncio.wait_for(run_task, timeout=20)
+
+            archived = json.loads(
+                (workspace / "runs" / "p1" / "try01.requeue00" / "attempt.json").read_text()
+            )
+            assert archived["pending_retry"] is False
+            assert archived["state"] == "requeued" and archived["outcome"] == "requeued"
+            replacement = json.loads((run_dir / "attempt.json").read_text())
+            assert "pending_retry" not in replacement
+            assert replacement["state"] == "finished"
+        finally:
+            os.environ.pop("STUB_MODE", None)
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run_task
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  API requeue stays pending until redispatch rotates the failed execution")
+
+
+async def test_sandbox_loss_uses_the_pending_requeue_lifecycle() -> None:
+    coordinator, url = await _start_coordinator()
+    first = FakeSandbox("sandbox-a", 51001)
+    replacement = FakeSandbox("sandbox-b", 51002)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        run_task: asyncio.Task[dict] | None = None
+        first_closed = False
+        try:
+            await first.connect(url)
+            os.environ["STUB_MODE"] = "hang"
+            runner = _runner(
+                url,
+                [Prompt(id="p1", prompt="survive a lost sandbox")],
+                workspace,
+                concurrency=1,
+            )
+            run_task = asyncio.create_task(runner.run())
+            manifest_path = workspace / "runs" / "p1" / "try01" / "attempt.json"
+            for _ in range(100):
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text())
+                    if manifest.get("state") == "running":
+                        break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError("first sandbox attempt did not start")
+
+            await first.close()
+            first_closed = True
+            for _ in range(100):
+                manifest = json.loads(manifest_path.read_text())
+                if manifest.get("pending_retry"):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError("sandbox loss was not published as a pending retry")
+            assert manifest["requeue_reason"] == "sandbox_lost"
+            assert manifest["state"] == "requeued" and manifest["outcome"] == "requeued"
+
+            os.environ["STUB_MODE"] = "ok"
+            await replacement.connect(url)
+            await asyncio.wait_for(run_task, timeout=20)
+
+            archived = json.loads(
+                (workspace / "runs" / "p1" / "try01.requeue00" / "attempt.json").read_text()
+            )
+            assert archived["requeue_reason"] == "sandbox_lost"
+            assert archived["pending_retry"] is False
+        finally:
+            os.environ.pop("STUB_MODE", None)
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run_task
+            if not first_closed:
+                await first.close()
+            await replacement.close()
+            await coordinator.stop()
+    print("ok  sandbox loss shares pending-retry bookkeeping and preserves its reason")
 
 
 async def test_zero_api_requeues_records_first_exhaustion() -> None:
@@ -1352,6 +1468,8 @@ async def main() -> int:
         test_overrunning_attempt_is_killed_and_recorded,
         test_crashed_agent_still_releases_its_sandbox,
         test_api_retry_exhaustion_requeues_the_logical_attempt,
+        test_api_requeue_is_pending_until_redispatch,
+        test_sandbox_loss_uses_the_pending_requeue_lifecycle,
         test_zero_api_requeues_records_first_exhaustion,
         test_capture_lifecycle_follows_the_agent_process,
         test_cancelling_runner_kills_agent_and_releases_sandbox,

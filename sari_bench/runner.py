@@ -878,8 +878,31 @@ class BenchmarkRunner:
         run_dir.rename(aside)
         # The manifest inside still says "running"; correct it so the watcher shows an abandoned
         # attempt rather than a live one that will never advance.
-        _patch_json(aside / ATTEMPT_MANIFEST, {"state": "requeued", "outcome": "requeued"})
+        _patch_json(
+            aside / ATTEMPT_MANIFEST,
+            {"state": "requeued", "outcome": "requeued", "pending_retry": False},
+        )
         _log(f"rotated a previous run dir aside: {aside.name}")
+
+    def _schedule_requeue(
+        self,
+        run_dir: Path,
+        *,
+        reason: str,
+        item: tuple[str, int, int, int],
+    ) -> None:
+        """Publish a logical retry before putting it back on the worker queue."""
+        _patch_json(
+            run_dir / ATTEMPT_MANIFEST,
+            {
+                "state": "requeued",
+                "outcome": "requeued",
+                "pending_retry": True,
+                "requeue_reason": reason,
+                "ended_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+        self._queue.put_nowait(item)
 
     async def _worker(self, index: int) -> None:
         """One worker owns one coordinator connection, and therefore one lease at a time."""
@@ -957,20 +980,13 @@ class BenchmarkRunner:
                 # Endpoint availability is infrastructure state, not an agent result. Preserve the
                 # failed process as an archive and retry the same logical attempt after reset.
                 if api_requeues < self.max_api_requeues:
-                    _patch_json(
-                        run_dir / ATTEMPT_MANIFEST,
-                        {
-                            "state": "requeued",
-                            "outcome": "requeued",
-                            "requeue_reason": "api_retry_exhausted",
-                            "ended_at": datetime.now().isoformat(timespec="seconds"),
-                        },
+                    self._schedule_requeue(
+                        run_dir,
+                        reason="api_retry_exhausted",
+                        item=(prompt_id, attempt, api_requeues + 1, sandbox_requeues),
                     )
                     _log(
                         f"[w{index}] {prompt_id} try {attempt}: {exhausted}; requeueing"
-                    )
-                    self._queue.put_nowait(
-                        (prompt_id, attempt, api_requeues + 1, sandbox_requeues)
                     )
                     return
                 result = self._result_from_run_dir(
@@ -984,10 +1000,12 @@ class BenchmarkRunner:
             except SandboxLost as lost:
                 # The machine went away, not the agent. Put the attempt back rather than scoring it.
                 if sandbox_requeues < MAX_SANDBOX_LOST_REQUEUES:
-                    _log(f"[w{index}] {prompt_id} try {attempt}: {lost}; requeueing")
-                    self._queue.put_nowait(
-                        (prompt_id, attempt, api_requeues, sandbox_requeues + 1)
+                    self._schedule_requeue(
+                        run_dir,
+                        reason="sandbox_lost",
+                        item=(prompt_id, attempt, api_requeues, sandbox_requeues + 1),
                     )
+                    _log(f"[w{index}] {prompt_id} try {attempt}: {lost}; requeueing")
                     return
                 result = AttemptResult(
                     prompt_id=prompt_id,

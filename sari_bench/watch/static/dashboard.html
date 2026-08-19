@@ -116,6 +116,7 @@
   .badge { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
   .badge.alert { color: #f0a596; border-color: #57302a; }
   .badge.watch { color: #e8c48d; border-color: #58472a; }
+  .badge.waiting { color: #c5b6f2; border-color: #55447e; background: rgba(128,98,198,.12); }
   .badge.success { color: #a8dcbb; border-color: #2c4b38; }
   .badge.fail { color: #f0a596; border-color: #57302a; }
   .badge.invalid { color: #9aa4b2; border-color: #3a414c; background: rgba(154,164,178,.10); }
@@ -240,6 +241,7 @@
   .cell.p .cellbtn { background: rgba(79,169,107,.22); color: #a8dcbb; }
   .cell.f .cellbtn { background: rgba(224,85,63,.20); color: #f0a596; }
   .cell.r .cellbtn { background: rgba(224,162,63,.24); color: #f0cd9b; }
+  .cell.w .cellbtn { background: rgba(128,98,198,.24); color: #d0c2f5; }
   .cell.q .cellbtn { background: rgba(79,143,208,.20); color: #a9cbec; }
   .cell.k .cellbtn { background: rgba(90,100,114,.28); color: var(--dim); }
   /* Invalid: gray on purpose, and the same gray family as the killed cells - both are runs the
@@ -732,6 +734,9 @@ const OUTCOME_TIPS = {
 
 const TIP_RUNNING = "The agent process is alive in its sandbox right now. The frame, the log, and "
   + "the rows below advance as it steps.";
+const TIP_PENDING_RETRY = "The battery runner has scheduled this logical try again. It is waiting "
+  + "in the runner queue or for a reset sandbox; the failed execution is archived when the next "
+  + "dispatch begins.";
 const TIP_ORPHANED = "The manifest still says running, but the process id it recorded is gone: the "
   + "runner died before it could close this try out. Nothing will ever finish it, which is why it "
   + "takes no verdict — retry it.";
@@ -763,6 +768,7 @@ function tipAttrs(term, text, meta = "") {
 }
 
 function classOf(a) {
+  if (a.pending_retry) return "card watch";
   if (a.state === "retrying") return "card watch";
   if (a.state === "finished" || a.state === "requeued") return "card finished";
   if (a.state === "orphaned") return "card alert";
@@ -790,6 +796,9 @@ function statusBadge(a) {
       error ? (a.retry_error || "") : "");
     return `<span class="badge ${cls}" ${tip}>retry: ${esc(a.retry_state)}</span>`;
   }
+  if (a.pending_retry)
+    return `<span class="badge waiting" ${tipAttrs("waiting to retry", TIP_PENDING_RETRY)}`
+      + `>waiting to retry</span>`;
   if (a.state === "finished") {
     const outcome = a.outcome || "finished";
     // `completed` is about how the process ended, not whether the task was done - the agent decided
@@ -1068,10 +1077,14 @@ function patchCard(entry, a) {
   refs.kill.title = orphaned
     ? "Record this abandoned attempt as stopped so it can be reviewed"
     : "Terminate the agent; the runner records the attempt";
-  refs.retry.disabled = Boolean(a.retry_state && a.retry_state !== "error");
-  refs.retry.title = a.retry_error || "Delete this try's history and run it again";
-  setText(refs.retry, a.retry_state && a.retry_state !== "error"
-    ? `retry: ${a.retry_state}` : "retry");
+  const runnerRetryPending = Boolean(a.pending_retry);
+  refs.retry.disabled = runnerRetryPending
+    || Boolean(a.retry_state && a.retry_state !== "error");
+  refs.retry.title = runnerRetryPending
+    ? "The battery runner already has this try waiting to retry"
+    : (a.retry_error || "Delete this try's history and run it again");
+  setText(refs.retry, runnerRetryPending ? "waiting to retry"
+    : (a.retry_state && a.retry_state !== "error" ? `retry: ${a.retry_state}` : "retry"));
 
   // Every finished attempt can be judged, regardless of how it ended. Live attempts remain hidden
   // because their outcome can still change; the server repeats that state check.
@@ -1269,6 +1282,8 @@ function cellState(a) {
     already_successful:
              { code: "a", glyph: "A", label: "halted: already successful — excluded from the totals" },
   }[verdictOf(a)];
+  if (a.pending_retry)
+    return { code: "w", glyph: "↻", label: "waiting to retry" };
   if (a.retry_state && a.retry_state !== "error")
     return { code: "r", glyph: "R", label: `retry: ${a.retry_state}` };
   if (isLive(a)) return { code: "r", glyph: "R", label: "running" };
@@ -1330,7 +1345,8 @@ function renderOverview(state) {
 
   document.getElementById("ov-note").textContent = prompts.length
     ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"} — P/F is the human `
-      + "verdict; ? is awaiting review; E is invalid and A is halted-already-successful, and "
+      + "verdict; ? is awaiting review; ↻ is waiting to retry; E is invalid and A is "
+      + "halted-already-successful, and "
       + "neither counts for anything"
     : (state.error || "no battery loaded");
   if (!prompts.length) { table.innerHTML = ""; ovRows.clear(); ovShape = ""; return; }
@@ -1347,7 +1363,8 @@ function renderOverview(state) {
     ovIndex.set(a.key, a);
     const slot = `${a.prompt_id}#${a.attempt}`;
     const held = byTry.get(slot);
-    if (!held || (held.state === "requeued" && a.state !== "requeued")) byTry.set(slot, a);
+    if (!held || (held.state === "requeued" && a.state !== "requeued")
+        || (a.pending_retry && !held.pending_retry)) byTry.set(slot, a);
   }
 
   let solved = 0, reliabilitySum = 0, reliabilityN = 0, winIn = 0, winOut = 0;
@@ -1378,7 +1395,8 @@ function renderOverview(state) {
     }
     if (body.children[index] !== entry.tr) body.insertBefore(entry.tr, body.children[index] || null);
 
-    let pass = null, ran = 0, passes = 0, pending = 0, live = 0, invalid = 0, halted = 0;
+    let pass = null, ran = 0, passes = 0, awaitingReview = 0, live = 0;
+    let pendingRetry = 0, invalid = 0, halted = 0;
     let tokIn = 0, tokOut = 0;
     const rowRoles = new Map();
     for (let t = 1; t <= tries; t++) {
@@ -1412,15 +1430,17 @@ function renderOverview(state) {
       if (st.code === "a") { halted += 1; continue; }
       ran += 1;
       if (st.code === "p") { passes += 1; if (!pass) pass = a; }
-      if (st.code === "q") pending += 1;
+      if (st.code === "q") awaitingReview += 1;
       if (st.code === "r") live += 1;
+      if (st.code === "w") pendingRetry += 1;
     }
 
     // FAIL is only said once there is nothing left that could still turn into a pass. A prompt
     // nobody has dispatched, or one whose halts are still queued for review, is undecided - painting
     // either of them red would read as a verdict the battery has not earned yet.
-    const verdict = pass ? "p" : (!ran ? "none" : (pending || live ? "q" : "f"));
-    const label = { p: "PASS", f: "FAIL", q: pending ? "?" : "…", none: "—" }[verdict];
+    const verdict = pass ? "p"
+      : (!ran ? "none" : (awaitingReview || live || pendingRetry ? "q" : "f"));
+    const label = { p: "PASS", f: "FAIL", q: awaitingReview ? "?" : "…", none: "—" }[verdict];
     entry.res.className = "res " + verdict;
     setText(entry.res, label);
     const excluded = [
@@ -1430,7 +1450,8 @@ function renderOverview(state) {
     entry.res.title = (pass ? `first pass: try ${pass.attempt}`
       : verdict === "none" ? (invalid || halted ? "every dispatched try was excluded"
                                                 : "no try dispatched")
-      : verdict === "q" ? `${pending} halt(s) awaiting review, ${live} still running`
+      : verdict === "q" ? `${awaitingReview} halt(s) awaiting review, ${live} still running, `
+        + `${pendingRetry} waiting to retry`
       : "every counted try decided, none passed") + excluded;
     setText(entry.stime, pass ? fmtMin(pass.elapsed_seconds) : "—");
     setText(entry.tokens, ran ? `${fmtNum(tokIn)} / ${fmtNum(tokOut)}` : "—");
@@ -1907,14 +1928,16 @@ async function renameBattery(id) {
 }
 
 // -- run queue -------------------------------------------------------------------------------
-// What the watcher has been asked to dispatch and has not finished dispatching. It knows its own
+// What the watcher has been asked to dispatch and has not finished dispatching. It knows watcher
 // retries exactly - it started them - and it knows from the coordinator how many sandboxes are free
 // and how many acquires are parked. It cannot list the battery runner's pending tries: a worker
 // creates its run dir only once it holds a lease, so a try still waiting for one exists nowhere but
-// inside that process. Those are in the parked count and nowhere else, which the footer says.
+// inside that process. A battery retry whose failed execution has a manifest appears as a ↻ cell,
+// but it has no ordered position in this watcher-owned menu.
 const TIP_QUEUE = "Retries this watcher is dispatching, oldest first. A retry stops and deletes its "
   + "old try, then asks the coordinator for a sandbox and waits its turn behind everything already "
-  + "asking — it never displaces a run that is already going.";
+  + "asking — it never displaces a run that is already going. Battery-runner retries appear as ↻ "
+  + "cells and cards, but have no ordered position in this menu.";
 const QUEUE_NOTE = {
   stopping: "stopping the old run",
   cleaning: "deleting its old history",
@@ -1950,13 +1973,12 @@ function renderQueue(state) {
 
   const free = Number(queue.free_sandboxes) || 0;
   const parked = Number(queue.coordinator_waiting) || 0;
-  // The parked count is the only sign of the battery runner's own waiting tries: a worker writes
-  // nothing to disk until it holds a lease, so those cannot have rows of their own up there.
+  // Never imply that the rows order battery-runner work: this menu owns watcher-launched retries.
   const fleet = queue.pool_error
     ? "coordinator unreachable — the fleet and the wait ahead are unknown"
     : `${free} of ${(state.pool || []).length} sandbox(es) free`
       + (parked ? ` · ${parked} waiting to lease one: the queued rows above, plus any battery `
-                  + `tries, which get a row only once they are running` : "");
+                  + `tries; battery retries appear as ↻ cells but have no queue-menu position` : "");
   rows.push(`<li class="q-foot">${esc(fleet)}</li>`);
   setHTML(document.getElementById("queue-menu"), rows.join(""));
 }
@@ -2034,9 +2056,10 @@ async function refresh() {
       + `${c.disagree ? ", " + c.disagree + " disagree" : ""})`
     : "";
   const waiting = c.awaiting_verdict ? ` · ${c.awaiting_verdict} awaiting review` : "";
+  const retryWaiting = c.pending_retry ? ` · ${c.pending_retry} waiting to retry` : "";
   document.getElementById("progress").textContent =
     (b.planned_attempts ? `${done}/${b.planned_attempts} done · ${live} live` : `${atts.length} attempt(s)`)
-    + review + waiting;
+    + review + waiting + retryWaiting;
   document.getElementById("pool").textContent = state.pool_error
     ? "pool: coordinator unreachable"
     : `pool: ${(state.pool || []).length} sandbox(es)`;
@@ -2343,7 +2366,8 @@ function siblingsAtRisk(key) {
   const self = latest.find(a => a.key === key);
   if (!self) return { live: [], pending: 0 };
   const mine = latest.filter(a => a.prompt_id === self.prompt_id);
-  const live = mine.filter(a => a.key !== key && (isLive(a) || a.state === "retrying"));
+  const live = mine.filter(a => a.key !== key
+    && (isLive(a) || a.state === "retrying" || a.pending_retry));
   let pending = 0;
   if (batteryLive()) {
     const tries = Math.max(1, Number((latestState.battery || {}).tries) || 1);
@@ -2487,7 +2511,7 @@ function announceRetry(key, placement) {
 // Which attempts the R shortcut and retry button act on: anything not already mid-retry. Unlike
 // canVerdict this allows a live attempt — retrying stops the current run if one is going.
 function canRetry(a) {
-  return !!a && !(a.retry_state && a.retry_state !== "error");
+  return !!a && !a.pending_retry && !(a.retry_state && a.retry_state !== "error");
 }
 
 // The hover card, delegated off the section so it survives every table patch.
