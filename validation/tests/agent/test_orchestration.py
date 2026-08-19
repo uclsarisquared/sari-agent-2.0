@@ -6,7 +6,7 @@ from orchestrator import orchestration
 from orchestrator.task_response import new_response_memory
 
 
-def _config(tmp_path, *, retries=1):
+def _config(tmp_path, *, retries=1, refusal_cap_action="continue"):
     return orchestration.OrchestrationConfig(
         task="Pick up the chips",
         arm="graph",
@@ -19,16 +19,17 @@ def _config(tmp_path, *, retries=1):
         leg_retries=retries,
         output_dir=None,
         completion_guard="deterministic",
+        refusal_cap_action=refusal_cap_action,
         ocr_url=None,
         runs_dir=None,
         context_policy="baseline",
     )
 
 
-def _state(tmp_path, *, retries=1):
+def _state(tmp_path, *, retries=1, refusal_cap_action="continue"):
     agent = SimpleNamespace(vlm_agent=SimpleNamespace(episodic_memory="remembered"))
     return orchestration._RunState(
-        config=_config(tmp_path, retries=retries),
+        config=_config(tmp_path, retries=retries, refusal_cap_action=refusal_cap_action),
         policy=SimpleNamespace(findings_enabled=False),
         run_dir=str(tmp_path),
         response_memory=new_response_memory("Pick up the chips"),
@@ -109,6 +110,51 @@ def test_execute_plan_aborts_remaining_legs(monkeypatch, tmp_path):
 
     assert attempted == [0]
     assert state.success is False
+
+
+def _two_legs():
+    return [
+        {"type": "pickup", "text": "Pick up the chips"},
+        {"type": "checkout", "text": "Check out"},
+    ]
+
+
+def _plan_with_first_leg_forced(monkeypatch, state):
+    """Fail leg 1 on the refusal cap, pass leg 2; return the leg indices actually run."""
+    attempted = []
+
+    def run(_state, _leg, leg_index):
+        attempted.append(leg_index)
+        if leg_index == 0:
+            return _metrics(success=False, reason="halt_forced"), 1
+        return _metrics(success=True, reason="halt_granted"), 1
+
+    monkeypatch.setattr(orchestration, "_run_leg_with_retries", run)
+    orchestration._execute_plan(state)
+    return attempted
+
+
+def test_execute_plan_continues_past_refusal_cap(monkeypatch, tmp_path):
+    state = _state(tmp_path, retries=0)
+    state.legs = _two_legs()
+
+    attempted = _plan_with_first_leg_forced(monkeypatch, state)
+
+    assert attempted == [0, 1]
+    # The leg stays failed and is named as unverified; only the abort is waived.
+    assert state.success is False
+    assert state.unverified_legs == [1]
+
+
+def test_execute_plan_halt_policy_aborts_on_refusal_cap(monkeypatch, tmp_path):
+    state = _state(tmp_path, retries=0, refusal_cap_action="halt")
+    state.legs = _two_legs()
+
+    attempted = _plan_with_first_leg_forced(monkeypatch, state)
+
+    assert attempted == [0]
+    assert state.success is False
+    assert state.unverified_legs == []
 
 
 def test_orchestrate_preserves_run_error_and_always_closes(monkeypatch, tmp_path):

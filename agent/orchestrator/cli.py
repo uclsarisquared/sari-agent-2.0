@@ -74,6 +74,12 @@ def main(argv=None):
                     help="completion verification backend: deterministic code checks, VLM-backed "
                          "checks, or none to accept STOP without verification (default "
                          "deterministic)")
+    ap.add_argument("--refusal-cap-action", choices=["continue", "halt"],
+                    default=configured("agent", "refusal_cap_action", "continue"),
+                    help="what an exhausted refusal cap does to the TASK, after leg retries: "
+                         "'continue' (default) keeps the leg failed but runs the remaining legs, "
+                         "treating the capped STOP as the agent's override to move on; 'halt' aborts "
+                         "the task like any other failed leg")
     ap.add_argument("--output-dir", default=configured("environment", "map_dir"),
                     help="mapping output dir to load the map from (topology/annotations/grid). "
                          "Default: $SARI_MAP_DIR, else mapping/output (StoreMap's "
@@ -133,6 +139,7 @@ def main(argv=None):
         leg_retries=max(0, args.leg_retries),
         output_dir=args.output_dir,
         completion_guard=args.completion_guard,
+        refusal_cap_action=args.refusal_cap_action,
         ocr_url=args.ocr_url,
         context_policy=args.context_policy,
         api_max_attempts=args.api_max_attempts,

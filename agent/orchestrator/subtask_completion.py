@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 # Closed type vocabulary. `checkout` (not `place`) - see the module docstring.
 SUBTASK_TYPES = ("pickup", "checkout", "compare", "goto", "inspect")
 
-# A leg whose halt is refused this many times force-continues the LOOP (never a fake grant) with the
-# last refusal reason left in state, so a confused agent can't spin forever on STOP. The leg is
-# marked `halt_forced` so 6.4 can count it. (phase6.3 plan, "Refusal cap".)
+# A leg whose halt is refused this many times ENDS (never a fake grant), marked `halt_forced` with
+# the last refusal reason left in state, so a confused agent can't spin forever on STOP. Whether that
+# ends the whole TASK is the orchestrator's call, not this cap's: OrchestrationConfig
+# .refusal_cap_action defaults to 'continue', which retries the leg and then runs the remaining legs.
 HALT_REFUSAL_CAP = 3
 
 # The symmetric twin of the refusal cap: if the completion predicate stays satisfied for this many

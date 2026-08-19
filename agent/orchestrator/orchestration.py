@@ -96,6 +96,11 @@ class OrchestrationConfig:
     leg_retries: int = 1
     output_dir: str | None = None
     completion_guard: str = "deterministic"
+    # What an exhausted refusal cap (end_reason 'halt_forced') means for the TASK. "continue" treats
+    # it as the agent's override to move on: the leg still records success=False, but the remaining
+    # legs run instead of the task aborting on a guard the replay may show was wrong. "halt" aborts
+    # on it like any other failed leg. Retries run first either way.
+    refusal_cap_action: str = "continue"
     ocr_url: str | None = None
     runs_dir: str | None = None
     context_policy: str = "baseline"
@@ -117,6 +122,8 @@ class _RunState:
     store_map: object | None = None
     legs: list = field(default_factory=list)
     leg_rows: list = field(default_factory=list)
+    # 1-based indices of legs continued past unverified (refusal_cap_action='continue').
+    unverified_legs: list = field(default_factory=list)
     visited: set = field(default_factory=set)
     carried_names: dict | None = None
     cumulative_context: str = ""
@@ -198,6 +205,7 @@ def _print_run_header(state):
     print(
         f"[ORCHESTRATOR] arm={config.arm}  context_policy={config.context_policy}  "
         f"completion_guard={config.completion_guard}  "
+        f"refusal_cap_action={config.refusal_cap_action}  "
         f"caps={cap(config.caps[0], 'steps')} / {cap(config.caps[1], 'min')} per leg  "
         f"run dir: {state.run_dir}"
     )
@@ -388,19 +396,39 @@ def _carry_findings_forward(state, leg, leg_index, attempt, metrics):
     state.cumulative_context += f"\n\n--- LEG {leg_index + 1} FINDINGS ---\n{findings}"
 
 
+def _continue_past_failure(state, metrics):
+    """True when this failed leg is the agent's override to move on rather than a task abort.
+
+    Only the refusal cap qualifies: the agent asked to stop, the completion guard kept refusing, and
+    the retries could not satisfy it. Every other failure (step_cap, time_cap, errors) still aborts -
+    those legs did not claim to be done.
+    """
+    return (
+        state.config.refusal_cap_action == "continue"
+        and metrics.get("end_reason") == "halt_forced"
+    )
+
+
 def _execute_plan(state):
-    """Run planned legs in order, aborting after an exhausted failure."""
+    """Run planned legs in order, aborting after a failure the policy does not wave through."""
     for leg_index, leg in enumerate(state.legs):
         print(f"\n[ORCHESTRATOR] ── Leg {leg_index + 1}/{len(state.legs)} ──")
         metrics, attempt = _run_leg_with_retries(state, leg, leg_index)
         if not metrics["success"]:
             state.success = False
             remaining = len(state.legs) - leg_index - 1
+            if not _continue_past_failure(state, metrics):
+                print(
+                    f"[ORCHESTRATOR] leg {leg_index + 1} did not complete "
+                    f"({metrics['end_reason']}) — aborting the remaining {remaining} leg(s)."
+                )
+                return
+            state.unverified_legs.append(leg_index + 1)
             print(
-                f"[ORCHESTRATOR] leg {leg_index + 1} did not complete "
-                f"({metrics['end_reason']}) — aborting the remaining {remaining} leg(s)."
+                f"[ORCHESTRATOR] leg {leg_index + 1} ended unverified "
+                f"({metrics['end_reason']}) — refusal_cap_action=continue, running the remaining "
+                f"{remaining} leg(s)."
             )
-            return
         if leg_index + 1 < len(state.legs):
             _carry_findings_forward(state, leg, leg_index, attempt, metrics)
 
@@ -449,6 +477,7 @@ def _build_summary(state, response, response_source):
             "max_minutes": config.caps[1],
             "resolver_backend": config.resolver_backend,
             "completion_guard": config.completion_guard,
+            "refusal_cap_action": config.refusal_cap_action,
             "leg_retries": config.leg_retries,
             "map_dir": str(Path(config.output_dir).resolve()) if config.output_dir else None,
             "reset_start": config.reset_start,
@@ -462,6 +491,9 @@ def _build_summary(state, response, response_source):
         "response_source": response_source,
         "legs_planned": len(state.legs),
         "legs_completed": sum(1 for row in state.leg_rows if row.get("success")),
+        # Legs the run continued past on the refusal cap. A run with legs_unverified > 0 reached its
+        # final answer without the guard ever accepting those legs - the rows worth reviewing.
+        "legs_unverified": len(state.unverified_legs),
         "resolver_calls": state.resolver_calls,
         "llm_calls": state.llm_calls,
         "tokens_in": token_totals["tokens_in"],
@@ -489,10 +521,15 @@ def _write_summary(state, summary):
     with open(out_path, "w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2, ensure_ascii=False)
     token_meter.dump()
+    unverified = (
+        f" ({len(state.unverified_legs)} unverified: "
+        f"{', '.join(str(index) for index in state.unverified_legs)})"
+        if state.unverified_legs else ""
+    )
     print("-" * 40)
     print(
         f"[ORCHESTRATOR] task success={state.success}  "
-        f"legs {summary['legs_completed']}/{summary['legs_planned']}  "
+        f"legs {summary['legs_completed']}/{summary['legs_planned']}{unverified}  "
         f"llm={state.llm_calls}  "
         f"tokens in/out={summary['tokens_in']}/{summary['tokens_out']}  "
         f"wall={summary['wall_s']}s  -> {out_path}"
