@@ -51,6 +51,24 @@ def test_context_ablation_configs_are_five_try_and_runner_is_complete() -> None:
     assert os.access(runner, os.X_OK), "the ablation runner lost its executable bit"
 
 
+def test_comprehensive_context_ablation_runner_covers_every_distinct_arm() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runner = root / "configs" / "context-ablation" / "run_all_comprehensive.sh"
+    text = runner.read_text(encoding="utf-8")
+
+    match = re.search(r"policies=\(([^)]*)\)", text)
+    assert match is not None
+    assert match.group(1).split() == [
+        "baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4",
+        "a7-no-stop-guard",
+    ]
+    for battery in ("easy_prompts.json", "medium_prompts.json", "hard_prompts.json"):
+        assert battery in text
+    assert "--prompts \"$prompts\"" in text
+    assert "--tries 3" in text
+    assert os.access(runner, os.X_OK), "the comprehensive runner lost its executable bit"
+
+
 def test_loader_resolves_paths_from_the_config_and_rejects_typos(tmp_path: Path) -> None:
     config_path = tmp_path / "configs" / "run.toml"
     config_path.parent.mkdir()
