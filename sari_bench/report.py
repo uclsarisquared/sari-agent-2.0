@@ -47,7 +47,10 @@ ATTEMPT_COLUMNS = [
     "verified_by", "verified_at", "verified_note",
     "end_reason", "exit_code", "wall_seconds", "wall_minutes",
     "tokens_in", "tokens_out", "tokens_total", "llm_calls", "api_calls",
-    "legs_planned", "legs_completed", "requeues", "sandbox_id", "commands_uri",
+    # `legs_unverified` counts the legs the run continued past on the refusal cap
+    # (refusal_cap_action='continue'). Those attempts reach a final answer with `success` False, so
+    # this is the column that says "the guard, not the agent, decided this one" - review them first.
+    "legs_planned", "legs_completed", "legs_unverified", "requeues", "sandbox_id", "commands_uri",
     "arm", "context_policy", "killed_by", "stop_reason", "stop_requested_at",
     "stop_requested_by",
     "winning_attempt_key", "collapse_score", "collapse_signals", "run_dir", "error",
@@ -262,6 +265,7 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             "api_calls": api_calls,
             "legs_planned": legs.get("planned", summary.get("legs_planned")),
             "legs_completed": legs.get("completed", summary.get("legs_completed")),
+            "legs_unverified": summary.get("legs_unverified", ""),
             "requeues": recorded.get("requeues", 0),
             "sandbox_id": recorded.get("sandbox_id") or manifest.get("sandbox_id", ""),
             "commands_uri": recorded.get("commands_uri") or manifest.get("commands_uri", ""),

@@ -29,6 +29,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         # _DEPRECATED_VALUES.
         "resolver_backend": {"endpoint", "claude-cli"},
         "completion_guard": {"deterministic", "vlm", "none"},
+        "refusal_cap_action": {"continue", "halt"},
         "leg_retries": int,
     },
     "limits": {
@@ -53,6 +54,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "per_leg_minutes": (int, float),
         "coordinator": str,
         "sandbox_startup_timeout": (int, float),
+        "lease_acquire_timeout": (int, float),
         "output_dir": str,
         "name": str,
         "resume": bool,
@@ -66,6 +68,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "ocr_url": str,
         "leg_retries": int,
         "completion_guard": {"deterministic", "vlm", "none"},
+        "refusal_cap_action": {"continue", "halt"},
         "max_api_requeues": int,
     },
 }
@@ -143,6 +146,8 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
 
     if key in {"max_steps", "tries", "concurrency", "max_attempts"} and value < 1:
         raise RunConfigError(f"{path}: {label} must be at least 1")
+    if key == "lease_acquire_timeout" and value <= 0:
+        raise RunConfigError(f"{path}: {label} must be positive")
     if key in {"leg_retries", "max_api_requeues"} and value < 0:
         raise RunConfigError(f"{path}: {label} cannot be negative")
     if key in {

@@ -14,6 +14,8 @@ from typing import Any
 
 from sari_bench.protocol import BENCH_ROUTE, decode, encode
 
+DEFAULT_ACQUIRE_TIMEOUT_SECONDS = 30.0
+
 
 class SandboxLost(Exception):
     """Raised when the leased sandbox stops responding mid-attempt."""
@@ -120,9 +122,29 @@ class CoordinatorClient:
             if reply.get("type") == "bench.error":
                 raise RuntimeError(f"Coordinator rejected request: {reply.get('reason')}")
 
-    async def acquire(self) -> Lease:
-        """Leases a sandbox, waiting for one to free up if the pool is busy."""
-        return Lease(await self._request(encode("bench.acquire"), "bench.lease"))
+    async def acquire(
+        self, *, timeout: float | None = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+    ) -> Lease:
+        """Lease a sandbox, optionally bounding how long the coordinator may park the request.
+
+        A timed-out acquire makes this protocol connection unusable: the coordinator may still
+        grant the request and send its reply later, which a subsequent request could mistake for
+        its own response. Close the connection so the coordinator removes the waiter (and reaps a
+        lease if the grant raced with the timeout). Callers that want to keep waiting must reconnect
+        before trying again.
+        """
+        request = self._request(encode("bench.acquire"), "bench.lease")
+        if timeout is None:
+            return Lease(await request)
+        if timeout <= 0:
+            raise ValueError("acquire timeout must be positive")
+        try:
+            return Lease(await asyncio.wait_for(request, timeout=timeout))
+        except asyncio.TimeoutError:
+            await self.close()
+            raise asyncio.TimeoutError(
+                f"Timed out after {timeout:g}s waiting for bench.lease ({self.url})"
+            ) from None
 
     async def release(self, lease: Lease, outcome: str) -> None:
         """Hands the sandbox back. The coordinator resets it before anyone else gets it."""

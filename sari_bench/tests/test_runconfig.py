@@ -140,6 +140,7 @@ def test_deprecated_agent_arm_key_loads_and_warns(tmp_path: Path, capsys) -> Non
         ("[bench]\ntries = 0\n", "bench.tries must be at least 1"),
         ("[api_retry]\nmax_attempts = 0\n", "api_retry.max_attempts must be at least 1"),
         ("[bench]\nmax_api_requeues = -1\n", "bench.max_api_requeues cannot be negative"),
+        ("[bench]\nlease_acquire_timeout = 0\n", "bench.lease_acquire_timeout must be positive"),
         ("[mystery]\nvalue = 1\n", r"unknown section\(s\)"),
     ],
 )
@@ -167,6 +168,7 @@ context_policy = "a5"
 completion_guard = "vlm"
 name = "from-config"
 max_api_requeues = 1
+lease_acquire_timeout = 11.0
 
 [api_retry]
 max_attempts = 7
@@ -187,6 +189,7 @@ max_attempts = 7
             completion_guard=runner.completion_guard,
             api_max_attempts=runner.api_max_attempts,
             max_api_requeues=runner.max_api_requeues,
+            lease_acquire_timeout=runner.lease_acquire_timeout,
         )
         return {}
 
@@ -206,6 +209,8 @@ max_attempts = 7
                     "5",
                     "--max-api-requeues",
                     "2",
+                    "--lease-acquire-timeout",
+                    "4.5",
                 ]
             )
         )
@@ -221,6 +226,7 @@ max_attempts = 7
         "completion_guard": "vlm",
         "api_max_attempts": 5,
         "max_api_requeues": 2,
+        "lease_acquire_timeout": 4.5,
     }
 
 

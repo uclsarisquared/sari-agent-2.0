@@ -252,6 +252,53 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
     print("ok  completion guard reaches the agent command and durable battery config")
 
 
+def test_refusal_cap_action_is_threaded_and_resume_checked() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p", prompt="pick it up")],
+            workspace,
+            refusal_cap_action="halt",
+        )
+        lease = type("LeaseStub", (), {"commands_uri": "ws://127.0.0.1:51001/commands"})()
+        command = runner._agent_command(
+            runner.prompts["p"], lease, workspace / "runs" / "p" / "try01")
+        index = command.index("--refusal-cap-action")
+        assert command[index + 1] == "halt", command
+        assert runner._semantic_config()["refusal_cap_action"] == "halt"
+
+        # The default is continue, and a battery predating the option ran with halt semantics: a
+        # resume must refuse rather than silently switch what a refusal cap does to the attempt.
+        second_workspace = workspace / "continuing"
+        second_workspace.mkdir()
+        continuing = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p", prompt="pick it up")],
+            second_workspace,
+            refusal_cap_action="continue",
+        )
+        legacy = continuing._semantic_config()
+        legacy.pop("refusal_cap_action")
+        try:
+            continuing._validate_resume_config(legacy)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("a legacy halting battery resumed as continue")
+
+        bad_workspace = workspace / "bad"
+        bad_workspace.mkdir()
+        try:
+            _runner("ws://127.0.0.1:1", [Prompt(id="p", prompt="x")],
+                    bad_workspace, refusal_cap_action="skip")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unsupported refusal cap action was accepted")
+    print("ok  refusal cap action reaches the agent command and is resume-checked")
+
+
 async def test_ocr_preflight_fails_before_coordinator_or_lease() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
@@ -584,6 +631,7 @@ async def test_api_requeue_is_pending_until_redispatch() -> None:
                 workspace,
                 concurrency=1,
                 max_api_requeues=1,
+                lease_acquire_timeout=0.05,
             )
             run_task = asyncio.create_task(runner.run())
 
@@ -597,6 +645,18 @@ async def test_api_requeue_is_pending_until_redispatch() -> None:
             assert view["attempts"][0]["pending_retry"] is True
             assert view["counts"]["pending_retry"] == 1
             assert view["counts"].get("requeued", 0) == 0
+
+            # The reset is deliberately held. The retry must time out, disconnect its parked
+            # acquire, re-check fleet health, and keep trying instead of hanging in one RPC.
+            for _ in range(100):
+                pending = json.loads((run_dir / "attempt.json").read_text())
+                if int(pending.get("retry_acquire_attempts") or 0) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("retry acquire did not time out and re-check the fleet")
+            assert "ready=0" in pending["retry_wait_reason"]
+            assert pending["retry_last_checked_at"]
 
             os.environ["STUB_MODE"] = "ok"
             await sandbox.report_ready()
@@ -1458,6 +1518,7 @@ async def test_resume_stops_an_orphan_before_pid_publication() -> None:
 async def main() -> int:
     test_load_prompts_accepts_the_battery_schema()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
+    test_refusal_cap_action_is_threaded_and_resume_checked()
     for test in (
         test_ocr_preflight_fails_before_coordinator_or_lease,
         test_battery_runs_every_prompt_and_attempt,

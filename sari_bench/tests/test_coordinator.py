@@ -166,6 +166,34 @@ async def test_acquire_fails_if_coordinator_connection_closes() -> None:
     print("ok  a dropped coordinator connection wakes a parked acquire")
 
 
+async def test_acquire_timeout_disconnects_its_coordinator_waiter() -> None:
+    coordinator, url = await _start_coordinator()
+    client = CoordinatorClient(url)
+    sandbox = FakeSandbox("sandbox-after-timeout", 51924)
+    try:
+        await client.connect()
+        try:
+            await client.acquire(timeout=0.05)
+        except asyncio.TimeoutError as error:
+            assert "bench.lease" in str(error), error
+        else:
+            raise AssertionError("acquire did not time out against an empty pool")
+
+        async with CoordinatorClient(url) as observer:
+            _pool, waiting = await observer.pool_status()
+            assert waiting == 0, "timed-out acquire left a stale coordinator waiter"
+
+        await sandbox.connect(url)
+        async with CoordinatorClient(url) as replacement:
+            lease = await replacement.acquire(timeout=1)
+            assert lease.sandbox_id == "sandbox-after-timeout"
+    finally:
+        await client.close()
+        await sandbox.close()
+        await coordinator.stop()
+    print("ok  a timed-out acquire disconnects its stale coordinator waiter")
+
+
 async def test_orphaned_lease_is_reset_when_sandbox_registers() -> None:
     coordinator, url = await _start_coordinator()
     sandbox = FakeSandbox("sandbox-orphan", 51923)
@@ -350,6 +378,7 @@ async def main() -> int:
     for test in (
         test_acquire_blocks_until_a_sandbox_registers,
         test_acquire_fails_if_coordinator_connection_closes,
+        test_acquire_timeout_disconnects_its_coordinator_waiter,
         test_orphaned_lease_is_reset_when_sandbox_registers,
         test_release_resets_before_repooling,
         test_fleet_resets_are_serialized,

@@ -796,9 +796,15 @@ function statusBadge(a) {
       error ? (a.retry_error || "") : "");
     return `<span class="badge ${cls}" ${tip}>retry: ${esc(a.retry_state)}</span>`;
   }
-  if (a.pending_retry)
-    return `<span class="badge waiting" ${tipAttrs("waiting to retry", TIP_PENDING_RETRY)}`
-      + `>waiting to retry</span>`;
+  if (a.pending_retry) {
+    const acquiring = Number(a.retry_acquire_attempts) > 0;
+    const label = acquiring ? "recovering sandbox lease" : "waiting to retry";
+    const meta = acquiring
+      ? [a.retry_wait_reason || "", a.retry_last_checked_at || ""].filter(Boolean).join("\n")
+      : "";
+    return `<span class="badge waiting" ${tipAttrs(label, TIP_PENDING_RETRY, meta)}`
+      + `>${label}</span>`;
+  }
   if (a.state === "finished") {
     const outcome = a.outcome || "finished";
     // `completed` is about how the process ended, not whether the task was done - the agent decided
@@ -1283,7 +1289,8 @@ function cellState(a) {
              { code: "a", glyph: "A", label: "halted: already successful — excluded from the totals" },
   }[verdictOf(a)];
   if (a.pending_retry)
-    return { code: "w", glyph: "↻", label: "waiting to retry" };
+    return { code: "w", glyph: "↻", label: Number(a.retry_acquire_attempts) > 0
+      ? "recovering sandbox lease" : "waiting to retry" };
   if (a.retry_state && a.retry_state !== "error")
     return { code: "r", glyph: "R", label: `retry: ${a.retry_state}` };
   if (isLive(a)) return { code: "r", glyph: "R", label: "running" };

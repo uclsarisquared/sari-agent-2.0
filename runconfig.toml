@@ -40,6 +40,16 @@ completion_guard = "vlm"
 # Failed-leg retries before the entire task is aborted.
 leg_retries = 1
 
+# What to do when a leg exhausts the completion guard's refusal cap (three refused STOPs, recorded as
+# end_reason "halt_forced"), after its retries above are spent.
+#   "continue" - leave the leg failed and unverified, then run the remaining legs anyway, treating
+#                the capped STOP as the agent's override to move on. The run still reaches a final
+#                answer, summary.json reports legs_unverified > 0, and task success stays false, so a
+#                guard that refused a correct leg costs a review rather than the whole run.
+#   "halt"     - abort the task on it, like every other failed leg.
+# Other end reasons (step_cap, time_cap, errors) always abort: those legs never claimed to be done.
+refusal_cap_action = "continue"
+
 [limits]
 # Standalone-agent limits. Both caps apply independently to each leg.
 max_steps = 30
@@ -77,9 +87,11 @@ tries = 3
 time_limit = 120.0
 per_leg_minutes = 40.0
 
-# Coordinator and sandbox startup behavior. Zero startup timeout waits indefinitely.
+# Coordinator and sandbox startup behavior. Zero startup timeout waits indefinitely; an individual
+# parked lease request reconnects after lease_acquire_timeout and retries with capped backoff.
 coordinator = "ws://127.0.0.1:9000"
 sandbox_startup_timeout = 30.0
+lease_acquire_timeout = 30.0
 
 # Optional battery destination. Without it, results use bench_runs/<timestamp>[_<name>].
 # Required when resuming a run (see `resume`)
@@ -108,3 +120,5 @@ map_dir = "agent/mapping/output_runs/run_0724_164652"
 # ocr_url = "http://127.0.0.1:9100"
 leg_retries = 1
 completion_guard = "vlm"
+# See [agent].refusal_cap_action above. Changing it makes a battery incompatible with a resume.
+refusal_cap_action = "continue"

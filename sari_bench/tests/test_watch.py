@@ -475,7 +475,13 @@ def test_pending_retry_scan_contract_and_legacy_default() -> None:
         pending = make_attempt(
             battery, "pending", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
         )
-        _stamp(pending, {"pending_retry": True, "requeue_reason": "api_retry_exhausted"})
+        _stamp(pending, {
+            "pending_retry": True,
+            "requeue_reason": "api_retry_exhausted",
+            "retry_acquire_attempts": 2,
+            "retry_wait_reason": "fleet has 1 registered sandbox(es): ready=0",
+            "retry_last_checked_at": "2026-08-19T12:00:00",
+        })
         archived = make_attempt(
             battery, "archived", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
         )
@@ -486,6 +492,8 @@ def test_pending_retry_scan_contract_and_legacy_default() -> None:
         attempts = {attempt["key"]: attempt for attempt in view["attempts"]}
         assert attempts["legacy/try01"]["pending_retry"] is False
         assert attempts["pending/try01"]["pending_retry"] is True
+        assert attempts["pending/try01"]["retry_acquire_attempts"] == 2
+        assert "ready=0" in attempts["pending/try01"]["retry_wait_reason"]
         assert attempts["archived/try01.requeue00"]["pending_retry"] is False
         assert view["counts"]["pending_retry"] == 1, view["counts"]
         assert view["counts"]["requeued"] == 2, view["counts"]
@@ -502,7 +510,9 @@ def test_pending_retry_scan_contract_and_legacy_default() -> None:
 
 def test_dashboard_pending_retry_contract() -> None:
     dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
-    assert 'code: "w", glyph: "↻", label: "waiting to retry"' in dashboard
+    assert 'code: "w", glyph: "↻"' in dashboard
+    assert '"recovering sandbox lease"' in dashboard
+    assert "a.retry_wait_reason" in dashboard
     assert ".cell.w .cellbtn" in dashboard and ".badge.waiting" in dashboard
     assert 'if (st.code === "w") pendingRetry += 1' in dashboard
     assert "awaitingReview || live || pendingRetry" in dashboard

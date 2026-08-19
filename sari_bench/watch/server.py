@@ -832,11 +832,13 @@ class WatchState:
                 map_dir=config["map_dir"],
                 leg_retries=config["leg_retries"],
                 completion_guard=config["completion_guard"],
+                refusal_cap_action=config["refusal_cap_action"],
                 context_policy=config["context_policy"],
                 api_max_attempts=config["api_max_attempts"],
                 max_api_requeues=config["max_api_requeues"],
                 timeout_grace=config["timeout_grace"],
                 sandbox_startup_timeout=config["sandbox_startup_timeout"],
+                lease_acquire_timeout=config["lease_acquire_timeout"],
                 capture_interval=config["capture_interval"],
                 python_executable=sys.executable,
                 agent_entry=self.retry_agent_entry or ORCHESTRATOR_ENTRY,
@@ -910,6 +912,12 @@ class WatchState:
                 or plan.get("context_policy")
                 or option("--context-policy", "baseline")
             ),
+            # Batteries predating the option aborted the attempt on the refusal cap; a retry of one
+            # must keep doing that rather than inherit today's default.
+            "refusal_cap_action": str(
+                plan.get("refusal_cap_action")
+                or option("--refusal-cap-action", "halt")
+            ),
             "api_max_attempts": int(
                 source_manifest.get("api_max_attempts")
                 or plan.get("api_max_attempts")
@@ -930,6 +938,9 @@ class WatchState:
             "timeout_grace": float(plan.get("timeout_grace_seconds") or 120.0),
             "sandbox_startup_timeout": max(
                 1.0, float(plan.get("sandbox_startup_timeout_seconds") or 30.0)
+            ),
+            "lease_acquire_timeout": max(
+                0.001, float(plan.get("lease_acquire_timeout_seconds") or 30.0)
             ),
             "capture_interval": float(
                 source_manifest.get("capture_interval_seconds")

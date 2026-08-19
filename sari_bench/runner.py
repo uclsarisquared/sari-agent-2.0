@@ -29,7 +29,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sari_bench import capture
-from sari_bench.client import CoordinatorClient, Lease, SandboxLost
+from sari_bench.client import (
+    DEFAULT_ACQUIRE_TIMEOUT_SECONDS,
+    CoordinatorClient,
+    Lease,
+    SandboxLost,
+)
 from sari_bench.protocol import DEFAULT_COORDINATOR_PORT, STATE_READY
 from sari_bench.watch import scan   # per-role token block parsing; pure filesystem/dict helpers
 from sari_bench.storage import (
@@ -66,6 +71,8 @@ API_RETRY_EXHAUSTED_SIGNAL = "api_retry_exhausted.json"
 API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
 DEFAULT_CAPACITY_POLL_SECONDS = 1.0
+DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+MAX_LEASE_ACQUIRE_BACKOFF_SECONDS = 30.0
 
 
 class SandboxStartupError(RuntimeError):
@@ -222,12 +229,14 @@ class BenchmarkRunner:
         map_dir: str | None,
         leg_retries: int,
         completion_guard: str = "deterministic",
+        refusal_cap_action: str = "continue",
         api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
         max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
         context_policy: str = "baseline",
         per_leg_minutes: float | None = None,
         timeout_grace: float = DEFAULT_TIMEOUT_GRACE_SECONDS,
         sandbox_startup_timeout: float = 0.0,
+        lease_acquire_timeout: float = DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS,
         capture_interval: float = capture.DEFAULT_INTERVAL_SECONDS,
         capacity_poll_interval: float = DEFAULT_CAPACITY_POLL_SECONDS,
         python_executable: str | None = None,
@@ -262,6 +271,9 @@ class BenchmarkRunner:
         if completion_guard not in {"deterministic", "vlm", "none"}:
             raise ValueError(f"unsupported completion guard: {completion_guard!r}")
         self.completion_guard = completion_guard
+        if refusal_cap_action not in {"continue", "halt"}:
+            raise ValueError(f"unsupported refusal cap action: {refusal_cap_action!r}")
+        self.refusal_cap_action = refusal_cap_action
         if api_max_attempts < 1:
             raise ValueError("api_max_attempts must be at least 1")
         if max_api_requeues < 0:
@@ -270,6 +282,9 @@ class BenchmarkRunner:
         self.max_api_requeues = max_api_requeues
         self.timeout_grace = timeout_grace
         self.sandbox_startup_timeout = sandbox_startup_timeout
+        if lease_acquire_timeout <= 0:
+            raise ValueError("lease_acquire_timeout must be positive")
+        self.lease_acquire_timeout = lease_acquire_timeout
         self.capture_interval = capture_interval
         self.capacity_poll_interval = capacity_poll_interval
         self.python_executable = python_executable or sys.executable
@@ -486,6 +501,7 @@ class BenchmarkRunner:
             "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
             "leg_retries": self.leg_retries,
             "completion_guard": self.completion_guard,
+            "refusal_cap_action": self.refusal_cap_action,
             "api_max_attempts": self.api_max_attempts,
             "max_api_requeues": self.max_api_requeues,
             "ocr_url": self.ocr_url,
@@ -505,6 +521,9 @@ class BenchmarkRunner:
                 return "deterministic"
             if key == "context_policy" and key not in battery:
                 return "baseline"
+            # Batteries recorded before the option existed aborted the task on the refusal cap.
+            if key == "refusal_cap_action" and key not in battery:
+                return "halt"
             if key == "ocr_url" and key not in battery:
                 return resolve_ocr_url()
             if key == "api_max_attempts" and key not in battery:
@@ -820,6 +839,90 @@ class BenchmarkRunner:
 
             await asyncio.sleep(min(1.0, max(0.0, remaining)))
 
+    async def _retry_fleet_status(self) -> str:
+        """Return a bounded, operator-readable fleet snapshot before a retry acquire."""
+        client = CoordinatorClient(self.coordinator_url)
+        try:
+            await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
+            pool = await asyncio.wait_for(client.pool(), timeout=self.lease_acquire_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - included in retry diagnostics
+            return f"fleet health check failed ({type(error).__name__}: {error})"
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+        ready = sum(
+            1
+            for sandbox in pool
+            if bool(sandbox.get("store_loaded", True))
+            and sandbox.get("state") == STATE_READY
+            and not sandbox.get("lease_id")
+        )
+        leased = sum(1 for sandbox in pool if bool(sandbox.get("lease_id")))
+        unavailable = max(0, len(pool) - ready - leased)
+        return (
+            f"fleet has {len(pool)} registered sandbox(es): "
+            f"ready={ready}, leased={leased}, unavailable={unavailable}"
+        )
+
+    async def _acquire_sandbox(
+        self,
+        index: int,
+        prompt_id: str,
+        attempt: int,
+        run_dir: Path,
+        *,
+        is_retry: bool,
+    ) -> tuple[CoordinatorClient, Lease]:
+        """Acquire with bounded RPCs and capped backoff, reconnecting after every failure.
+
+        The overall wait remains open-ended so a temporarily unavailable fleet does not turn an
+        infrastructure retry into a scored agent failure. Each individual connect/acquire is
+        bounded, however, and retry acquisitions re-check the fleet on every pass.
+        """
+        failures = 0
+        while True:
+            fleet_status = await self._retry_fleet_status() if is_retry else ""
+            client = CoordinatorClient(self.coordinator_url)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
+                lease = await client.acquire(timeout=self.lease_acquire_timeout)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await client.close()
+                raise
+            except Exception as error:  # noqa: BLE001 - coordinator/fleet recovery loop
+                with contextlib.suppress(Exception):
+                    await client.close()
+                failures += 1
+                initial_backoff = max(0.1, self.capacity_poll_interval)
+                backoff = min(
+                    MAX_LEASE_ACQUIRE_BACKOFF_SECONDS,
+                    initial_backoff * (2 ** min(failures - 1, 10)),
+                )
+                detail = f"{type(error).__name__}: {error}"
+                if is_retry:
+                    _patch_json(
+                        run_dir / ATTEMPT_MANIFEST,
+                        {
+                            "retry_acquire_attempts": failures,
+                            "retry_wait_reason": fleet_status or detail,
+                            "retry_last_checked_at": datetime.now().isoformat(
+                                timespec="seconds"
+                            ),
+                        },
+                    )
+                suffix = f"; {fleet_status}" if fleet_status else ""
+                _log(
+                    f"[w{index}] {prompt_id} try {attempt}: sandbox acquire failed "
+                    f"({detail}); retrying in {backoff:g}s{suffix}"
+                )
+                await asyncio.sleep(backoff)
+                continue
+            return client, lease
+
     def _write_battery_manifest(self, planned_attempts: int) -> None:
         """Battery-level facts the watcher cannot infer from run dirs alone.
 
@@ -848,11 +951,13 @@ class BenchmarkRunner:
                 "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
                 "leg_retries": self.leg_retries,
                 "completion_guard": self.completion_guard,
+                "refusal_cap_action": self.refusal_cap_action,
                 "api_max_attempts": self.api_max_attempts,
                 "max_api_requeues": self.max_api_requeues,
                 "ocr_url": self.ocr_url,
                 "timeout_grace_seconds": self.timeout_grace,
                 "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
+                "lease_acquire_timeout_seconds": self.lease_acquire_timeout,
                 "agent_entry": self.agent_entry,
                 "agent_cwd": str(Path(self.agent_cwd).resolve()),
                 "planned_attempts": planned_attempts,
@@ -951,9 +1056,15 @@ class BenchmarkRunner:
         requeues = api_requeues + sandbox_requeues
         run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
 
-        async with CoordinatorClient(self.coordinator_url) as client:
-            _log(f"[w{index}] {prompt_id} try {attempt}: waiting for a sandbox")
-            lease = await client.acquire()
+        _log(f"[w{index}] {prompt_id} try {attempt}: waiting for a sandbox")
+        client, lease = await self._acquire_sandbox(
+            index,
+            prompt_id,
+            attempt,
+            run_dir,
+            is_retry=requeues > 0,
+        )
+        try:
             _log(f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_id} ({lease.commands_uri})")
 
             # A winner can land while this worker is blocked in acquire(). Do not start an agent
@@ -1068,6 +1179,9 @@ class BenchmarkRunner:
                 f"tokens {result.tokens_in}in/{result.tokens_out}out, "
                 f"api calls {result.api_calls if result.api_calls is not None else 'unknown'})"
             )
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
 
     async def _spawn_agent(
         self,
@@ -1460,6 +1574,8 @@ class BenchmarkRunner:
             str(self.leg_retries),
             "--completion-guard",
             self.completion_guard,
+            "--refusal-cap-action",
+            self.refusal_cap_action,
             "--api-max-attempts",
             str(self.api_max_attempts),
             "--ws-uri",
@@ -1773,6 +1889,14 @@ async def async_main(argv: list[str] | None = None) -> int:
         default=configured("sandbox_startup_timeout", 0.0),
         help="Seconds to wait for a usable registered sandbox before failing (0 waits indefinitely).",
     )
+    parser.add_argument(
+        "--lease-acquire-timeout",
+        type=float,
+        default=configured(
+            "lease_acquire_timeout", DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS
+        ),
+        help="Seconds before a parked sandbox lease request reconnects and retries.",
+    )
     parser.add_argument("--output-dir", type=Path,
                         default=Path(configured("output_dir"))
                         if configured("output_dir") else None,
@@ -1845,6 +1969,13 @@ async def async_main(argv: list[str] | None = None) -> int:
         help="Completion verification passed to the agent; none accepts STOP without "
              "verification (default deterministic).",
     )
+    parser.add_argument(
+        "--refusal-cap-action",
+        choices=["continue", "halt"],
+        default=configured("refusal_cap_action", "continue"),
+        help="what an exhausted refusal cap does to the attempt, after leg retries: continue "
+             "(default) runs the remaining legs with the leg left unverified, halt aborts.",
+    )
     args = parser.parse_args(argv)
 
     prompts = load_prompts(args.prompts)
@@ -1861,6 +1992,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         parser.error("--concurrency must be at least 1")
     if args.sandbox_startup_timeout < 0:
         parser.error("--sandbox-startup-timeout cannot be negative")
+    if args.lease_acquire_timeout <= 0:
+        parser.error("--lease-acquire-timeout must be positive")
     if args.capture_interval < 0:
         parser.error("--capture-interval cannot be negative")
     if args.api_max_attempts < 1:
@@ -1906,10 +2039,12 @@ async def async_main(argv: list[str] | None = None) -> int:
         map_dir=args.map_dir,
         leg_retries=max(0, args.leg_retries),
         completion_guard=args.completion_guard,
+        refusal_cap_action=args.refusal_cap_action,
         api_max_attempts=args.api_max_attempts,
         max_api_requeues=args.max_api_requeues,
         ocr_url=args.ocr_url,
         sandbox_startup_timeout=args.sandbox_startup_timeout,
+        lease_acquire_timeout=args.lease_acquire_timeout,
         capture_interval=args.capture_interval,
         resume=args.resume,
     )

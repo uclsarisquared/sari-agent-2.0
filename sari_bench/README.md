@@ -66,5 +66,9 @@ stops the current process and re-queues the same logical attempt according to
 `tryNN.requeueNN`; after the re-queue budget is exhausted, the final result is recorded as
 `api_retry_exhausted`.
 
+Lease requests time out and reconnect after `[bench].lease_acquire_timeout` seconds (default 30),
+with capped exponential backoff. Logical retries also refresh fleet health before each acquisition;
+the dashboard shows that recovery state and its latest fleet diagnosis.
+
 The dashboard can grade, kill, and retry attempts. It has no authentication, so keep its default
 localhost binding unless the network is trusted.

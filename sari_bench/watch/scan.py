@@ -64,6 +64,9 @@ class AttemptView:
     state: str = "unknown"        # starting | running | finished | requeued | orphaned
     outcome: str = ""
     pending_retry: bool = False
+    retry_acquire_attempts: int = 0
+    retry_wait_reason: str = ""
+    retry_last_checked_at: str = ""
     success: bool = False
     end_reason: str = ""
     exit_code: int | None = None
@@ -404,6 +407,9 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
         state=str(manifest.get("state") or "unknown"),
         outcome=outcome,
         pending_retry=bool(manifest.get("pending_retry", False)),
+        retry_acquire_attempts=int(manifest.get("retry_acquire_attempts") or 0),
+        retry_wait_reason=str(manifest.get("retry_wait_reason") or ""),
+        retry_last_checked_at=str(manifest.get("retry_last_checked_at") or ""),
         # Repair old affected manifests at read time as well as preventing new ones in the runner.
         success=bool(manifest.get("success")) if outcome == "completed" else False,
         end_reason=str(manifest.get("end_reason") or ""),
