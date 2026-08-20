@@ -29,9 +29,10 @@ def test_context_ablation_configs_are_five_try_and_runner_is_complete() -> None:
 
     a7 = dict(configs["a7-no-stop-guard"])
     baseline = dict(configs["baseline"])
-    assert a7["context_policy"] == "baseline"
+    assert a7["context_policy"] == "baseline-2img"
     assert a7["completion_guard"] == "none"
     assert baseline["completion_guard"] == "vlm"
+    baseline["context_policy"] = "baseline-2img"
     a7.pop("name")
     baseline.pop("name")
     a7.pop("completion_guard")
@@ -40,6 +41,19 @@ def test_context_ablation_configs_are_five_try_and_runner_is_complete() -> None:
 
     from agent.agent_core.context_policy import CONTEXT_POLICIES
     assert "a7-no-stop-guard" not in CONTEXT_POLICIES
+    expected_policies = {
+        "baseline": "baseline",
+        "a1": "a1-2img",
+        "a2c": "a2c-2img",
+        "a3": "a3-2img",
+        "a4": "a4-2img",
+        "a5": "a5-2img",
+        "a6-2": "a6-2",
+        "a6-4": "a6-4",
+        "a7-no-stop-guard": "baseline-2img",
+        "hard-baseline": "baseline-2img",
+    }
+    assert {name: config["context_policy"] for name, config in configs.items()} == expected_policies
 
     runner = config_dir / "run_all.sh"
     text = runner.read_text(encoding="utf-8")

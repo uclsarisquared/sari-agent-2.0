@@ -29,14 +29,24 @@ from agent_core.context_policy import (
 
 
 def test_registry_defaults_and_named_arms() -> None:
-    assert CONTEXT_POLICY_NAMES == (
-        "baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"
-    )
+    assert set(CONTEXT_POLICY_NAMES) == {
+        "baseline", "baseline-2img", "a1", "a1-2img", "a2c", "a2c-2img",
+        "a3", "a3-2img", "a4", "a4-2img", "a5", "a5-2img", "a6-2", "a6-4",
+    }
     assert CONTEXT_POLICIES["baseline"] == ContextPolicy()
     assert CONTEXT_POLICIES["a2c"].semantic_dedupe == 0.80
     assert CONTEXT_POLICIES["a2c"].semantic_dedupe_window == 8
     assert CONTEXT_POLICIES["a2c"].semantic_keep_last == 12
     assert CONTEXT_POLICIES["a4"].findings_max_chars == 600
+    for base in ("baseline", "a1", "a2c", "a3", "a4", "a5"):
+        composed = CONTEXT_POLICIES[f"{base}-2img"]
+        original = CONTEXT_POLICIES[base]
+        assert composed.actor_image_history == 2
+        for field in (
+            "semantic_dedupe", "semantic_dedupe_window", "semantic_keep_last",
+            "findings_max_chars", "findings_enabled", "episodic_in_actor",
+        ):
+            assert getattr(composed, field) == getattr(original, field)
     with pytest.raises(FrozenInstanceError):
         CONTEXT_POLICIES["baseline"].findings_enabled = False  # type: ignore[misc]
 

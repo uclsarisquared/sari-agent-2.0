@@ -21,11 +21,19 @@ class ContextPolicy:
 
 CONTEXT_POLICIES: Mapping[str, ContextPolicy] = {
     "baseline": ContextPolicy(),
+    "baseline-2img": ContextPolicy(actor_image_history=2),
     "a1": ContextPolicy(semantic_keep_last=0),
+    "a1-2img": ContextPolicy(semantic_keep_last=0, actor_image_history=2),
     "a2c": ContextPolicy(semantic_dedupe=0.80, semantic_keep_last=12),
+    "a2c-2img": ContextPolicy(
+        semantic_dedupe=0.80, semantic_keep_last=12, actor_image_history=2
+    ),
     "a3": ContextPolicy(findings_enabled=False),
+    "a3-2img": ContextPolicy(findings_enabled=False, actor_image_history=2),
     "a4": ContextPolicy(findings_max_chars=600),
+    "a4-2img": ContextPolicy(findings_max_chars=600, actor_image_history=2),
     "a5": ContextPolicy(episodic_in_actor=False),
+    "a5-2img": ContextPolicy(episodic_in_actor=False, actor_image_history=2),
     "a6-2": ContextPolicy(actor_image_history=2),
     "a6-4": ContextPolicy(actor_image_history=4),
 }
