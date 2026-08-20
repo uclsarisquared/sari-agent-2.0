@@ -178,6 +178,32 @@ def test_load_prompts_accepts_the_battery_schema() -> None:
     print("ok  prompt batteries load in every documented shape")
 
 
+def test_automatic_retries_outrank_fresh_work_fifo() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id=name, prompt=name) for name in ("api", "lost", "fresh-a", "fresh-b")],
+            workspace,
+        )
+        runner._enqueue_work("fresh-a", 1, priority=1)
+        runner._enqueue_work("fresh-b", 1, priority=1)
+        for prompt_id, reason in (("api", "api_retry_exhausted"), ("lost", "sandbox_lost")):
+            run_dir = runner.output_dir / prompt_id / "try01"
+            run_dir.mkdir(parents=True)
+            (run_dir / "attempt.json").write_text("{}", encoding="utf-8")
+            runner._schedule_requeue(
+                run_dir,
+                reason=reason,
+                item=(prompt_id, 1, int(prompt_id == "api"), int(prompt_id == "lost")),
+                wall_seconds=3.0,
+            )
+
+        ordered = [runner._queue.get_nowait().prompt_id for _ in range(4)]
+        assert ordered == ["api", "lost", "fresh-a", "fresh-b"], ordered
+    print("ok  API and sandbox-loss retries outrank fresh work and remain FIFO")
+
+
 def test_completion_guard_is_threaded_into_agent_command_and_battery_config() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
@@ -641,10 +667,16 @@ async def test_api_requeue_is_pending_until_redispatch() -> None:
             assert pending["state"] == "requeued" and pending["outcome"] == "requeued"
             assert pending["pending_retry"] is True
             assert pending["requeue_reason"] == "api_retry_exhausted"
+            assert pending["retry_queued_at"]
+            assert pending["wall_seconds"] >= 0
             view = scan.scan_battery(workspace / "runs", time.time()).as_dict()
             assert view["attempts"][0]["pending_retry"] is True
             assert view["counts"]["pending_retry"] == 1
             assert view["counts"].get("requeued", 0) == 0
+            elapsed = view["attempts"][0]["elapsed_seconds"]
+            later = scan.scan_attempt(run_dir, workspace / "runs", time.time() + 600).as_dict()
+            assert later["elapsed_seconds"] == elapsed
+            assert later["remaining_seconds"] is None
 
             # The reset is deliberately held. The retry must time out, disconnect its parked
             # acquire, re-check fleet health, and keep trying instead of hanging in one RPC.
@@ -1185,7 +1217,9 @@ async def test_watcher_retry_replaces_a_finished_try_after_runner_exit() -> None
             replacement = json.loads((run_dir / "attempt.json").read_text())
             assert replacement["run_id"] != old_manifest["run_id"]
             assert replacement["state"] == "finished"
-            assert not archive.exists(), "sandbox-loss history survived destructive retry"
+            assert archive.exists(), "existing sandbox-loss history was discarded"
+            preserved = battery / "p1" / "try01.requeue01" / "attempt.json"
+            assert json.loads(preserved.read_text())["run_id"] == old_manifest["run_id"]
             rows = [
                 json.loads(line)
                 for line in (battery / "attempts.jsonl").read_text().splitlines()
@@ -1201,7 +1235,7 @@ async def test_watcher_retry_replaces_a_finished_try_after_runner_exit() -> None
         finally:
             await sandbox.close()
             await coordinator.stop()
-    print("ok  watcher retry deletes history and replaces a finished try after runner exit")
+    print("ok  watcher retry archives history and replaces a finished try after runner exit")
 
 
 async def test_watcher_retry_stops_and_replaces_a_live_try() -> None:
@@ -1517,6 +1551,7 @@ async def test_resume_stops_an_orphan_before_pid_publication() -> None:
 
 async def main() -> int:
     test_load_prompts_accepts_the_battery_schema()
+    test_automatic_retries_outrank_fresh_work_fifo()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
     test_refusal_cap_action_is_threaded_and_resume_checked()
     for test in (

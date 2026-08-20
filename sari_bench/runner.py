@@ -91,6 +91,14 @@ class ApiRetriesExhausted(RuntimeError):
     """The agent exhausted its transient OpenAI-compatible API retry budget."""
 
 
+class PromptAlreadySuccessful(RuntimeError):
+    """A durable sibling winner appeared while retry dispatch was waiting."""
+
+    def __init__(self, winner: dict[str, Any]) -> None:
+        super().__init__(str(winner.get("winning_attempt_key") or ALREADY_SUCCESSFUL))
+        self.winner = winner
+
+
 # Per-attempt manifest, written INTO the run dir before the agent is spawned. attempts.jsonl only
 # gains a row when an attempt finishes, so this is the only record that an attempt is in flight -
 # it is what `sari_bench watch` discovers runs by, and it survives the runner dying.
@@ -139,6 +147,19 @@ class Prompt:
     looking_for: str = ""
 
 
+@dataclass(order=True)
+class WorkItem:
+    """Priority queue entry; retries outrank fresh work and remain FIFO among themselves."""
+
+    priority: int
+    sequence: int
+    prompt_id: str = field(compare=False)
+    attempt: int = field(compare=False)
+    api_requeues: int = field(default=0, compare=False)
+    sandbox_requeues: int = field(default=0, compare=False)
+    logical_retry: bool = field(default=False, compare=False)
+
+
 @dataclass
 class AttemptResult:
     prompt_id: str
@@ -175,6 +196,81 @@ class AttemptResult:
     # attempt whose agent predates per-role accounting; see scan.normalize_by_role on why that is
     # not zero-filled.
     tokens_by_role: dict[str, Any] = field(default_factory=dict)
+
+
+def materialize_already_successful(
+    *,
+    output_dir: Path,
+    prompt: Prompt,
+    attempt: int,
+    winner: dict[str, Any],
+    arm: str,
+    context_policy: str,
+    api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
+    max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
+    ocr_url: str = "",
+    requeues: int = 0,
+) -> AttemptResult | None:
+    """Idempotently archive one prior execution and materialize its cancelled logical try."""
+    run_dir = output_dir / prompt.id / f"try{attempt:02d}"
+    lock_path = run_dir.parent / f".try{attempt:02d}.materialize.lock"
+    with file_lock(lock_path):
+        existing = BenchmarkRunner._read_manifest(run_dir / ATTEMPT_MANIFEST)
+        if (
+            existing.get("state") == "finished"
+            and existing.get("end_reason") == ALREADY_SUCCESSFUL
+        ):
+            return None
+
+        BenchmarkRunner._rotate_run_dir(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ended_at = datetime.now().isoformat(timespec="seconds")
+        fields = BenchmarkRunner._cancellation_fields(winner)
+        _write_json_atomic(
+            run_dir / ATTEMPT_MANIFEST,
+            {
+                "run_id": uuid.uuid4().hex,
+                "prompt_id": prompt.id,
+                "prompt": prompt.prompt,
+                "family": prompt.family,
+                "looking_for": prompt.looking_for,
+                "attempt": attempt,
+                "arm": arm,
+                "context_policy": context_policy,
+                "api_max_attempts": api_max_attempts,
+                "max_api_requeues": max_api_requeues,
+                "ocr_url": ocr_url,
+                "run_dir": str(run_dir),
+                "state": "finished",
+                "outcome": "skipped",
+                "success": False,
+                "end_reason": ALREADY_SUCCESSFUL,
+                "pid": None,
+                "wall_seconds": 0.0,
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "finalized_at": ended_at,
+                **fields,
+            },
+        )
+        result = AttemptResult(
+            prompt_id=prompt.id,
+            attempt=attempt,
+            prompt=prompt.prompt,
+            family=prompt.family,
+            outcome="skipped",
+            context_policy=context_policy,
+            end_reason=ALREADY_SUCCESSFUL,
+            wall_seconds=0.0,
+            run_dir=str(run_dir),
+            requeues=requeues,
+            api_max_attempts=api_max_attempts,
+            max_api_requeues=max_api_requeues,
+            ocr_url=ocr_url,
+            winning_attempt_key=str(winner.get("winning_attempt_key") or ""),
+        )
+        upsert_attempt_row(output_dir, asdict(result))
+        return result
 
 
 def load_prompts(path: Path) -> list[Prompt]:
@@ -243,10 +339,12 @@ class BenchmarkRunner:
         agent_entry: str = ORCHESTRATOR_ENTRY,
         agent_cwd: Path = OVERHAUL_DIR,
         work_items: list[tuple[str, int]] | None = None,
+        retry_work_items: bool = False,
         initialize_battery: bool = True,
         resume: bool = False,
         ocr_url: str | None = None,
         ocr_health_check: Callable[[str], dict[str, Any]] = check_ocr_health,
+        attempt_started_callback: Callable[[str, Path], None] | None = None,
     ) -> None:
         self.prompts = {prompt.id: prompt for prompt in prompts}
         self.coordinator_url = coordinator_url
@@ -293,12 +391,15 @@ class BenchmarkRunner:
         self.agent_entry = agent_entry
         self.agent_cwd = agent_cwd
         self.work_items = work_items
+        self.retry_work_items = retry_work_items
         self.initialize_battery = initialize_battery
         self.resume = resume
         self.ocr_url = resolve_ocr_url(ocr_url)
         self.ocr_health_check = ocr_health_check
+        self.attempt_started_callback = attempt_started_callback
 
-        self._queue: asyncio.Queue[tuple[str, int, int, int]] = asyncio.Queue()
+        self._queue: asyncio.PriorityQueue[WorkItem] = asyncio.PriorityQueue()
+        self._work_sequence = 0
         self._results: list[AttemptResult] = []
         self._results_lock = asyncio.Lock()
         self._started_at = 0.0
@@ -334,7 +435,17 @@ class BenchmarkRunner:
         for prompt_id, attempt in work_items:
             if prompt_id not in self.prompts:
                 raise ValueError(f"unknown work-item prompt: {prompt_id}")
-            self._queue.put_nowait((prompt_id, attempt, 0, 0))
+            if self.retry_work_items:
+                winner = self._human_verified_winner(prompt_id)
+                if winner is not None:
+                    await self._record_skipped(prompt_id, attempt, 0, winner)
+                    continue
+            self._enqueue_work(
+                prompt_id,
+                attempt,
+                priority=0 if self.retry_work_items else 1,
+                logical_retry=self.retry_work_items,
+            )
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         total = self._queue.qsize()
@@ -378,6 +489,27 @@ class BenchmarkRunner:
             await asyncio.gather(*workers, return_exceptions=True)
 
         return self._write_summary()
+
+    def _enqueue_work(
+        self,
+        prompt_id: str,
+        attempt: int,
+        *,
+        priority: int,
+        api_requeues: int = 0,
+        sandbox_requeues: int = 0,
+        logical_retry: bool = False,
+    ) -> None:
+        self._queue.put_nowait(WorkItem(
+            priority=priority,
+            sequence=self._work_sequence,
+            prompt_id=prompt_id,
+            attempt=attempt,
+            api_requeues=api_requeues,
+            sandbox_requeues=sandbox_requeues,
+            logical_retry=logical_retry,
+        ))
+        self._work_sequence += 1
 
     @staticmethod
     def _payload_entries(path: Path) -> list[Path]:
@@ -888,8 +1020,36 @@ class BenchmarkRunner:
             client = CoordinatorClient(self.coordinator_url)
             try:
                 await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
-                lease = await client.acquire(timeout=self.lease_acquire_timeout)
+                acquire_task = asyncio.create_task(
+                    client.acquire(timeout=self.lease_acquire_timeout)
+                )
+                winner_task = (
+                    asyncio.create_task(self._wait_for_prompt_winner(prompt_id))
+                    if is_retry else None
+                )
+                try:
+                    if winner_task is None:
+                        lease = await acquire_task
+                    else:
+                        done, _pending = await asyncio.wait(
+                            {acquire_task, winner_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if winner_task in done and winner_task.result() is not None:
+                            acquire_task.cancel()
+                            await asyncio.gather(acquire_task, return_exceptions=True)
+                            await client.close()
+                            raise PromptAlreadySuccessful(winner_task.result())
+                        lease = await acquire_task
+                finally:
+                    if winner_task is not None and not winner_task.done():
+                        winner_task.cancel()
+                        await asyncio.gather(winner_task, return_exceptions=True)
             except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await client.close()
+                raise
+            except PromptAlreadySuccessful:
                 with contextlib.suppress(Exception):
                     await client.close()
                 raise
@@ -919,9 +1079,26 @@ class BenchmarkRunner:
                     f"[w{index}] {prompt_id} try {attempt}: sandbox acquire failed "
                     f"({detail}); retrying in {backoff:g}s{suffix}"
                 )
-                await asyncio.sleep(backoff)
+                if is_retry:
+                    try:
+                        winner = await asyncio.wait_for(
+                            self._wait_for_prompt_winner(prompt_id), timeout=backoff
+                        )
+                    except asyncio.TimeoutError:
+                        winner = None
+                    if winner is not None:
+                        raise PromptAlreadySuccessful(winner)
+                else:
+                    await asyncio.sleep(backoff)
                 continue
             return client, lease
+
+    async def _wait_for_prompt_winner(self, prompt_id: str) -> dict[str, Any]:
+        while True:
+            winner = self._human_verified_winner(prompt_id)
+            if winner is not None:
+                return winner
+            await asyncio.sleep(min(0.1, max(0.01, self.capacity_poll_interval)))
 
     def _write_battery_manifest(self, planned_attempts: int) -> None:
         """Battery-level facts the watcher cannot infer from run dirs alone.
@@ -995,8 +1172,10 @@ class BenchmarkRunner:
         *,
         reason: str,
         item: tuple[str, int, int, int],
+        wall_seconds: float,
     ) -> None:
         """Publish a logical retry before putting it back on the worker queue."""
+        queued_wall = time.time()
         _patch_json(
             run_dir / ATTEMPT_MANIFEST,
             {
@@ -1004,15 +1183,30 @@ class BenchmarkRunner:
                 "outcome": "requeued",
                 "pending_retry": True,
                 "requeue_reason": reason,
-                "ended_at": datetime.now().isoformat(timespec="seconds"),
+                "retry_queued_at": datetime.fromtimestamp(queued_wall).isoformat(timespec="seconds"),
+                "retry_queued_epoch": round(queued_wall, 3),
+                "wall_seconds": round(max(0.0, wall_seconds), 1),
+                "ended_at": datetime.fromtimestamp(queued_wall).isoformat(timespec="seconds"),
             },
         )
-        self._queue.put_nowait(item)
+        prompt_id, attempt, api_requeues, sandbox_requeues = item
+        self._enqueue_work(
+            prompt_id,
+            attempt,
+            priority=0,
+            api_requeues=api_requeues,
+            sandbox_requeues=sandbox_requeues,
+            logical_retry=True,
+        )
 
     async def _worker(self, index: int) -> None:
         """One worker owns one coordinator connection, and therefore one lease at a time."""
         while True:
-            prompt_id, attempt, api_requeues, sandbox_requeues = await self._queue.get()
+            item = await self._queue.get()
+            prompt_id = item.prompt_id
+            attempt = item.attempt
+            api_requeues = item.api_requeues
+            sandbox_requeues = item.sandbox_requeues
             requeues = api_requeues + sandbox_requeues
             try:
                 winner = self._human_verified_winner(prompt_id)
@@ -1024,7 +1218,12 @@ class BenchmarkRunner:
                     )
                     continue
                 await self._run_attempt(
-                    index, prompt_id, attempt, api_requeues, sandbox_requeues
+                    index,
+                    prompt_id,
+                    attempt,
+                    api_requeues,
+                    sandbox_requeues,
+                    logical_retry=item.logical_retry,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1051,19 +1250,29 @@ class BenchmarkRunner:
         attempt: int,
         api_requeues: int,
         sandbox_requeues: int,
+        *,
+        logical_retry: bool = False,
     ) -> None:
         prompt = self.prompts[prompt_id]
         requeues = api_requeues + sandbox_requeues
         run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
 
         _log(f"[w{index}] {prompt_id} try {attempt}: waiting for a sandbox")
-        client, lease = await self._acquire_sandbox(
-            index,
-            prompt_id,
-            attempt,
-            run_dir,
-            is_retry=requeues > 0,
-        )
+        try:
+            client, lease = await self._acquire_sandbox(
+                index,
+                prompt_id,
+                attempt,
+                run_dir,
+                is_retry=logical_retry or requeues > 0,
+            )
+        except PromptAlreadySuccessful as successful:
+            await self._record_skipped(prompt_id, attempt, requeues, successful.winner)
+            _log(
+                f"[w{index}] {prompt_id} try {attempt}: retry withdrawn; "
+                f"{successful.winner['winning_attempt_key']} is human-verified successful"
+            )
+            return
         try:
             _log(f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_id} ({lease.commands_uri})")
 
@@ -1095,6 +1304,7 @@ class BenchmarkRunner:
                         run_dir,
                         reason="api_retry_exhausted",
                         item=(prompt_id, attempt, api_requeues + 1, sandbox_requeues),
+                        wall_seconds=time.monotonic() - started,
                     )
                     _log(
                         f"[w{index}] {prompt_id} try {attempt}: {exhausted}; requeueing"
@@ -1115,6 +1325,7 @@ class BenchmarkRunner:
                         run_dir,
                         reason="sandbox_lost",
                         item=(prompt_id, attempt, api_requeues, sandbox_requeues + 1),
+                        wall_seconds=time.monotonic() - started,
                     )
                     _log(f"[w{index}] {prompt_id} try {attempt}: {lost}; requeueing")
                     return
@@ -1278,6 +1489,9 @@ class BenchmarkRunner:
                     "process_start_ticks": self._process_start_ticks(process.pid),
                 },
             )
+            if self.attempt_started_callback is not None:
+                with contextlib.suppress(Exception):
+                    self.attempt_started_callback(f"{prompt.id}/try{attempt:02d}", run_dir)
 
             # Close the last publication race: success may have been reviewed after the pre-spawn
             # check, or the watcher may have stamped this starting manifest before it had a PID to
@@ -1475,53 +1689,21 @@ class BenchmarkRunner:
     ) -> None:
         """Materialises a queued/non-spawned try as a real terminal attempt."""
         prompt = self.prompts[prompt_id]
-        run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
-        self._rotate_run_dir(run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        ended_at = datetime.now().isoformat(timespec="seconds")
-        fields = self._cancellation_fields(winner)
-        _write_json_atomic(
-            run_dir / ATTEMPT_MANIFEST,
-            {
-                "run_id": uuid.uuid4().hex,
-                "prompt_id": prompt.id,
-                "prompt": prompt.prompt,
-                "family": prompt.family,
-                "looking_for": prompt.looking_for,
-                "attempt": attempt,
-                "arm": self.arm,
-                "context_policy": self.context_policy,
-                "api_max_attempts": self.api_max_attempts,
-                "max_api_requeues": self.max_api_requeues,
-                "ocr_url": self.ocr_url,
-                "run_dir": str(run_dir),
-                "state": "finished",
-                "outcome": "skipped",
-                "success": False,
-                "end_reason": ALREADY_SUCCESSFUL,
-                "pid": None,
-                "wall_seconds": 0.0,
-                "started_at": ended_at,
-                "ended_at": ended_at,
-                **fields,
-            },
+        result = materialize_already_successful(
+            output_dir=self.output_dir,
+            prompt=prompt,
+            attempt=attempt,
+            winner=winner,
+            arm=self.arm,
+            context_policy=self.context_policy,
+            api_max_attempts=self.api_max_attempts,
+            max_api_requeues=self.max_api_requeues,
+            ocr_url=self.ocr_url,
+            requeues=requeues,
         )
-        await self._record(
-            AttemptResult(
-                prompt_id=prompt.id,
-                attempt=attempt,
-                prompt=prompt.prompt,
-                family=prompt.family,
-                outcome="skipped",
-                end_reason=ALREADY_SUCCESSFUL,
-                wall_seconds=0.0,
-                run_dir=str(run_dir),
-                requeues=requeues,
-                ocr_url=self.ocr_url,
-                winning_attempt_key=str(winner.get("winning_attempt_key") or ""),
-            )
-        )
-        _patch_json(run_dir / ATTEMPT_MANIFEST, {"finalized_at": ended_at})
+        if result is None:
+            return
+        await self._record(result)
 
     async def _capture_until_exit(
         self,

@@ -67,6 +67,7 @@ class AttemptView:
     retry_acquire_attempts: int = 0
     retry_wait_reason: str = ""
     retry_last_checked_at: str = ""
+    retry_queued_at: str = ""
     success: bool = False
     end_reason: str = ""
     exit_code: int | None = None
@@ -410,6 +411,7 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
         retry_acquire_attempts=int(manifest.get("retry_acquire_attempts") or 0),
         retry_wait_reason=str(manifest.get("retry_wait_reason") or ""),
         retry_last_checked_at=str(manifest.get("retry_last_checked_at") or ""),
+        retry_queued_at=str(manifest.get("retry_queued_at") or ""),
         # Repair old affected manifests at read time as well as preventing new ones in the runner.
         success=bool(manifest.get("success")) if outcome == "completed" else False,
         end_reason=str(manifest.get("end_reason") or ""),
@@ -444,11 +446,11 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
 
     started = manifest.get("started_epoch")
     deadline = manifest.get("deadline_epoch")
-    if view.state == "finished":
+    if view.state == "finished" or view.pending_retry:
         view.elapsed_seconds = float(manifest.get("wall_seconds") or 0.0)
     elif isinstance(started, (int, float)):
         view.elapsed_seconds = round(now - float(started), 1)
-    if view.state != "finished" and isinstance(deadline, (int, float)):
+    if view.state != "finished" and not view.pending_retry and isinstance(deadline, (int, float)):
         view.remaining_seconds = round(float(deadline) - now, 1)
 
     if view.state in {"starting", "running"}:

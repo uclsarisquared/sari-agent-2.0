@@ -265,9 +265,29 @@
   kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 4px; background: #262b33; color: var(--ink); font: inherit;
         font-size: .92em; font-weight: 650; line-height: 1.5; }
-  /* Inline flow, not flex: the bar is already a flex row, and the hint has to be free to wrap as
-     one sentence when the note beside it grows. */
-  .ov-hint { margin-left: auto; text-align: right; }
+  #ov-note { margin-right: auto; }
+
+  /* The legend. Two columns, and only two: the cell exactly as the grid draws it, and what it
+     means. A shortcut is part of the meaning rather than a third column of its own, so the key
+     sits at the head of the description where it reads as a sentence. */
+  #legend .overlay-box { width: min(560px, 100%); }
+  #legend-rows { padding: 4px 14px 12px; overflow-y: auto;
+                 scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
+  #legend-rows table { border-collapse: separate; border-spacing: 0; width: 100%;
+                       font-size: 12.5px; }
+  #legend-rows td { padding: 6px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  #legend-rows tr:last-child td { border-bottom: 0; }
+  /* A sample wears the grid's own .cell/.cellbtn classes, so its fill and letter can never drift
+     from the table's - a new cell colour cannot be added there without also landing here. The cell
+     is a span rather than a td so the column keeps its own padding, and inert throughout: nothing
+     in this panel is clickable. */
+  #legend-rows td.sample { width: 1%; padding-right: 14px; }
+  #legend-rows .cell { display: inline-block; }
+  #legend-rows .cellbtn { pointer-events: none; border-radius: 4px; }
+  #legend-rows td.what { color: var(--dim); line-height: 1.45; }
+  #legend-rows td.what kbd { margin-right: 6px; }
+  #legend-note { padding: 8px 14px 12px; color: var(--dim); font-size: 12px;
+                 border-top: 1px solid var(--line); }
 
   table.ov tfoot td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600;
                       background: #1a1d23; }
@@ -441,6 +461,8 @@
   </span>
   <span class="muted" id="progress"></span>
   <span class="muted" id="pool"></span>
+  <button class="pill" id="fleet-cap" data-act="fleet-cap" title="limit new sandbox leases">
+    cap: all</button>
   <span class="muted" id="updated" style="margin-left:auto"></span>
 </header>
 <main id="grid"><div class="empty" id="empty">Loading…</div></main>
@@ -450,9 +472,11 @@
     <a class="btn" href="/api/report.csv" download>export to CSV</a>
     <a class="btn" href="/api/report.csv?grain=roles" data-grain="roles" download
        title="one row per attempt per reasoner — tokens, calls and share of the attempt's spend">export tokens by role</a>
+    <!-- What a cell means and what a key does are the same question asked twice, so they are one
+         button: the bar keeps only the shape of the grid, and the glyphs and shortcuts move into a
+         panel that can show each cell as it actually looks. -->
+    <button id="legend-open" data-act="legend-open" aria-haspopup="dialog">legend &amp; controls</button>
     <span class="muted" id="ov-note"></span>
-    <span class="muted ov-hint">hover a try cell and press <kbd>P</kbd> pass, <kbd>F</kbd> fail,
-      <kbd>E</kbd> invalid, <kbd>A</kbd> already successful, <kbd>R</kbd> retry</span>
   </div>
   <div class="ov-scroll"><table class="ov" id="ov-table"></table></div>
 </section>
@@ -520,6 +544,18 @@
   </div>
 </div>
 
+<div id="legend" class="overlay" role="dialog" aria-modal="true" aria-labelledby="legend-title">
+  <div class="overlay-box">
+    <div class="overlay-head">
+      <strong id="legend-title">legend &amp; controls</strong>
+      <span class="muted">what a try cell means</span>
+      <button data-act="legend-close" style="margin-left:auto">close</button>
+    </div>
+    <div id="legend-rows"><table><tbody></tbody></table></div>
+    <div id="legend-note">Keys act on the try cell under the cursor: hover one and press.</div>
+  </div>
+</div>
+
 <script>
 const POLL_MS = 2000;
 const FRAME_POLL_MS = 250;      // 4 FPS, matching the runner's default capture cadence
@@ -563,35 +599,20 @@ let activeTab = "live";
 // /api/state (Discord alerts and the report still use all of it), and flipping the switch is a
 // re-render rather than a round trip.
 const ALERT_AT = 0.6, WATCH_AT = 0.3;   // health.py's thresholds
-const STABLE_SIGNALS = new Set(["stalled"]);
 let showCollapse = localStorage.getItem("sari.collapse") === "on";
 
 // One attempt's health as this page is currently set to read it: the banner's level and words, and
-// the score the grid is ordered by. With the toggle off, only the signals in STABLE_SIGNALS count -
-// including toward the ranking, which is what stops the reshuffling.
+// the score the grid is ordered by. Off means no display signal and no health-based ordering.
 function healthOf(a) {
   const raw = (a && a.health) || {};
   if (showCollapse) {
     return { level: raw.level || "ok", summary: raw.summary || "", score: Number(raw.score) || 0 };
   }
-  const kept = (raw.signals || []).filter(s => STABLE_SIGNALS.has(s.name));
-  const score = Math.min(1, kept.reduce((sum, s) => sum + (Number(s.weight) || 0), 0));
-  return {
-    level: score >= ALERT_AT ? "alert" : score >= WATCH_AT ? "watch" : "ok",
-    summary: kept.map(s => s.detail).join(", "),
-    score,
-  };
+  return { level: "ok", summary: "", score: 0 };
 }
 
 const TIP_COLLAPSE =
-  "The repetition signals — spatial_loop, action_loop, mode_thrash, blocked, refusal_spiral and the "
-  + "budget burns — are inferred from how the agent has been moving over its last 10 steps. They are "
-  + "guesses, they come and go as that window slides, and the tiles are ranked by the score they "
-  + "produce, so leaving them on reshuffles the grid under you while you are reading one attempt. "
-  + "Off, a tile's banner and its place in the grid answer to `stalled` alone: no step record in "
-  + "five minutes, which means a hung call or a wedged sim rather than an opinion about the run. "
-  + "This is a display choice only — the full score is still recorded, still ranked in the report, "
-  + "and still what Discord collapse alerts are sent on.";
+  "Shows warnings and sorts live runs by health. Reports and Discord alerts are unchanged.";
 
 function renderCollapseToggle() {
   const button = document.getElementById("collapse");
@@ -606,6 +627,29 @@ function toggleCollapse() {
   localStorage.setItem("sari.collapse", showCollapse ? "on" : "off");
   renderCollapseToggle();
   lastOrder = "";  // the ranking key just changed under every card
+  refresh();
+}
+
+async function setFleetCap() {
+  const current = (latestState && latestState.fleet) || {};
+  const shown = current.capacity_limit === null || current.capacity_limit === undefined
+    ? "all" : String(current.capacity_limit);
+  const raw = prompt("Active sandbox lease cap (all or a non-negative integer):", shown);
+  if (raw === null) return;
+  const value = raw.trim().toLowerCase();
+  const limit = value === "all" || value === "" ? null : Number(value);
+  if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
+    alert("Cap must be 'all' or a non-negative integer.");
+    return;
+  }
+  const response = await fetch("/api/fleet/cap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  const data = await response.json();
+  if (!data.ok) alert("Could not update fleet cap: " + (data.error || "unknown error"));
+  else notify(`Sandbox lease cap set to ${limit === null ? "all" : limit}.`);
   refresh();
 }
 
@@ -624,7 +668,7 @@ const apiAggregate = attempts => {
 const fmtApiAggregate = value => !value.total ? "—"
   : value.known === value.total ? fmtNum(value.sum)
   : value.known ? `${fmtNum(value.sum)} (${value.known}/${value.total} metered)`
-  : "?";
+  : `unknown (0/${value.total} metered)`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isLive = a => a.state === "starting" || a.state === "running";
 
@@ -740,7 +784,7 @@ const TIP_PENDING_RETRY = "The battery runner has scheduled this logical try aga
 const TIP_ORPHANED = "The manifest still says running, but the process id it recorded is gone: the "
   + "runner died before it could close this try out. Nothing will ever finish it, which is why it "
   + "takes no verdict — retry it.";
-const TIP_RETRY = "The watcher is tearing this try down and re-dispatching it: `queued` is waiting "
+const TIP_RETRY = "The watcher is tearing this try down and re-dispatching it: `waiting` is holding "
   + "for a worker, `running` is the fresh run. Its previous logs, frames, replay and verdict are "
   + "already gone.";
 const TIP_RETRY_ERROR = "The re-dispatch failed. The try is left as it was; the reason is on the "
@@ -789,21 +833,18 @@ function verdictBadge(a) {
 }
 
 function statusBadge(a) {
+  if (a.pending_retry || a.retry_state === "waiting") {
+    const meta = [a.retry_wait_reason || "", a.retry_last_checked_at || ""]
+      .filter(Boolean).join("\n");
+    return `<span class="badge waiting" ${tipAttrs("waiting to retry", TIP_PENDING_RETRY, meta)}`
+      + `>waiting to retry</span>`;
+  }
   if (a.retry_state) {
-    const error = a.retry_state === "error";
+    const error = a.retry_state === "failed";
     const cls = error ? "alert" : "watch";
     const tip = tipAttrs(`retry: ${a.retry_state}`, error ? TIP_RETRY_ERROR : TIP_RETRY,
       error ? (a.retry_error || "") : "");
     return `<span class="badge ${cls}" ${tip}>retry: ${esc(a.retry_state)}</span>`;
-  }
-  if (a.pending_retry) {
-    const acquiring = Number(a.retry_acquire_attempts) > 0;
-    const label = acquiring ? "recovering sandbox lease" : "waiting to retry";
-    const meta = acquiring
-      ? [a.retry_wait_reason || "", a.retry_last_checked_at || ""].filter(Boolean).join("\n")
-      : "";
-    return `<span class="badge waiting" ${tipAttrs(label, TIP_PENDING_RETRY, meta)}`
-      + `>${label}</span>`;
   }
   if (a.state === "finished") {
     const outcome = a.outcome || "finished";
@@ -1085,12 +1126,12 @@ function patchCard(entry, a) {
     : "Terminate the agent; the runner records the attempt";
   const runnerRetryPending = Boolean(a.pending_retry);
   refs.retry.disabled = runnerRetryPending
-    || Boolean(a.retry_state && a.retry_state !== "error");
+    || Boolean(a.retry_state && a.retry_state !== "failed");
   refs.retry.title = runnerRetryPending
     ? "The battery runner already has this try waiting to retry"
     : (a.retry_error || "Delete this try's history and run it again");
   setText(refs.retry, runnerRetryPending ? "waiting to retry"
-    : (a.retry_state && a.retry_state !== "error" ? `retry: ${a.retry_state}` : "retry"));
+    : (a.retry_state && a.retry_state !== "failed" ? `retry: ${a.retry_state}` : "retry"));
 
   // Every finished attempt can be judged, regardless of how it ended. Live attempts remain hidden
   // because their outcome can still change; the server repeats that state check.
@@ -1279,6 +1320,8 @@ let ovShape = "";                // battery id + try count; a change rebuilds th
 
 function cellState(a) {
   if (!a) return { code: "none", glyph: "", label: "not run" };
+  if (a.pending_retry || a.retry_state === "waiting")
+    return { code: "w", glyph: "↻", label: "waiting to retry" };
   // A verdict is the strongest thing anyone knows about an attempt, so it is read first - including
   // over an operator kill, on the off chance a reviewer got to one before it was cut off.
   if (a.verified) return {
@@ -1288,10 +1331,7 @@ function cellState(a) {
     already_successful:
              { code: "a", glyph: "A", label: "halted: already successful — excluded from the totals" },
   }[verdictOf(a)];
-  if (a.pending_retry)
-    return { code: "w", glyph: "↻", label: Number(a.retry_acquire_attempts) > 0
-      ? "recovering sandbox lease" : "waiting to retry" };
-  if (a.retry_state && a.retry_state !== "error")
+  if (a.retry_state && a.retry_state !== "failed")
     return { code: "r", glyph: "R", label: `retry: ${a.retry_state}` };
   if (isLive(a)) return { code: "r", glyph: "R", label: "running" };
   if (a.verifiable) return { code: "q", glyph: "?", label: "awaiting review" };
@@ -1351,10 +1391,7 @@ function renderOverview(state) {
   const table = document.getElementById("ov-table");
 
   document.getElementById("ov-note").textContent = prompts.length
-    ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"} — P/F is the human `
-      + "verdict; ? is awaiting review; ↻ is waiting to retry; E is invalid and A is "
-      + "halted-already-successful, and "
-      + "neither counts for anything"
+    ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"}`
     : (state.error || "no battery loaded");
   if (!prompts.length) { table.innerHTML = ""; ovRows.clear(); ovShape = ""; return; }
 
@@ -1415,7 +1452,9 @@ function renderOverview(state) {
       if (td.className !== cls) td.className = cls;
       setText(button, st.glyph);
       button.dataset.key = a ? a.key : "";
-      button.title = a ? `${a.key} — ${st.label}` : "not run";
+      button.title = a
+        ? `${st.glyph} · ${hasApiCalls(a) ? fmtNum(a.api_calls) : "unknown"} API calls · ${a.key} — ${st.label}`
+        : "not run";
       if (!a) continue;
       // The tokens were spent whether or not the try counts, so cost stays honest even here - and
       // the role split is folded in on exactly the same rule, so the breakdown and the total below
@@ -1941,16 +1980,14 @@ async function renameBattery(id) {
 // creates its run dir only once it holds a lease, so a try still waiting for one exists nowhere but
 // inside that process. A battery retry whose failed execution has a manifest appears as a ↻ cell,
 // but it has no ordered position in this watcher-owned menu.
-const TIP_QUEUE = "Retries this watcher is dispatching, oldest first. A retry stops and deletes its "
-  + "old try, then asks the coordinator for a sandbox and waits its turn behind everything already "
-  + "asking — it never displaces a run that is already going. Battery-runner retries appear as ↻ "
-  + "cells and cards, but have no ordered position in this menu.";
+const TIP_QUEUE = "Automatic and requested retries. Waiting rows have no claimed position among "
+  + "other coordinator clients.";
 const QUEUE_NOTE = {
   stopping: "stopping the old run",
-  cleaning: "deleting its old history",
-  queued: "waiting for a sandbox",
+  cleaning: "cleaning the old run",
+  waiting: "waiting for a sandbox",
   running: "running",
-  error: "dispatch failed",
+  failed: "retry failed",
 };
 
 function renderQueue(state) {
@@ -1958,8 +1995,10 @@ function renderQueue(state) {
   const entries = queue.entries || [];
   const waiting = Number(queue.waiting) || 0;
   const running = Number(queue.running) || 0;
+  const failed = Number(queue.failed) || 0;
   setText(document.getElementById("queue-label"),
-    waiting ? `queue: ${waiting} waiting` : (running ? `queue: ${running} running` : "queue: empty"));
+    waiting ? `queue: ${waiting} waiting`
+      : (running ? `queue: ${running} running` : (failed ? `queue: ${failed} failed` : "queue: empty")));
   const pill = document.getElementById("queue");
   pill.dataset.tipTerm = "run queue";
   pill.dataset.tip = TIP_QUEUE;
@@ -1971,7 +2010,7 @@ function renderQueue(state) {
     const where = e.battery_id && e.battery_id !== state.battery_id ? ` · ${e.battery_id}` : "";
     return `<li class="q-row" role="option" aria-selected="false"`
       + ` title="${esc(e.error || note)}">`
-      + `<span class="q-pos">${e.position ? e.position + "." : "▸"}</span>`
+      + `<span class="q-pos">▸</span>`
       + `<span class="dot${e.state === "running" ? " live" : ""}"></span>`
       + `<span class="m-id">${esc(e.key)}</span>`
       + `<span class="m-note">${esc(note + where)}</span></li>`;
@@ -1980,12 +2019,10 @@ function renderQueue(state) {
 
   const free = Number(queue.free_sandboxes) || 0;
   const parked = Number(queue.coordinator_waiting) || 0;
-  // Never imply that the rows order battery-runner work: this menu owns watcher-launched retries.
   const fleet = queue.pool_error
-    ? "coordinator unreachable — the fleet and the wait ahead are unknown"
+    ? "coordinator unreachable — fleet availability is unknown"
     : `${free} of ${(state.pool || []).length} sandbox(es) free`
-      + (parked ? ` · ${parked} waiting to lease one: the queued rows above, plus any battery `
-                  + `tries; battery retries appear as ↻ cells but have no queue-menu position` : "");
+      + (parked ? ` · ${parked} coordinator request(s) waiting` : "");
   rows.push(`<li class="q-foot">${esc(fleet)}</li>`);
   setHTML(document.getElementById("queue-menu"), rows.join(""));
 }
@@ -2070,6 +2107,13 @@ async function refresh() {
   document.getElementById("pool").textContent = state.pool_error
     ? "pool: coordinator unreachable"
     : `pool: ${(state.pool || []).length} sandbox(es)`;
+  const fleet = state.fleet || {};
+  const cap = fleet.capacity_limit === null || fleet.capacity_limit === undefined
+    ? "all" : String(fleet.capacity_limit);
+  setText(document.getElementById("fleet-cap"), `cap: ${cap}`);
+  document.getElementById("fleet-cap").title =
+    `${Number(fleet.active_leases) || 0} active · ${Number(fleet.effective_capacity) || 0} effective `
+    + `· ${Number(fleet.eligible_sandboxes) || 0} eligible`;
   document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
 
   const grid = document.getElementById("grid");
@@ -2128,6 +2172,50 @@ function reorder(grid, atts) {
     else if (entry.term.el.scrollTop !== top) entry.term.el.scrollTop = top;
   }
 }
+
+// -- legend ---------------------------------------------------------------------------------
+// Every state a try cell can be drawn in, in the order a reviewer meets them: the two verdicts
+// first, then the states a run passes through on its way to one, then the three that score nothing.
+// The `code` is the same class the grid puts on the cell, so a sample is the real thing and not a
+// drawing of it - a new cell colour cannot land in the table without also landing here.
+const LEGEND = [
+  { code: "p", glyph: "P", key: "P", what: "Human verdict: the agent did the task. Counts as a pass "
+    + "for the prompt." },
+  { code: "f", glyph: "F", key: "F", what: "Human verdict: it did not - or the try ended badly on "
+    + "its own, with no review yet." },
+  { code: "q", glyph: "?", what: "Finished and awaiting review. Nobody has ruled on it, so it "
+    + "counts as neither." },
+  { code: "r", glyph: "R", key: "R", what: "Running, or a retry in flight. The key requeues a "
+    + "finished try to run again." },
+  { code: "w", glyph: "↻", what: "Waiting to retry: requeued, and holding for a free sandbox." },
+  { code: "k", glyph: "K", what: "Killed or orphaned. Nobody found out how the task would have "
+    + "gone, so it is not scored." },
+  { code: "e", glyph: "E", key: "E", what: "Human verdict: invalid - the try was broken, not the "
+    + "agent. Excluded from the totals." },
+  { code: "a", glyph: "A", key: "A", what: "Halted because a sibling try had already won the "
+    + "prompt. Excluded from the totals." },
+  { code: "none", glyph: "", what: "Not run." },
+];
+
+// Built once, on the first open: the rows are fixed text, and nothing about them follows the state.
+let legendBuilt = false;
+function openLegend() {
+  const box = document.getElementById("legend");
+  if (!legendBuilt) {
+    box.querySelector("tbody").innerHTML = LEGEND.map(row =>
+      `<tr><td class="sample"><span class="cell ${row.code}">`
+      + `<span class="cellbtn">${row.glyph || "\u00a0"}</span></span></td>`
+      + `<td class="what">${row.key ? `<kbd>${row.key}</kbd>` : ""}${row.what}</td></tr>`).join("");
+    legendBuilt = true;
+  }
+  box.classList.add("open");
+  document.getElementById("legend-open").setAttribute("aria-expanded", "true");
+}
+function closeLegend() {
+  document.getElementById("legend").classList.remove("open");
+  document.getElementById("legend-open").setAttribute("aria-expanded", "false");
+}
+const legendOpen = () => document.getElementById("legend").classList.contains("open");
 
 // -- detail overlay ------------------------------------------------------------------------
 // The attempt in full: the run itself (live frames while it is going, the replay once it is not),
@@ -2407,6 +2495,7 @@ async function recordVerdict(key, verdict) {
 
 document.addEventListener("click", async ev => {
   if (ev.target.id === "modal") { closeModal(); return; }
+  if (ev.target.id === "legend") { closeLegend(); return; }
   // Ahead of the option itself: the pencil sits inside a row whose entire surface means "switch to
   // this run", and renaming a battery must not also drag the page onto it.
   const rename = ev.target.closest("#battery-menu button[data-act='battery-rename']");
@@ -2437,7 +2526,10 @@ document.addEventListener("click", async ev => {
   }
   if (act === "tab") { setTab(button.dataset.tab); return; }
   if (act === "collapse-toggle") { toggleCollapse(); return; }
+  if (act === "fleet-cap") { setFleetCap(); return; }
   if (act === "modal-close") { closeModal(); return; }
+  if (act === "legend-open") { openLegend(); return; }
+  if (act === "legend-close") { closeLegend(); return; }
   // Both entry points - a tile's ⛶ and an overview cell - open the same overlay the same way: on
   // the run itself, and without starting an encode nobody asked for.
   if (act === "detail") { if (key) openModal(key); return; }
@@ -2482,8 +2574,8 @@ document.addEventListener("click", async ev => {
 // for tearing down a try and re-queueing it.
 async function retryAttempt(key) {
   if (!confirm(
-    `Retry ${key}?\n\nThis stops the current run if needed and permanently deletes every log, ` +
-    `frame, replay, verdict, and result previously recorded for this try number.`
+    `Retry ${key}?\n\nThis stops the current run if needed and archives the previous execution ` +
+    `when its replacement starts.`
   )) return false;
   const res = await fetch(api(key, "retry"), { method: "POST" });
   const data = await res.json();
@@ -2503,7 +2595,7 @@ function announceRetry(key, placement) {
   }
   const ahead = Number(placement.ahead) || 0;
   const why = placement.pool_error ? "the coordinator is unreachable"
-    : (ahead ? `${ahead} run(s) asked first` : "the fleet is busy");
+    : "the fleet is busy or another coordinator client is waiting";
   // The banner opens the list it is talking about: the queue is where this retry can be watched
   // from here on, and the toast is gone in five seconds. Deferred by a tick because the click that
   // dismissed the banner is still bubbling, and it closes every open menu on its way to the
@@ -2518,7 +2610,7 @@ function announceRetry(key, placement) {
 // Which attempts the R shortcut and retry button act on: anything not already mid-retry. Unlike
 // canVerdict this allows a live attempt — retrying stops the current run if one is going.
 function canRetry(a) {
-  return !!a && !a.pending_retry && !(a.retry_state && a.retry_state !== "error");
+  return !!a && !a.pending_retry && !(a.retry_state && a.retry_state !== "failed");
 }
 
 // The hover card, delegated off the section so it survives every table patch.
@@ -2540,6 +2632,7 @@ document.addEventListener("keydown", async ev => {
   if (ev.key === "Escape") {
     hideHelp();
     closeMenu();
+    if (legendOpen()) closeLegend();
     if (modalKey) closeModal();
     return;
   }

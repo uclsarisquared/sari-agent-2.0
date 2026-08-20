@@ -103,10 +103,18 @@ class WatchState:
         # Acquires parked at the coordinator, from the last pool poll. Includes the battery runner's
         # own workers, which is the point: a retry queues behind them and nothing else can say so.
         self._pool_waiting = 0
+        self._fleet_status: dict[str, Any] = {
+            "capacity_limit": None,
+            "effective_capacity": 0,
+            "active_leases": 0,
+            "registered_sandboxes": 0,
+            "eligible_sandboxes": 0,
+        }
         self._announced_start = False
         self._announced_done = False
         self.battery: Path | None = None
         self._retry_jobs: dict[str, dict[str, Any]] = {}
+        self._runner_retries: dict[tuple[str, str], dict[str, Any]] = {}
         # Attempts whose replay.mp4 was rendered while they were still running. The clip covers only
         # the frames that existed when a reviewer asked for it, and `enqueue` treats any existing
         # replay.mp4 as final - so the finish transition throws these away and renders them again.
@@ -173,7 +181,7 @@ class WatchState:
             # will ever read again.
             busy = next(
                 (key for key, job in self._retry_jobs.items()
-                 if job.get("battery_id") == battery_id and job.get("state") != "error"),
+                 if job.get("battery_id") == battery_id and job.get("state") != "failed"),
                 None,
             )
             if busy:
@@ -229,8 +237,10 @@ class WatchState:
             view = scan.scan_battery(
                 battery, now, discovered=scan.find_batteries(self.bench_root)
             ).as_dict()
+            self._sync_runner_retries(view, battery.name)
             view["pool"] = self._pool
             view["pool_error"] = self._pool_error
+            view["fleet"] = dict(self._fleet_status)
             view["queue"] = self._queue_locked()
             view["now"] = now
             view["bench_root"] = str(self.bench_root)
@@ -255,6 +265,7 @@ class WatchState:
                     "counts": {},
                     "pool": self._pool,
                     "pool_error": self._pool_error,
+                    "fleet": dict(self._fleet_status),
                     "queue": self._queue_locked(),
                     "discovered": [],
                     "watching_id": None,
@@ -276,8 +287,10 @@ class WatchState:
             view = scan.scan_battery(
                 battery, now, discovered=scan.find_batteries(self.bench_root)
             ).as_dict()
+            self._sync_runner_retries(view, battery.name)
             view["pool"] = self._pool
             view["pool_error"] = self._pool_error
+            view["fleet"] = dict(self._fleet_status)
             view["queue"] = self._queue_locked()
             view["now"] = now
             view["bench_root"] = str(self.bench_root)
@@ -328,6 +341,30 @@ class WatchState:
                 "log_bytes": 0,
             })
             attempts.append(placeholder)
+
+    def _sync_runner_retries(self, view: dict[str, Any], battery_id: str) -> None:
+        """Mirror durable automatic retries into the same queue model as watcher retries."""
+        for identity in [item for item in self._runner_retries if item[0] == battery_id]:
+            self._runner_retries.pop(identity, None)
+        winners = (view.get("battery") or {}).get("human_verified_winners") or {}
+        for attempt in view.get("attempts") or []:
+            if not attempt.get("pending_retry"):
+                continue
+            if str(attempt.get("prompt_id") or "") in winners:
+                continue
+            key = f"{attempt.get('prompt_id')}/try{int(attempt.get('attempt') or 0):02d}"
+            self._runner_retries[(battery_id, key)] = {
+                "key": key,
+                "battery_id": battery_id,
+                "prompt_id": str(attempt.get("prompt_id") or ""),
+                "attempt": int(attempt.get("attempt") or 0),
+                "kind": "automatic_retry",
+                "state": "waiting",
+                "error": str(attempt.get("retry_wait_reason") or ""),
+                "waiting": True,
+                "position": None,
+                "since": attempt.get("retry_queued_at") or 0.0,
+            }
 
     def _notify(self, view: dict[str, Any]) -> None:
         """Queues finished-run replays and diffs notifications outside the snapshot lock."""
@@ -402,11 +439,51 @@ class WatchState:
             self.replay.invalidate(key)
         _log(f"re-rendering {key}: its replay was made while the run was still going")
 
-    def set_pool(self, pool: list[dict[str, Any]], error: str = "", waiting: int = 0) -> None:
+    def set_pool(
+        self,
+        pool: list[dict[str, Any]],
+        error: str = "",
+        waiting: int = 0,
+        fleet: dict[str, Any] | None = None,
+    ) -> None:
         with self._lock:
             self._pool = pool
             self._pool_error = error
             self._pool_waiting = waiting
+            if fleet is not None:
+                self._fleet_status = {
+                    name: fleet.get(name)
+                    for name in (
+                        "capacity_limit", "effective_capacity", "active_leases",
+                        "registered_sandboxes", "eligible_sandboxes",
+                    )
+                }
+            self._invalidate_locked()
+
+    def set_fleet_cap(self, limit: Any) -> dict[str, Any]:
+        """Update the coordinator's process-local active lease cap."""
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            return {"ok": False, "error": "limit must be null or a non-negative integer"}
+        if not self.coordinator_url:
+            return {"ok": False, "error": "watcher has no coordinator configured"}
+
+        from sari_bench.client import CoordinatorClient
+
+        async def update() -> dict[str, Any]:
+            async with CoordinatorClient(self.coordinator_url or "") as client:
+                return await client.set_capacity(limit)
+
+        try:
+            status = asyncio.run(asyncio.wait_for(update(), timeout=10.0))
+        except Exception as error:  # noqa: BLE001 - report the coordinator failure to the caller
+            return {"ok": False, "error": repr(error)}
+        with self._lock:
+            self._fleet_status.update(status)
+            self._pool_error = ""
+            self._invalidate_locked()
+        return {"ok": True, **status}
 
     # -- queue -----------------------------------------------------------------------------
     #
@@ -418,25 +495,33 @@ class WatchState:
     # `coordinator_waiting` count they contribute to.
 
     # Retry states that are not yet holding a sandbox, in the order `_retry_worker` moves through
-    # them. "running" has one; "error" has stopped needing one.
-    _QUEUE_WAITING_STATES = ("stopping", "cleaning", "queued")
+    # them. "running" has one; "failed" has stopped needing one.
+    _QUEUE_WAITING_STATES = ("stopping", "cleaning", "waiting")
 
     def _free_sandboxes_locked(self) -> int:
         """Sandboxes the coordinator would hand out right now - its own `Sandbox.leasable` rule."""
-        return sum(
+        free = sum(
             1 for sandbox in self._pool
             if not sandbox.get("lease_id")
             and sandbox.get("state") == STATE_READY
             and bool(sandbox.get("store_loaded", True))
         )
+        limit = self._fleet_status.get("capacity_limit")
+        if limit is None:
+            return free
+        try:
+            headroom = max(0, int(limit) - int(self._fleet_status.get("active_leases") or 0))
+        except (TypeError, ValueError):
+            return free
+        return min(free, headroom)
 
     def _queue_locked(self) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
-        position = 0
+        waiting_count = 0
         for key, job in self._retry_jobs.items():
             waiting = job["state"] in self._QUEUE_WAITING_STATES
             if waiting:
-                position += 1
+                waiting_count += 1
             entries.append({
                 "key": key,
                 "battery_id": job.get("battery_id", ""),
@@ -448,13 +533,20 @@ class WatchState:
                 "waiting": waiting,
                 # 1-based among the waiting entries, and absent for the ones that are not waiting:
                 # a number beside a running row would read as a place in a line it has already left.
-                "position": position if waiting else None,
+                "position": None,
                 "since": job.get("queued_at", 0.0),
             })
+        forced = {(entry["battery_id"], entry["key"]) for entry in entries}
+        for identity, entry in self._runner_retries.items():
+            if identity in forced:
+                continue
+            entries.append(dict(entry))
+            waiting_count += 1
         return {
             "entries": entries,
-            "waiting": position,
+            "waiting": waiting_count,
             "running": sum(1 for entry in entries if entry["state"] == "running"),
+            "failed": sum(1 for entry in entries if entry["state"] == "failed"),
             "free_sandboxes": self._free_sandboxes_locked(),
             "coordinator_waiting": self._pool_waiting,
             "pool_error": self._pool_error,
@@ -465,37 +557,19 @@ class WatchState:
             return self._queue_locked()
 
     def _placement_locked(self, key: str) -> dict[str, Any]:
-        """Where a just-queued job sits, and whether it should start without waiting.
-
-        A prediction, not a promise: this job still has to stop and clean its old try before it
-        asks for a sandbox, the pool reading behind it is a poll or two old, and the coordinator
-        hands leases out first-come-first-served across every runner. So everything already asking
-        counts as ahead of it, and a free sandbox is "immediate" only if there are more of them than
-        there are claims on them.
-
-        Claims are counted once. A job already in `queued` is blocked inside `bench.acquire`, so the
-        coordinator is already counting it; only the jobs still stopping or cleaning are ahead of
-        this one *and* invisible from there.
-        """
+        """Return a conservative availability hint without inventing a global queue position."""
         queue = self._queue_locked()
-        entry = next((row for row in queue["entries"] if row["key"] == key), None)
-        position = (entry or {}).get("position") or queue["waiting"]
-        ahead_here = 0
-        for row in queue["entries"]:
-            if row["key"] == key:
-                break
-            if row["state"] in ("stopping", "cleaning"):
-                ahead_here += 1
-        ahead = queue["coordinator_waiting"] + ahead_here
         return {
-            "position": position,
-            "ahead": ahead,
+            "position": None,
+            "ahead": None,
             "free_sandboxes": queue["free_sandboxes"],
             "coordinator_waiting": queue["coordinator_waiting"],
             "pool_error": queue["pool_error"],
-            # An unreachable coordinator leaves `free_sandboxes` at 0, which would otherwise read as
-            # a full fleet. Say "queued" there too - it is the claim that survives not knowing.
-            "immediate": bool(not self._pool_error and queue["free_sandboxes"] > ahead),
+            "immediate": bool(
+                not self._pool_error
+                and queue["free_sandboxes"] > 0
+                and queue["coordinator_waiting"] == 0
+            ),
         }
 
     # -- actions ---------------------------------------------------------------------------
@@ -700,7 +774,7 @@ class WatchState:
         if selected is None:
             with self._lock:
                 candidate = self._retry_jobs.get(key)
-                if candidate and candidate.get("state") == "error":
+                if candidate and candidate.get("state") == "failed":
                     previous_error = dict(candidate)
             if previous_error is None:
                 return {"ok": False, "error": "unknown attempt"}
@@ -735,8 +809,12 @@ class WatchState:
 
         with self._lock:
             existing = self._retry_jobs.get(canonical_key)
-            if existing and existing.get("state") != "error":
+            if existing and existing.get("state") != "failed":
                 return {"ok": False, "error": "retry already in progress", "key": canonical_key}
+            # Accepting a retry deliberately reopens a previously won prompt. Do it while holding
+            # the same lock verdict writes use, before cleanup starts, so a later sibling pass can
+            # never be erased by the retry thread.
+            self._clear_prompt_winner(battery, prompt_id)
             job = {
                 "key": canonical_key,
                 "battery_id": battery.name,
@@ -766,8 +844,8 @@ class WatchState:
             daemon=True,
         ).start()
         _log(
-            f"retry requested for {canonical_key}; prior history will be deleted"
-            + ("" if placement["immediate"] else f"; {placement['ahead']} ahead of it in the queue")
+            f"retry requested for {canonical_key}; prior execution will be archived on replacement"
+            + ("; a sandbox appears available" if placement["immediate"] else "; waiting to dispatch")
         )
         return {
             "ok": True,
@@ -798,8 +876,6 @@ class WatchState:
             config = self._retry_config(battery, source_manifest)
             self._stop_logical_try(battery, prompt_id, attempt)
             self._set_retry_state(key, "cleaning")
-            self._clear_prompt_winner(battery, prompt_id)
-            self._delete_logical_try(battery, prompt_id, attempt)
 
             from sari_bench.runner import (
                 BenchmarkRunner,
@@ -813,7 +889,7 @@ class WatchState:
             with contextlib.suppress(OSError):
                 (battery / "summary.json").unlink()
 
-            self._set_retry_state(key, "queued")
+            self._set_retry_state(key, "waiting")
             runner = BenchmarkRunner(
                 prompts=[Prompt(
                     id=prompt_id,
@@ -844,19 +920,22 @@ class WatchState:
                 agent_entry=self.retry_agent_entry or ORCHESTRATOR_ENTRY,
                 agent_cwd=self.retry_agent_cwd or OVERHAUL_DIR,
                 work_items=[(prompt_id, attempt)],
+                retry_work_items=True,
                 initialize_battery=False,
                 ocr_url=config["ocr_url"],
+                attempt_started_callback=lambda started_key, _run_dir: self._set_retry_state(
+                    started_key, "running"
+                ),
                 **(
                     {"ocr_health_check": self.retry_ocr_health_check}
                     if self.retry_ocr_health_check is not None
                     else {}
                 ),
             )
-            self._set_retry_state(key, "running")
             asyncio.run(runner.run())
         except Exception as error:  # noqa: BLE001 - surfaced on the tile; watcher stays alive
             _log(f"retry failed for {key}: {error!r}")
-            self._set_retry_state(key, "error", repr(error))
+            self._set_retry_state(key, "failed", repr(error))
             return
 
         with self._lock:
@@ -1145,6 +1224,57 @@ class WatchState:
             }
             battery_manifest["human_verified_winners"] = winners
 
+        for identity, retry in list(self._runner_retries.items()):
+            if identity[0] == battery.name and retry.get("prompt_id") == prompt_id:
+                self._runner_retries.pop(identity, None)
+
+        # Watcher-launched retries have no separate durable queue file: remove their in-memory rows
+        # immediately. Their partial runner (or the cleanup thread just before it) observes the
+        # durable winner above and uses the runner's ordinary already-successful materialization.
+        for retry_key, job in list(self._retry_jobs.items()):
+            logical = job.get("attempt") or {}
+            if (
+                job.get("battery_id") == battery.name
+                and str(logical.get("prompt_id") or "") == prompt_id
+                and retry_key != winner_key
+            ):
+                if job.get("state") == "waiting":
+                    from sari_bench.runner import Prompt, materialize_already_successful
+
+                    source = job.get("source_manifest") or {}
+                    materialize_already_successful(
+                        output_dir=battery,
+                        prompt=Prompt(
+                            id=prompt_id,
+                            prompt=str(source.get("prompt") or logical.get("prompt") or ""),
+                            family=str(source.get("family") or logical.get("family") or ""),
+                            looking_for=str(
+                                source.get("looking_for") or logical.get("looking_for") or ""
+                            ),
+                        ),
+                        attempt=int(logical.get("attempt") or source.get("attempt") or 0),
+                        winner=cancellation,
+                        arm=str(source.get("arm") or battery_manifest.get("arm") or "graph"),
+                        context_policy=str(
+                            source.get("context_policy")
+                            or battery_manifest.get("context_policy")
+                            or "baseline"
+                        ),
+                        api_max_attempts=int(
+                            source.get("api_max_attempts")
+                            or battery_manifest.get("api_max_attempts")
+                            or 10
+                        ),
+                        max_api_requeues=int(
+                            source.get("max_api_requeues")
+                            if source.get("max_api_requeues") is not None
+                            else battery_manifest.get("max_api_requeues") or 0
+                        ),
+                        ocr_url=str(source.get("ocr_url") or battery_manifest.get("ocr_url") or ""),
+                        requeues=int(source.get("requeues") or 0),
+                    )
+                self._retry_jobs.pop(retry_key, None)
+
         stopped = 0
         known_cancellable = 0
         known_attempts: set[int] = set()
@@ -1154,9 +1284,49 @@ class WatchState:
             sibling_key = f"{prompt_id}/{run_dir.name}"
             sibling = scan._read_json(run_dir / scan.ATTEMPT_MANIFEST)
             try:
-                known_attempts.add(int(sibling.get("attempt") or run_dir.name[3:]))
+                sibling_attempt = int(sibling.get("attempt") or run_dir.name[3:])
+                known_attempts.add(sibling_attempt)
             except (TypeError, ValueError):
-                pass
+                sibling_attempt = 0
+            if sibling_key != winner_key and sibling.get("pending_retry") and sibling_attempt > 0:
+                # The battery runner has published this retry but has not replaced the failed
+                # execution yet. Materialize the cancellation now; its acquire-side winner poll
+                # cancels the coordinator request and reaches the same transaction idempotently.
+                from sari_bench.runner import Prompt, materialize_already_successful
+
+                materialize_already_successful(
+                    output_dir=battery,
+                    prompt=Prompt(
+                        id=prompt_id,
+                        prompt=str(sibling.get("prompt") or ""),
+                        family=str(sibling.get("family") or ""),
+                        looking_for=str(sibling.get("looking_for") or ""),
+                    ),
+                    attempt=sibling_attempt,
+                    winner=cancellation,
+                    arm=str(sibling.get("arm") or battery_manifest.get("arm") or "graph"),
+                    context_policy=str(
+                        sibling.get("context_policy")
+                        or battery_manifest.get("context_policy")
+                        or "baseline"
+                    ),
+                    api_max_attempts=int(
+                        sibling.get("api_max_attempts")
+                        or battery_manifest.get("api_max_attempts")
+                        or 10
+                    ),
+                    max_api_requeues=int(
+                        sibling.get("max_api_requeues")
+                        if sibling.get("max_api_requeues") is not None
+                        else battery_manifest.get("max_api_requeues") or 0
+                    ),
+                    ocr_url=str(
+                        sibling.get("ocr_url") or battery_manifest.get("ocr_url") or ""
+                    ),
+                    requeues=int(sibling.get("requeues") or 0),
+                )
+                known_cancellable += 1
+                continue
             if sibling_key == winner_key or sibling.get("state") in {"finished", "requeued"}:
                 continue
 
@@ -1399,8 +1569,10 @@ class _PoolPoller(threading.Thread):
         while not self._stop.is_set():
             try:
                 async with CoordinatorClient(self.coordinator_url) as client:
-                    pool, waiting = await client.pool_status()
-                    self.state.set_pool(pool, waiting=waiting)
+                    fleet = await client.fleet_status()
+                    self.state.set_pool(
+                        fleet["sandboxes"], waiting=fleet["waiting"], fleet=fleet
+                    )
             except Exception as error:  # noqa: BLE001 - the dashboard survives a dead coordinator
                 self.state.set_pool([], f"{error!r}")
             await asyncio.sleep(POOL_REFRESH_SECONDS)
@@ -1623,6 +1795,14 @@ class Handler(BaseHTTPRequestHandler):
             result = self.state.rename_battery(
                 str(body.get("battery") or battery_id), str(body.get("name") or "")
             )
+            self._json(result, code=200 if result.get("ok") else 400)
+            return
+        if path == "/api/fleet/cap":
+            body = self._body()
+            if "limit" not in body:
+                self._json({"ok": False, "error": "body needs 'limit'"}, code=400)
+                return
+            result = self.state.set_fleet_cap(body.get("limit"))
             self._json(result, code=200 if result.get("ok") else 400)
             return
         if path.startswith("/api/attempt/"):
