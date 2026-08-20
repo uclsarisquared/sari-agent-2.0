@@ -33,7 +33,17 @@ Check registered sandboxes with:
 
 ```bash
 python -m sari_bench status --coordinator ws://<coordinator-host>:9000
+python -m sari_bench status --json
+python -m sari_bench quarantine sandbox-03 --reason lidar_protocol_nonbinary
+python -m sari_bench unquarantine sandbox-03
 ```
+
+Canonical UUIDs remain in JSON for joins and diagnostics, while the CLI and dashboard display the
+coordinator's persistent `sandbox-NN` alias. Lease aliases use `<prompt-id>/tryNN`. Quarantines and
+sandbox aliases survive coordinator restarts; unquarantine always resets the player before it can
+be leased again. The watch server exposes the same backend at `GET /api/fleet/status`, with
+`POST /api/fleet/quarantine` and `POST /api/fleet/unquarantine` accepting
+`{"sandbox":"sandbox-03"}` (and an optional quarantine `reason`).
 
 The runner fills all ready sandboxes by default. Set `concurrency` in `runconfig.toml` to cap it.
 Command-line flags override the config file.

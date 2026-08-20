@@ -79,6 +79,11 @@ if mode == "api_retry_exhausted":
                    "error": "server stayed down", "call_name": "semantic_reasoning",
                    "failure_kind": "timeout"}, f)
     time.sleep(600)
+if mode == "sandbox_fault" and "51001" in os.environ.get("SARI_WS_URI", ""):
+    with open(os.environ["SARI_SANDBOX_FAULT_PATH"], "w") as f:
+        json.dump({"code": "lidar_protocol_nonbinary",
+                   "message": "RequestLidarScan returned a text frame"}, f)
+    time.sleep(600)
 if mode == "cancel_siblings" and task == "winner prompt" and not run_dir.endswith("try01"):
     time.sleep(600)
 
@@ -640,6 +645,45 @@ async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
             await sandbox.close()
             await coordinator.stop()
     print("ok  exhausted API retries requeue the logical attempt with a finite budget")
+
+
+async def test_sandbox_protocol_fault_quarantines_and_requeues() -> None:
+    coordinator, url = await _start_coordinator()
+    faulty = FakeSandbox("sandbox-faulty", 51001)
+    replacement = FakeSandbox("sandbox-healthy", 51002)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await faulty.connect(url)
+            await replacement.connect(url)
+            os.environ["STUB_MODE"] = "sandbox_fault"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="survive bad lidar")],
+                        workspace,
+                        concurrency=1,
+                    ).run(),
+                    timeout=20,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            assert summary["total_successes"] == 1
+            assert summary["attempts"][0]["sandbox_id"] == "sandbox-healthy"
+            pool = {row["sandbox_id"]: row for row in coordinator.pool_snapshot()}
+            assert pool["sandbox-faulty"]["quarantined"] is True
+            assert pool["sandbox-faulty"]["quarantine_reason"].startswith(
+                "lidar_protocol_nonbinary"
+            )
+            battery = json.loads((workspace / "runs" / "battery.json").read_text())
+            assert "sandbox-faulty" in battery["quarantined_sandboxes"]
+        finally:
+            await faulty.close()
+            await replacement.close()
+            await coordinator.stop()
+    print("ok  a sandbox protocol fault quarantines the player and requeues on a healthy one")
 
 
 async def test_api_requeue_is_pending_until_redispatch() -> None:
@@ -1564,6 +1608,7 @@ async def main() -> int:
         test_overrunning_attempt_is_killed_and_recorded,
         test_crashed_agent_still_releases_its_sandbox,
         test_api_retry_exhaustion_requeues_the_logical_attempt,
+        test_sandbox_protocol_fault_quarantines_and_requeues,
         test_api_requeue_is_pending_until_redispatch,
         test_sandbox_loss_uses_the_pending_requeue_lifecycle,
         test_zero_api_requeues_records_first_exhaustion,

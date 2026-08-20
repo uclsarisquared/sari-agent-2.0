@@ -31,13 +31,15 @@ class Lease:
 
     def __init__(self, payload: dict[str, Any]) -> None:
         self.lease_id: str = payload["lease_id"]
+        self.lease_alias: str = str(payload.get("lease_alias") or self.lease_id[:8])
         self.sandbox_id: str = payload["sandbox_id"]
+        self.sandbox_alias: str = str(payload.get("sandbox_alias") or self.sandbox_id[:8])
         self.host: str = payload["host"]
         self.port: int = payload["port"]
         self.commands_uri: str = payload["commands_uri"]
 
     def __repr__(self) -> str:
-        return f"Lease({self.sandbox_id} @ {self.host}:{self.port})"
+        return f"Lease({self.sandbox_alias} @ {self.host}:{self.port})"
 
 
 class CoordinatorClient:
@@ -123,7 +125,10 @@ class CoordinatorClient:
                 raise RuntimeError(f"Coordinator rejected request: {reply.get('reason')}")
 
     async def acquire(
-        self, *, timeout: float | None = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+        self,
+        *,
+        timeout: float | None = DEFAULT_ACQUIRE_TIMEOUT_SECONDS,
+        lease_alias: str = "",
     ) -> Lease:
         """Lease a sandbox, optionally bounding how long the coordinator may park the request.
 
@@ -133,7 +138,9 @@ class CoordinatorClient:
         lease if the grant raced with the timeout). Callers that want to keep waiting must reconnect
         before trying again.
         """
-        request = self._request(encode("bench.acquire"), "bench.lease")
+        request = self._request(
+            encode("bench.acquire", lease_alias=lease_alias), "bench.lease"
+        )
         if timeout is None:
             return Lease(await request)
         if timeout <= 0:
@@ -199,7 +206,43 @@ class CoordinatorClient:
             "active_leases": count("active_leases", active),
             "registered_sandboxes": count("registered_sandboxes", len(sandboxes)),
             "eligible_sandboxes": count("eligible_sandboxes", eligible),
+            "quarantined_sandboxes": count(
+                "quarantined_sandboxes",
+                sum(1 for sandbox in sandboxes if sandbox.get("quarantined")),
+            ),
         }
+
+    async def quarantine(
+        self, lease: Lease, *, reason: str, source: str = "runner"
+    ) -> dict[str, Any]:
+        """Quarantine the sandbox currently held by this connection."""
+        return await self._request(
+            encode(
+                "bench.quarantine",
+                lease_id=lease.lease_id,
+                reason=reason,
+                source=source,
+            ),
+            "bench.quarantined",
+        )
+
+    async def quarantine_sandbox(
+        self, selector: str, *, reason: str, source: str = "operator"
+    ) -> dict[str, Any]:
+        """Quarantine a connected sandbox by its human alias or canonical ID."""
+        return await self._request(
+            encode(
+                "bench.quarantine", sandbox=selector, reason=reason, source=source
+            ),
+            "bench.quarantined",
+        )
+
+    async def unquarantine(self, selector: str) -> dict[str, Any]:
+        """Clear quarantine by human alias or canonical sandbox ID."""
+        return await self._request(
+            encode("bench.unquarantine", sandbox=selector),
+            "bench.unquarantined",
+        )
 
     async def set_capacity(self, limit: int | None) -> dict[str, Any]:
         """Set the coordinator-wide active lease cap (None means unlimited)."""

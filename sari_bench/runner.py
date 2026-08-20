@@ -69,6 +69,8 @@ DEFAULT_MAX_API_REQUEUES = 3
 DEFAULT_API_MAX_ATTEMPTS = 10
 API_RETRY_EXHAUSTED_SIGNAL = "api_retry_exhausted.json"
 API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
+SANDBOX_FAULT_SIGNAL = "sandbox_fault.json"
+SANDBOX_FAULT_PATH_ENV = "SARI_SANDBOX_FAULT_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
 DEFAULT_CAPACITY_POLL_SECONDS = 1.0
 DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
@@ -171,6 +173,8 @@ class AttemptResult:
     success: bool = False
     end_reason: str = ""
     sandbox_id: str = ""
+    sandbox_alias: str = ""
+    lease_alias: str = ""
     commands_uri: str = ""
     ocr_url: str = ""
     exit_code: int | None = None
@@ -405,6 +409,7 @@ class BenchmarkRunner:
         self._started_at = 0.0
         self._peak_workers = 0
         self._prior_wall_seconds = 0.0
+        self._local_quarantines: set[str] = set()
 
     async def run(self) -> dict[str, Any]:
         if self.initialize_battery:
@@ -707,6 +712,8 @@ class BenchmarkRunner:
         )
         result.end_reason = str(manifest.get("end_reason") or result.end_reason)
         result.sandbox_id = str(manifest.get("sandbox_id") or "")
+        result.sandbox_alias = str(manifest.get("sandbox_alias") or "")
+        result.lease_alias = str(manifest.get("lease_alias") or "")
         result.commands_uri = str(manifest.get("commands_uri") or "")
         result.ocr_url = str(manifest.get("ocr_url") or self.ocr_url)
         result.wall_seconds = float(manifest.get("wall_seconds") or 0.0)
@@ -882,6 +889,7 @@ class BenchmarkRunner:
                             1
                             for sandbox in pool
                             if bool(sandbox.get("store_loaded", True))
+                            and not sandbox.get("quarantined")
                         )
                         desired = min(planned_attempts, capacity)
                         while len(workers) < desired:
@@ -918,7 +926,10 @@ class BenchmarkRunner:
         def pool_problem() -> str:
             if not last_pool:
                 return "none registered"
-            if not any(bool(sandbox.get("store_loaded", True)) for sandbox in last_pool):
+            if not any(
+                bool(sandbox.get("store_loaded", True)) and not sandbox.get("quarantined")
+                for sandbox in last_pool
+            ):
                 return "registered sandbox(es) have no store loaded"
             states: dict[str, int] = {}
             for sandbox in last_pool:
@@ -955,6 +966,7 @@ class BenchmarkRunner:
                 # Booting/Resetting members get the full startup window to become Ready.
                 if any(
                     bool(sandbox.get("store_loaded", True))
+                    and not sandbox.get("quarantined")
                     and (bool(sandbox.get("lease_id")) or sandbox.get("state") == STATE_READY)
                     for sandbox in last_pool
                 ):
@@ -989,6 +1001,7 @@ class BenchmarkRunner:
             1
             for sandbox in pool
             if bool(sandbox.get("store_loaded", True))
+            and not sandbox.get("quarantined")
             and sandbox.get("state") == STATE_READY
             and not sandbox.get("lease_id")
         )
@@ -998,6 +1011,37 @@ class BenchmarkRunner:
             f"fleet has {len(pool)} registered sandbox(es): "
             f"ready={ready}, leased={leased}, unavailable={unavailable}"
         )
+
+    def _locally_quarantined(self, sandbox_id: str) -> bool:
+        """Read the battery denylist so sibling worker processes see faults immediately."""
+        if sandbox_id in self._local_quarantines:
+            return True
+        battery = self._read_manifest(self.output_dir / BATTERY_MANIFEST)
+        records = battery.get("quarantined_sandboxes") or {}
+        if isinstance(records, dict):
+            self._local_quarantines.update(str(key) for key in records)
+        elif isinstance(records, list):
+            self._local_quarantines.update(str(key) for key in records)
+        return sandbox_id in self._local_quarantines
+
+    def _record_local_quarantine(
+        self, lease: Lease, *, reason: str, source: str
+    ) -> None:
+        """Compatibility quarantine shared through battery.json for old coordinators."""
+        self._local_quarantines.add(lease.sandbox_id)
+        if not self.initialize_battery and not (self.output_dir / BATTERY_MANIFEST).exists():
+            return
+        with edit_json_locked(self.output_dir / BATTERY_MANIFEST) as battery:
+            records = battery.get("quarantined_sandboxes")
+            if not isinstance(records, dict):
+                records = {}
+            records[lease.sandbox_id] = {
+                "sandbox_alias": lease.sandbox_alias,
+                "reason": reason,
+                "source": source,
+                "quarantined_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            battery["quarantined_sandboxes"] = records
 
     async def _acquire_sandbox(
         self,
@@ -1021,7 +1065,10 @@ class BenchmarkRunner:
             try:
                 await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
                 acquire_task = asyncio.create_task(
-                    client.acquire(timeout=self.lease_acquire_timeout)
+                    client.acquire(
+                        timeout=self.lease_acquire_timeout,
+                        lease_alias=f"{prompt_id}/try{attempt:02d}",
+                    )
                 )
                 winner_task = (
                     asyncio.create_task(self._wait_for_prompt_winner(prompt_id))
@@ -1090,6 +1137,17 @@ class BenchmarkRunner:
                         raise PromptAlreadySuccessful(winner)
                 else:
                     await asyncio.sleep(backoff)
+                continue
+            if self._locally_quarantined(lease.sandbox_id):
+                _log(
+                    f"[w{index}] {prompt_id} try {attempt}: skipped locally quarantined "
+                    f"{lease.sandbox_alias}; releasing and reacquiring"
+                )
+                with contextlib.suppress(Exception):
+                    await client.release(lease, outcome="locally_quarantined")
+                with contextlib.suppress(Exception):
+                    await client.close()
+                await asyncio.sleep(max(0.1, self.capacity_poll_interval))
                 continue
             return client, lease
 
@@ -1274,7 +1332,10 @@ class BenchmarkRunner:
             )
             return
         try:
-            _log(f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_id} ({lease.commands_uri})")
+            _log(
+                f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_alias} "
+                f"as {lease.lease_alias} ({lease.commands_uri})"
+            )
 
             # A winner can land while this worker is blocked in acquire(). Do not start an agent
             # merely because the work item was dequeued before the reviewer clicked success.
@@ -1344,6 +1405,8 @@ class BenchmarkRunner:
                     await client.release(lease, outcome="done")
 
             result.sandbox_id = lease.sandbox_id
+            result.sandbox_alias = lease.sandbox_alias
+            result.lease_alias = lease.lease_alias
             result.commands_uri = lease.commands_uri
             result.ocr_url = self.ocr_url
             result.wall_seconds = round(time.monotonic() - started, 1)
@@ -1420,6 +1483,8 @@ class BenchmarkRunner:
         env["SARI_MAX_API_REQUEUES"] = str(self.max_api_requeues)
         api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
         env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)
+        sandbox_fault_signal = run_dir / SANDBOX_FAULT_SIGNAL
+        env[SANDBOX_FAULT_PATH_ENV] = str(sandbox_fault_signal)
         if self.map_dir:
             # Belt to --output-dir's braces. The flag only reaches the call sites the orchestrator
             # explicitly threads it through; this reaches every StoreMap() in the attempt's process
@@ -1450,8 +1515,10 @@ class BenchmarkRunner:
                 "sandbox_requeues": sandbox_requeues,
                 "ocr_url": self.ocr_url,
                 "sandbox_id": lease.sandbox_id,
+                "sandbox_alias": lease.sandbox_alias,
                 "commands_uri": lease.commands_uri,
                 "lease_id": getattr(lease, "lease_id", ""),
+                "lease_alias": lease.lease_alias,
                 "run_dir": str(run_dir),
                 "state": "starting",
                 "pid": None,
@@ -1509,6 +1576,9 @@ class BenchmarkRunner:
             api_retry_task = asyncio.create_task(
                 self._wait_for_path_or_exit(process, api_retry_signal)
             )
+            sandbox_fault_task = asyncio.create_task(
+                self._wait_for_path_or_exit(process, sandbox_fault_signal)
+            )
             capture_task = (
                 asyncio.create_task(
                     self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
@@ -1519,7 +1589,7 @@ class BenchmarkRunner:
 
             try:
                 done, pending = await asyncio.wait(
-                    {wait_task, lost_task, api_retry_task},
+                    {wait_task, lost_task, api_retry_task, sandbox_fault_task},
                     timeout=timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -1542,9 +1612,37 @@ class BenchmarkRunner:
                     await capture_task
                 raise
             finally:
-                for task in (wait_task, lost_task, api_retry_task):
+                for task in (wait_task, lost_task, api_retry_task, sandbox_fault_task):
                     if not task.done():
                         task.cancel()
+
+            # Like the API signal check below, inspect the path too so an agent that writes and
+            # exits in one scheduler slice cannot turn an infrastructure fault into agent_error.
+            if sandbox_fault_signal.exists():
+                await self._kill(process)
+                if capture_task is not None:
+                    await capture_task
+                reason = self._sandbox_fault_message(sandbox_fault_signal)
+                source = f"{prompt.id}/try{attempt:02d}"
+                self._record_local_quarantine(lease, reason=reason, source=source)
+                coordinator_quarantined = False
+                try:
+                    await client.quarantine(lease, reason=reason, source=source)
+                    coordinator_quarantined = True
+                except Exception as error:  # old coordinator: battery denylist remains authoritative
+                    _log(
+                        f"{source}: coordinator quarantine unavailable ({error}); "
+                        f"using battery-local quarantine for {lease.sandbox_alias}"
+                    )
+                _patch_json(
+                    manifest_path,
+                    {
+                        "sandbox_fault": reason,
+                        "sandbox_quarantined": coordinator_quarantined,
+                        "local_quarantine": not coordinator_quarantined,
+                    },
+                )
+                raise SandboxLost(lease.sandbox_id, f"quarantined: {reason}")
 
             # Check the file itself as well as the watcher task. This closes the race where the
             # agent writes the signal immediately before exiting and process.wait() wins the loop.
@@ -1622,6 +1720,16 @@ class BenchmarkRunner:
             f"{prefix} (call={call_name}, failure_kind={failure_kind}, "
             f"{error_type}: {error})"
         )
+
+    @staticmethod
+    def _sandbox_fault_message(path: Path) -> str:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "sandbox protocol fault"
+        code = str(payload.get("code") or "sandbox_protocol_fault")
+        message = str(payload.get("message") or "sandbox protocol fault")
+        return f"{code}: {message}"[:240]
 
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""

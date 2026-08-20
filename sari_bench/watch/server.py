@@ -109,6 +109,7 @@ class WatchState:
             "active_leases": 0,
             "registered_sandboxes": 0,
             "eligible_sandboxes": 0,
+            "quarantined_sandboxes": 0,
         }
         self._announced_start = False
         self._announced_done = False
@@ -456,6 +457,7 @@ class WatchState:
                     for name in (
                         "capacity_limit", "effective_capacity", "active_leases",
                         "registered_sandboxes", "eligible_sandboxes",
+                        "quarantined_sandboxes",
                     )
                 }
             self._invalidate_locked()
@@ -485,6 +487,40 @@ class WatchState:
             self._invalidate_locked()
         return {"ok": True, **status}
 
+    def fleet_status(self) -> dict[str, Any]:
+        """Stable JSON backend for a dedicated sandbox-status UI."""
+        with self._lock:
+            return {
+                "sandboxes": list(self._pool),
+                "waiting": self._pool_waiting,
+                "error": self._pool_error,
+                **dict(self._fleet_status),
+            }
+
+    def change_quarantine(
+        self, selector: str, *, clear: bool, reason: str = "web_ui"
+    ) -> dict[str, Any]:
+        if not selector:
+            return {"ok": False, "error": "sandbox alias or ID is required"}
+        if not self.coordinator_url:
+            return {"ok": False, "error": "watcher has no coordinator configured"}
+
+        from sari_bench.client import CoordinatorClient
+
+        async def update() -> dict[str, Any]:
+            async with CoordinatorClient(self.coordinator_url or "") as client:
+                if clear:
+                    return await client.unquarantine(selector)
+                return await client.quarantine_sandbox(
+                    selector, reason=reason, source="watch_api"
+                )
+
+        try:
+            status = asyncio.run(asyncio.wait_for(update(), timeout=10.0))
+        except Exception as error:  # noqa: BLE001
+            return {"ok": False, "error": repr(error)}
+        return {"ok": True, **status}
+
     # -- queue -----------------------------------------------------------------------------
     #
     # What the watcher can honestly say about dispatch order. It knows its own retry jobs exactly -
@@ -505,6 +541,7 @@ class WatchState:
             if not sandbox.get("lease_id")
             and sandbox.get("state") == STATE_READY
             and bool(sandbox.get("store_loaded", True))
+            and not sandbox.get("quarantined")
         )
         limit = self._fleet_status.get("capacity_limit")
         if limit is None:
@@ -694,6 +731,8 @@ class WatchState:
             success=bool(summary.get("success")),
             end_reason=end_reasons[-1] if end_reasons else RUNNER_GONE,
             sandbox_id=str(manifest.get("sandbox_id") or ""),
+            sandbox_alias=str(manifest.get("sandbox_alias") or ""),
+            lease_alias=str(manifest.get("lease_alias") or ""),
             commands_uri=str(manifest.get("commands_uri") or ""),
             exit_code=None,
             wall_seconds=(max(0.0, round(ended - float(started), 1))
@@ -1731,6 +1770,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.state.view(battery_id))
             return
 
+        if path == "/api/fleet/status":
+            self._json(self.state.fleet_status())
+            return
+
         if path == "/api/report.csv":
             self._report_csv(battery_id, parse_qs(parsed.query).get("grain", [""])[0])
             return
@@ -1803,6 +1846,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "body needs 'limit'"}, code=400)
                 return
             result = self.state.set_fleet_cap(body.get("limit"))
+            self._json(result, code=200 if result.get("ok") else 400)
+            return
+        if path in {"/api/fleet/quarantine", "/api/fleet/unquarantine"}:
+            body = self._body()
+            result = self.state.change_quarantine(
+                str(body.get("sandbox") or ""),
+                clear=path.endswith("/unquarantine"),
+                reason=str(body.get("reason") or "web_ui"),
+            )
             self._json(result, code=200 if result.get("ok") else 400)
             return
         if path.startswith("/api/attempt/"):

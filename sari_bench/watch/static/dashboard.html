@@ -1065,7 +1065,7 @@ function setRows(refs, a) {
     + (live && a.remaining_seconds !== null ? " · " + fmtMin(a.remaining_seconds) + " left" : ""));
   setText(refs.apiCalls, fmtApiCalls(a));
   setTok(refs.tokens, a);
-  setText(refs.sandbox, a.sandbox_id || "—");
+  setText(refs.sandbox, a.sandbox_alias || a.sandbox_id || "—");
   refs.endLabel.hidden = refs.end.hidden = !a.end_reason;
   if (a.end_reason) setText(refs.end, a.end_reason);
 }
@@ -1676,7 +1676,7 @@ function showTip(key) {
   setTok(tipRefs.tokens, a);
   setText(tipRefs.apiCalls, fmtApiCalls(a));
   setText(tipRefs.end, a.end_reason || a.outcome || a.state || "—");
-  setText(tipRefs.sandbox, a.sandbox_id || "—");
+  setText(tipRefs.sandbox, a.sandbox_alias || a.sandbox_id || "—");
   setResponse(tipRefs.resp, tipRefs.respText, a);
   const hints = [];
   if (canVerdict(a)) hints.push("<kbd>P</kbd> pass · <kbd>F</kbd> fail · <kbd>E</kbd> invalid"

@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from pathlib import Path
 import sys
+import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -279,12 +281,87 @@ async def test_stuck_reset_is_quarantined() -> None:
         async with CoordinatorClient(url) as client:
             lease = await asyncio.wait_for(client.acquire(), timeout=2)
             await client.release(lease, outcome="completed")
-        await asyncio.wait_for(sandbox.hung_up_on.wait(), timeout=3)
-        assert not coordinator.pool_snapshot()
+        deadline = asyncio.get_running_loop().time() + 3
+        while not coordinator.pool_snapshot()[0].get("quarantined"):
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.05)
+        row = coordinator.pool_snapshot()[0]
+        assert row["quarantine_reason"] == "reset_timeout"
+        assert not sandbox.hung_up_on.is_set(), "quarantine should retain the control socket"
     finally:
         await sandbox.close()
         await coordinator.stop()
-    print("ok  a reset past its deadline is disconnected and quarantined")
+    print("ok  a reset past its deadline remains visible but cannot be leased")
+
+
+async def test_aliases_and_operator_quarantine_round_trip() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("fd8ed4aec4b74525a78df3e0a757758a", 51923, auto_ready=False)
+    client = CoordinatorClient(url)
+    try:
+        await sandbox.connect(url)
+        await client.connect()
+        lease = await client.acquire(lease_alias="medium-02/try01")
+        assert lease.sandbox_alias == "sandbox-01"
+        assert lease.lease_alias == "medium-02/try01"
+
+        reply = await client.quarantine(
+            lease, reason="lidar_protocol_nonbinary", source="medium-02/try01"
+        )
+        assert reply["sandbox_alias"] == "sandbox-01"
+        lost = await asyncio.wait_for(client.wait_for_sandbox_lost(lease), timeout=1)
+        assert "quarantined" in lost.reason
+
+        status = await client.fleet_status()
+        row = status["sandboxes"][0]
+        assert row["quarantined"] is True
+        assert row["sandbox_alias"] == "sandbox-01"
+        assert status["eligible_sandboxes"] == 0
+        assert status["quarantined_sandboxes"] == 1
+
+        cleared = await client.unquarantine("sandbox-01")
+        assert cleared["sandbox_id"] == sandbox.sandbox_id
+        await asyncio.wait_for(sandbox.reset_requested.wait(), timeout=1)
+        await sandbox.report_ready()
+        replacement = await client.acquire(lease_alias="medium-02/try02")
+        assert replacement.sandbox_alias == "sandbox-01"
+        assert replacement.lease_alias == "medium-02/try02"
+    finally:
+        await client.close()
+        await sandbox.close()
+        await coordinator.stop()
+    print("ok  human aliases and quarantine/unquarantine round-trip")
+
+
+async def test_alias_and_quarantine_survive_coordinator_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = Path(tmp) / "coordinator.json"
+        first, first_url = await _start_coordinator(state_path=state_path)
+        sandbox = FakeSandbox("stable-sandbox-id", 51925)
+        try:
+            await sandbox.connect(first_url)
+            async with CoordinatorClient(first_url) as client:
+                reply = await client.quarantine_sandbox(
+                    "sandbox-01", reason="manual_test", source="test"
+                )
+                assert reply["sandbox_alias"] == "sandbox-01"
+        finally:
+            await sandbox.close()
+            await first.stop()
+
+        second, second_url = await _start_coordinator(state_path=state_path)
+        try:
+            await sandbox.connect(second_url)
+            async with CoordinatorClient(second_url) as client:
+                status = await client.fleet_status()
+                row = status["sandboxes"][0]
+                assert row["sandbox_alias"] == "sandbox-01"
+                assert row["quarantined"] is True
+                assert row["quarantine_reason"] == "manual_test"
+        finally:
+            await sandbox.close()
+            await second.stop()
+    print("ok  aliases and quarantine state survive a coordinator restart")
 
 
 async def test_dead_sandbox_notifies_its_lease_holder() -> None:
@@ -425,6 +502,8 @@ async def main() -> int:
         test_release_resets_before_repooling,
         test_fleet_resets_are_serialized,
         test_stuck_reset_is_quarantined,
+        test_aliases_and_operator_quarantine_round_trip,
+        test_alias_and_quarantine_survive_coordinator_restart,
         test_dead_sandbox_notifies_its_lease_holder,
         test_evicted_sandbox_rejoins_the_pool,
         test_worker_disconnect_reaps_its_lease,

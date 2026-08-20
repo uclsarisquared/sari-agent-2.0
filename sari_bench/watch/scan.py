@@ -73,6 +73,8 @@ class AttemptView:
     exit_code: int | None = None
 
     sandbox_id: str = ""
+    sandbox_alias: str = ""
+    lease_alias: str = ""
     commands_uri: str = ""
     pid: int | None = None
     alive: bool = False
@@ -417,6 +419,8 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
         end_reason=str(manifest.get("end_reason") or ""),
         exit_code=manifest.get("exit_code"),
         sandbox_id=str(manifest.get("sandbox_id") or ""),
+        sandbox_alias=str(manifest.get("sandbox_alias") or ""),
+        lease_alias=str(manifest.get("lease_alias") or ""),
         commands_uri=str(manifest.get("commands_uri") or ""),
         pid=manifest.get("pid"),
         killed_by=str(manifest.get("killed_by") or ""),

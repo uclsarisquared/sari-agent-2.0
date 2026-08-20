@@ -563,6 +563,11 @@ def test_http_surface_and_traversal_refusal() -> None:
             assert payload["battery_id"] == "b"
             assert payload["mode"] == "pinned"
             assert len(payload["attempts"]) == 1
+            fleet = json.loads(
+                urllib.request.urlopen(f"{base}/api/fleet/status", timeout=5).read()
+            )
+            assert fleet["sandboxes"] == []
+            assert fleet["quarantined_sandboxes"] == 0
 
             frame = urllib.request.urlopen(f"{base}/api/attempt/p/try01/frame.png", timeout=5)
             assert frame.headers["Content-Type"] == "image/png"
