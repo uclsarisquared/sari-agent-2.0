@@ -175,6 +175,47 @@ class CoordinatorClient:
             waiting = 0
         return list(reply.get("sandboxes") or []), waiting
 
+    async def fleet_status(self) -> dict[str, Any]:
+        """Return the pool and additive coordinator-capacity fields.
+
+        Defaults preserve useful values when connected to a coordinator predating capacity caps.
+        """
+        reply = await self._request(encode("bench.status"), "bench.pool")
+        sandboxes = list(reply.get("sandboxes") or [])
+        active = sum(1 for sandbox in sandboxes if sandbox.get("lease_id"))
+        eligible = sum(1 for sandbox in sandboxes if bool(sandbox.get("store_loaded", True)))
+
+        def count(name: str, default: int) -> int:
+            try:
+                return max(0, int(reply.get(name, default)))
+            except (TypeError, ValueError):
+                return default
+
+        return {
+            "sandboxes": sandboxes,
+            "waiting": count("waiting", 0),
+            "capacity_limit": reply.get("capacity_limit"),
+            "effective_capacity": count("effective_capacity", eligible),
+            "active_leases": count("active_leases", active),
+            "registered_sandboxes": count("registered_sandboxes", len(sandboxes)),
+            "eligible_sandboxes": count("eligible_sandboxes", eligible),
+        }
+
+    async def set_capacity(self, limit: int | None) -> dict[str, Any]:
+        """Set the coordinator-wide active lease cap (None means unlimited)."""
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
+            raise ValueError("capacity limit must be a non-negative integer or None")
+        reply = await self._request(
+            encode("bench.capacity", limit=limit), "bench.capacity"
+        )
+        return {
+            "capacity_limit": reply.get("capacity_limit"),
+            "effective_capacity": int(reply.get("effective_capacity") or 0),
+            "active_leases": int(reply.get("active_leases") or 0),
+            "registered_sandboxes": int(reply.get("registered_sandboxes") or 0),
+            "eligible_sandboxes": int(reply.get("eligible_sandboxes") or 0),
+        }
+
     async def wait_for_sandbox_lost(self, lease: Lease) -> SandboxLost:
         """Resolves only if *this* lease's sandbox dies. Race it against the attempt."""
         while True:

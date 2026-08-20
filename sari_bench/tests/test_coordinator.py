@@ -374,6 +374,48 @@ async def test_one_sandbox_is_never_leased_twice() -> None:
     print("ok  a single sandbox is only ever held by one worker at a time")
 
 
+async def test_live_capacity_cap_pauses_drains_and_scales_up() -> None:
+    coordinator, url = await _start_coordinator()
+    sandboxes = [FakeSandbox(f"sandbox-{index}", 52000 + index) for index in range(3)]
+    clients = [CoordinatorClient(url) for _ in range(3)]
+    try:
+        for sandbox in sandboxes:
+            await sandbox.connect(url)
+        for client in clients:
+            await client.connect()
+
+        status = await clients[0].set_capacity(0)
+        assert status["capacity_limit"] == 0 and status["effective_capacity"] == 0
+        paused = asyncio.create_task(clients[1].acquire(timeout=None))
+        await asyncio.sleep(0.1)
+        assert not paused.done(), "cap zero dispatched new work"
+
+        status = await clients[0].set_capacity(2)
+        assert status["capacity_limit"] == 2 and status["effective_capacity"] == 2
+        first = await asyncio.wait_for(paused, timeout=2)
+        second = await asyncio.wait_for(clients[2].acquire(), timeout=2)
+
+        status = await clients[0].set_capacity(1)
+        assert status["active_leases"] == 2 and status["capacity_limit"] == 1
+        # Lowering drains; it does not revoke either active lease.
+        assert first.lease_id in coordinator._leases and second.lease_id in coordinator._leases
+        await clients[1].release(first, outcome="done")
+        await clients[2].release(second, outcome="done")
+
+        status = await clients[0].set_capacity(None)
+        assert status["capacity_limit"] is None and status["effective_capacity"] == 3
+        round_trip = await clients[0].fleet_status()
+        assert round_trip["registered_sandboxes"] == 3
+        assert round_trip["eligible_sandboxes"] == 3
+    finally:
+        for client in clients:
+            await client.close()
+        for sandbox in sandboxes:
+            await sandbox.close()
+        await coordinator.stop()
+    print("ok  live capacity cap pauses, drains safely, scales up, and restores all")
+
+
 async def main() -> int:
     for test in (
         test_acquire_blocks_until_a_sandbox_registers,
@@ -387,6 +429,7 @@ async def main() -> int:
         test_evicted_sandbox_rejoins_the_pool,
         test_worker_disconnect_reaps_its_lease,
         test_one_sandbox_is_never_leased_twice,
+        test_live_capacity_cap_pauses_drains_and_scales_up,
     ):
         await test()
     print("\nAll coordinator tests passed.")

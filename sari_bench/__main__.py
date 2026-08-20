@@ -3,6 +3,7 @@
     coordinator   run the sandbox registry
     run           run a prompt battery across the fleet
     status        print the current sandbox pool
+    capacity      set the coordinator-wide active lease cap
     watch         live dashboard for a running battery (run it beside the runner)
     report        flatten a battery into attempts.csv / legs.csv
     video         render an attempt's screenshots into a replay video
@@ -30,18 +31,26 @@ def _status(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="Print the raw pool snapshot.")
     args = parser.parse_args(argv)
 
-    async def fetch() -> list[dict[str, object]]:
+    async def fetch() -> dict[str, object]:
         async with CoordinatorClient(args.coordinator) as client:
-            return await client.pool()
+            return await client.fleet_status()
 
-    pool = asyncio.run(fetch())
+    status = asyncio.run(fetch())
+    pool = list(status.get("sandboxes") or [])
     if args.json:
-        print(json.dumps(pool, indent=2))
+        print(json.dumps(status, indent=2))
         return 0
 
     if not pool:
         print("No sandboxes registered.")
         print("Total connected sandboxes: 0")
+        cap = status.get("capacity_limit")
+        print(
+            f"Lease capacity: {'all' if cap is None else cap}; "
+            f"effective={status.get('effective_capacity', 0)}, "
+            f"active={status.get('active_leases', 0)}, "
+            f"eligible={status.get('eligible_sandboxes', 0)}"
+        )
         return 0
 
     print(f"{'SANDBOX':<34} {'ADDRESS':<24} {'STATE':<11} {'LEASE':<34} RESET")
@@ -61,6 +70,41 @@ def _status(argv: list[str]) -> int:
             f"{lease:<34} {reset}"
         )
     print(f"Total connected sandboxes: {len(pool)}")
+    cap = status.get("capacity_limit")
+    print(
+        f"Lease capacity: {'all' if cap is None else cap}; "
+        f"effective={status.get('effective_capacity', 0)}, "
+        f"active={status.get('active_leases', 0)}, "
+        f"eligible={status.get('eligible_sandboxes', 0)}"
+    )
+    return 0
+
+
+def _capacity(argv: list[str]) -> int:
+    import argparse
+
+    from sari_bench.client import CoordinatorClient
+
+    parser = argparse.ArgumentParser(prog="sari_bench capacity")
+    parser.add_argument("limit", help="'all' or a non-negative integer")
+    parser.add_argument("--coordinator", default=f"ws://localhost:{DEFAULT_COORDINATOR_PORT}")
+    args = parser.parse_args(argv)
+    if args.limit.lower() == "all":
+        limit = None
+    else:
+        try:
+            limit = int(args.limit)
+        except ValueError:
+            parser.error("limit must be 'all' or a non-negative integer")
+        if limit < 0:
+            parser.error("limit must be 'all' or a non-negative integer")
+
+    async def update() -> dict[str, object]:
+        async with CoordinatorClient(args.coordinator) as client:
+            return await client.set_capacity(limit)
+
+    status = asyncio.run(update())
+    print(json.dumps(status, indent=2))
     return 0
 
 
@@ -81,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         return runner_main(rest)
     if command == "status":
         return _status(rest)
+    if command == "capacity":
+        return _capacity(rest)
     if command == "watch":
         from sari_bench.watch.server import main as watch_main
 

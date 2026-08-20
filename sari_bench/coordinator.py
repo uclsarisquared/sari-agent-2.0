@@ -133,6 +133,9 @@ class Coordinator:
 
         self._sandboxes: dict[str, Sandbox] = {}
         self._leases: dict[str, Lease] = {}
+        # None is the process-lifetime default ("all"). A finite limit constrains only new claims;
+        # lowering it below the current lease count drains naturally as those leases are released.
+        self._lease_limit: int | None = None
         # Workers waiting for a free sandbox, oldest first, so leases are handed out fairly.
         self._waiters: list[asyncio.Future[Lease]] = []
         self._pending_resets: list[tuple[str, str, str]] = []
@@ -361,9 +364,9 @@ class Coordinator:
                     # `waiting` is the only place the parked acquires are visible from outside this
                     # process: a worker blocked in `bench.acquire` has nothing on disk and no lease,
                     # so without this count a full fleet and a queue behind it look identical.
-                    await _send(websocket, encode(
-                        "bench.pool", sandboxes=self.pool_snapshot(), waiting=len(self._waiters),
-                    ))
+                    await _send(websocket, encode("bench.pool", **self.pool_status()))
+                elif message_type == "bench.capacity":
+                    await self._handle_capacity(websocket, message)
                 else:
                     await _send(
                         websocket,
@@ -426,6 +429,18 @@ class Coordinator:
         )
         self.log(f"Leased {sandbox.sandbox_id} ({sandbox.host}:{sandbox.port}) as {lease.lease_id}")
 
+    async def _handle_capacity(self, websocket: Any, message: dict[str, Any]) -> None:
+        """Update the in-memory active-lease ceiling and wake eligible queued work."""
+        limit = message.get("limit")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
+            await _send(websocket, encode("bench.error", reason="invalid_capacity"))
+            return
+        self._lease_limit = limit
+        self._fulfil_waiters()
+        await _send(websocket, encode("bench.capacity", **self.capacity_status()))
+        label = "all" if limit is None else str(limit)
+        self.log(f"Active lease cap set to {label}")
+
     async def _handle_release(self, websocket: Any, message: dict[str, Any]) -> None:
         lease_id = message.get("lease_id")
         lease = self._leases.pop(lease_id, None) if isinstance(lease_id, str) else None
@@ -487,6 +502,8 @@ class Coordinator:
     # ------------------------------------------------------------------ pool helpers
 
     def _take_leasable(self) -> Sandbox | None:
+        if self._lease_limit is not None and len(self._leases) >= self._lease_limit:
+            return None
         for sandbox in self._sandboxes.values():
             if sandbox.leasable:
                 return sandbox
@@ -532,6 +549,25 @@ class Coordinator:
 
     def pool_snapshot(self) -> list[dict[str, Any]]:
         return [sandbox.describe() for sandbox in self._sandboxes.values()]
+
+    def capacity_status(self) -> dict[str, Any]:
+        registered = len(self._sandboxes)
+        eligible = sum(1 for sandbox in self._sandboxes.values() if sandbox.store_loaded)
+        effective = eligible if self._lease_limit is None else min(self._lease_limit, eligible)
+        return {
+            "capacity_limit": self._lease_limit,
+            "effective_capacity": effective,
+            "active_leases": len(self._leases),
+            "registered_sandboxes": registered,
+            "eligible_sandboxes": eligible,
+        }
+
+    def pool_status(self) -> dict[str, Any]:
+        return {
+            "sandboxes": self.pool_snapshot(),
+            "waiting": len([waiter for waiter in self._waiters if not waiter.done()]),
+            **self.capacity_status(),
+        }
 
     # ------------------------------------------------------------------ reaper
 
