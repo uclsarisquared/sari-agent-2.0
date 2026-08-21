@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from pathlib import Path
 import sys
+import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -166,6 +168,34 @@ async def test_acquire_fails_if_coordinator_connection_closes() -> None:
     print("ok  a dropped coordinator connection wakes a parked acquire")
 
 
+async def test_acquire_timeout_disconnects_its_coordinator_waiter() -> None:
+    coordinator, url = await _start_coordinator()
+    client = CoordinatorClient(url)
+    sandbox = FakeSandbox("sandbox-after-timeout", 51924)
+    try:
+        await client.connect()
+        try:
+            await client.acquire(timeout=0.05)
+        except asyncio.TimeoutError as error:
+            assert "bench.lease" in str(error), error
+        else:
+            raise AssertionError("acquire did not time out against an empty pool")
+
+        async with CoordinatorClient(url) as observer:
+            _pool, waiting = await observer.pool_status()
+            assert waiting == 0, "timed-out acquire left a stale coordinator waiter"
+
+        await sandbox.connect(url)
+        async with CoordinatorClient(url) as replacement:
+            lease = await replacement.acquire(timeout=1)
+            assert lease.sandbox_id == "sandbox-after-timeout"
+    finally:
+        await client.close()
+        await sandbox.close()
+        await coordinator.stop()
+    print("ok  a timed-out acquire disconnects its stale coordinator waiter")
+
+
 async def test_orphaned_lease_is_reset_when_sandbox_registers() -> None:
     coordinator, url = await _start_coordinator()
     sandbox = FakeSandbox("sandbox-orphan", 51923)
@@ -251,12 +281,87 @@ async def test_stuck_reset_is_quarantined() -> None:
         async with CoordinatorClient(url) as client:
             lease = await asyncio.wait_for(client.acquire(), timeout=2)
             await client.release(lease, outcome="completed")
-        await asyncio.wait_for(sandbox.hung_up_on.wait(), timeout=3)
-        assert not coordinator.pool_snapshot()
+        deadline = asyncio.get_running_loop().time() + 3
+        while not coordinator.pool_snapshot()[0].get("quarantined"):
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.05)
+        row = coordinator.pool_snapshot()[0]
+        assert row["quarantine_reason"] == "reset_timeout"
+        assert not sandbox.hung_up_on.is_set(), "quarantine should retain the control socket"
     finally:
         await sandbox.close()
         await coordinator.stop()
-    print("ok  a reset past its deadline is disconnected and quarantined")
+    print("ok  a reset past its deadline remains visible but cannot be leased")
+
+
+async def test_aliases_and_operator_quarantine_round_trip() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("fd8ed4aec4b74525a78df3e0a757758a", 51923, auto_ready=False)
+    client = CoordinatorClient(url)
+    try:
+        await sandbox.connect(url)
+        await client.connect()
+        lease = await client.acquire(lease_alias="medium-02/try01")
+        assert lease.sandbox_alias == "sandbox-01"
+        assert lease.lease_alias == "medium-02/try01"
+
+        reply = await client.quarantine(
+            lease, reason="lidar_protocol_nonbinary", source="medium-02/try01"
+        )
+        assert reply["sandbox_alias"] == "sandbox-01"
+        lost = await asyncio.wait_for(client.wait_for_sandbox_lost(lease), timeout=1)
+        assert "quarantined" in lost.reason
+
+        status = await client.fleet_status()
+        row = status["sandboxes"][0]
+        assert row["quarantined"] is True
+        assert row["sandbox_alias"] == "sandbox-01"
+        assert status["eligible_sandboxes"] == 0
+        assert status["quarantined_sandboxes"] == 1
+
+        cleared = await client.unquarantine("sandbox-01")
+        assert cleared["sandbox_id"] == sandbox.sandbox_id
+        await asyncio.wait_for(sandbox.reset_requested.wait(), timeout=1)
+        await sandbox.report_ready()
+        replacement = await client.acquire(lease_alias="medium-02/try02")
+        assert replacement.sandbox_alias == "sandbox-01"
+        assert replacement.lease_alias == "medium-02/try02"
+    finally:
+        await client.close()
+        await sandbox.close()
+        await coordinator.stop()
+    print("ok  human aliases and quarantine/unquarantine round-trip")
+
+
+async def test_alias_and_quarantine_survive_coordinator_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = Path(tmp) / "coordinator.json"
+        first, first_url = await _start_coordinator(state_path=state_path)
+        sandbox = FakeSandbox("stable-sandbox-id", 51925)
+        try:
+            await sandbox.connect(first_url)
+            async with CoordinatorClient(first_url) as client:
+                reply = await client.quarantine_sandbox(
+                    "sandbox-01", reason="manual_test", source="test"
+                )
+                assert reply["sandbox_alias"] == "sandbox-01"
+        finally:
+            await sandbox.close()
+            await first.stop()
+
+        second, second_url = await _start_coordinator(state_path=state_path)
+        try:
+            await sandbox.connect(second_url)
+            async with CoordinatorClient(second_url) as client:
+                status = await client.fleet_status()
+                row = status["sandboxes"][0]
+                assert row["sandbox_alias"] == "sandbox-01"
+                assert row["quarantined"] is True
+                assert row["quarantine_reason"] == "manual_test"
+        finally:
+            await sandbox.close()
+            await second.stop()
+    print("ok  aliases and quarantine state survive a coordinator restart")
 
 
 async def test_dead_sandbox_notifies_its_lease_holder() -> None:
@@ -346,18 +451,64 @@ async def test_one_sandbox_is_never_leased_twice() -> None:
     print("ok  a single sandbox is only ever held by one worker at a time")
 
 
+async def test_live_capacity_cap_pauses_drains_and_scales_up() -> None:
+    coordinator, url = await _start_coordinator()
+    sandboxes = [FakeSandbox(f"sandbox-{index}", 52000 + index) for index in range(3)]
+    clients = [CoordinatorClient(url) for _ in range(3)]
+    try:
+        for sandbox in sandboxes:
+            await sandbox.connect(url)
+        for client in clients:
+            await client.connect()
+
+        status = await clients[0].set_capacity(0)
+        assert status["capacity_limit"] == 0 and status["effective_capacity"] == 0
+        paused = asyncio.create_task(clients[1].acquire(timeout=None))
+        await asyncio.sleep(0.1)
+        assert not paused.done(), "cap zero dispatched new work"
+
+        status = await clients[0].set_capacity(2)
+        assert status["capacity_limit"] == 2 and status["effective_capacity"] == 2
+        first = await asyncio.wait_for(paused, timeout=2)
+        second = await asyncio.wait_for(clients[2].acquire(), timeout=2)
+
+        status = await clients[0].set_capacity(1)
+        assert status["active_leases"] == 2 and status["capacity_limit"] == 1
+        # Lowering drains; it does not revoke either active lease.
+        assert first.lease_id in coordinator._leases and second.lease_id in coordinator._leases
+        await clients[1].release(first, outcome="done")
+        await clients[2].release(second, outcome="done")
+
+        status = await clients[0].set_capacity(None)
+        assert status["capacity_limit"] is None and status["effective_capacity"] == 3
+        round_trip = await clients[0].fleet_status()
+        assert round_trip["registered_sandboxes"] == 3
+        assert round_trip["eligible_sandboxes"] == 3
+    finally:
+        for client in clients:
+            await client.close()
+        for sandbox in sandboxes:
+            await sandbox.close()
+        await coordinator.stop()
+    print("ok  live capacity cap pauses, drains safely, scales up, and restores all")
+
+
 async def main() -> int:
     for test in (
         test_acquire_blocks_until_a_sandbox_registers,
         test_acquire_fails_if_coordinator_connection_closes,
+        test_acquire_timeout_disconnects_its_coordinator_waiter,
         test_orphaned_lease_is_reset_when_sandbox_registers,
         test_release_resets_before_repooling,
         test_fleet_resets_are_serialized,
         test_stuck_reset_is_quarantined,
+        test_aliases_and_operator_quarantine_round_trip,
+        test_alias_and_quarantine_survive_coordinator_restart,
         test_dead_sandbox_notifies_its_lease_holder,
         test_evicted_sandbox_rejoins_the_pool,
         test_worker_disconnect_reaps_its_lease,
         test_one_sandbox_is_never_leased_twice,
+        test_live_capacity_cap_pauses_drains_and_scales_up,
     ):
         await test()
     print("\nAll coordinator tests passed.")

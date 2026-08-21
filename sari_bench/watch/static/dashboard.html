@@ -41,8 +41,10 @@
              font-size: 12.5px; cursor: pointer; white-space: nowrap; }
   .menu li:hover { background: #262b33; }
   .menu li[aria-selected="true"] { color: var(--ink); background: rgba(79,143,208,.12); }
-  .menu .m-id { flex: 1; font-variant-numeric: tabular-nums; }
-  .menu .m-note { color: var(--dim); font-size: 11.5px; }
+  /* Not flex: 1 any more - every name gets the same fixed clip box as the pill that opens this list,
+     so the column is one width and the date is what the row's spare space goes to. */
+  .menu .m-id { font-variant-numeric: tabular-nums; }
+  .menu .m-note { margin-left: auto; color: var(--dim); font-size: 11.5px; }
   .menu .m-empty { color: var(--dim); cursor: default; }
   .menu .m-empty:hover { background: none; }
   /* Renaming and copying are deliberate acts on a row whose whole surface already means "switch to
@@ -116,6 +118,7 @@
   .badge { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
   .badge.alert { color: #f0a596; border-color: #57302a; }
   .badge.watch { color: #e8c48d; border-color: #58472a; }
+  .badge.waiting { color: #c5b6f2; border-color: #55447e; background: rgba(128,98,198,.12); }
   .badge.success { color: #a8dcbb; border-color: #2c4b38; }
   .badge.fail { color: #f0a596; border-color: #57302a; }
   .badge.invalid { color: #9aa4b2; border-color: #3a414c; background: rgba(154,164,178,.10); }
@@ -179,6 +182,9 @@
   /* The review state belongs to the group it is about, at the end of the row it will be answered on
      - not out beside it where it reads as one more thing the tile is telling you. */
   .grades .state { color: var(--dim); font-size: 11.5px; padding: 0 2px; }
+  /* Sized to the review state it sits beside rather than to the buttons: it is the note at the end
+     of the row, not a fifth verdict. */
+  .grades button.link { padding: 0 2px; font-size: 11.5px; }
   button.vote.on[data-verdict="pass"] { background: #24402f; border-color: #2c4b38; color: #a8dcbb; }
   button.vote.on[data-verdict="fail"] { background: #3a221e; border-color: #57302a; color: #f0a596; }
   button.vote.on[data-verdict="invalid"] { background: #2b3038; border-color: #3a414c; color: #c3cbd6; }
@@ -240,6 +246,7 @@
   .cell.p .cellbtn { background: rgba(79,169,107,.22); color: #a8dcbb; }
   .cell.f .cellbtn { background: rgba(224,85,63,.20); color: #f0a596; }
   .cell.r .cellbtn { background: rgba(224,162,63,.24); color: #f0cd9b; }
+  .cell.w .cellbtn { background: rgba(128,98,198,.24); color: #d0c2f5; }
   .cell.q .cellbtn { background: rgba(79,143,208,.20); color: #a9cbec; }
   .cell.k .cellbtn { background: rgba(90,100,114,.28); color: var(--dim); }
   /* Invalid: gray on purpose, and the same gray family as the killed cells - both are runs the
@@ -263,9 +270,136 @@
   kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 4px; background: #262b33; color: var(--ink); font: inherit;
         font-size: .92em; font-weight: 650; line-height: 1.5; }
-  /* Inline flow, not flex: the bar is already a flex row, and the hint has to be free to wrap as
-     one sentence when the note beside it grows. */
-  .ov-hint { margin-left: auto; text-align: right; }
+  #ov-note { margin-right: auto; }
+
+  /* The legend. Two columns, and only two: the cell exactly as the grid draws it, and what it
+     means. A shortcut is part of the meaning rather than a third column of its own, so the key
+     sits at the head of the description where it reads as a sentence. */
+  #legend .overlay-box { width: min(560px, 100%); }
+  #legend-rows { padding: 4px 14px 12px; overflow-y: auto;
+                 scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
+  #legend-rows table { border-collapse: separate; border-spacing: 0; width: 100%;
+                       font-size: 12.5px; }
+  #legend-rows td { padding: 6px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  #legend-rows tr:last-child td { border-bottom: 0; }
+  /* A sample wears the grid's own .cell/.cellbtn classes, so its fill and letter can never drift
+     from the table's - a new cell colour cannot be added there without also landing here. The cell
+     is a span rather than a td so the column keeps its own padding, and inert throughout: nothing
+     in this panel is clickable. */
+  #legend-rows td.sample { width: 1%; padding-right: 14px; }
+  #legend-rows .cell { display: inline-block; }
+  #legend-rows .cellbtn { pointer-events: none; border-radius: 4px; }
+  #legend-rows td.what { color: var(--dim); line-height: 1.45; }
+  #legend-rows td.what kbd { margin-right: 6px; }
+  #legend-note { padding: 8px 14px 12px; color: var(--dim); font-size: 12px;
+                 border-top: 1px solid var(--line); }
+
+  /* A run id is a timestamp and then the thing you actually named. The box is a fixed width so the
+     header stops reflowing every time the page switches to a run with a longer name - and so the
+     list of runs under it reads as a column of equal boxes rather than a ragged edge. One font-size
+     for every clip box, header and menu row alike, because `ch` is a zero's width and 28 of them is
+     only the same number of pixels twice if the zero is.
+
+     28ch. These names are almost all lowercase and hyphens, which run narrower than a zero, so the
+     box holds nearer 36 characters of one: enough for the whole of a longest-observed name
+     ("context-ablation-a2c-comprehensive", 34) once its 16-character timestamp is out of frame, and
+     wide enough that a short name like "20260730_205702-hard" sits in it entire.
+
+     At rest the box holds the TAIL, because the leading timestamp is the half that says nothing.
+     Hovering starts an endless rightward crawl rather than a one-shot slide: a name is read by
+     hovering it, and a slide that finishes leaves the reader having to leave and come back to catch
+     what they missed.
+
+     A ticker, then, and the whole point of one is that the space opening up on the left is already
+     filled. So the track is [copy][·][copy] and it travels rightwards by exactly copy+separator per
+     cycle: the frame it ends on shows the FIRST copy's tail where it began showing the second's,
+     which is the same pixels, so the loop closes invisibly and the name never snaps back to its
+     start. The separator rides between them because a plain gap would drag a blank through the box
+     once a cycle, which is the same jarring beat by another name. The cycle also begins exactly at
+     the resting offset, so hovering never jumps. */
+  .pill-clip { flex: none; display: block; width: 28ch; font-size: 12px; overflow: hidden; }
+  .pill-scroll { display: flex; width: max-content; white-space: nowrap;
+                 transform: translateX(var(--clip-rest, 0px)); }
+  .pill-copy { flex: none; }
+  /* Its own element, of a width this page picked, so one copy's measured width stays the width of
+     the text alone - a margin or padding on the copy would fold the gap into the number every other
+     offset is derived from. */
+  .pill-sep { flex: none; width: var(--clip-gap, 26px); text-align: center; opacity: .4; }
+  @keyframes clip-crawl {
+    from { transform: translateX(var(--clip-rest, 0px)); }
+    to { transform: translateX(calc(var(--clip-rest, 0px) + var(--clip-period, 0px))); }
+  }
+  .clip:hover .pill-scroll.loop,
+  .clip:focus-visible .pill-scroll.loop,
+  .clip:focus-within .pill-scroll.loop { animation: clip-crawl var(--clip-dur, 8s) linear infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .clip:hover .pill-scroll.loop, .clip:focus-visible .pill-scroll.loop,
+    .clip:focus-within .pill-scroll.loop { animation: none; }
+  }
+
+  /* Settings. The two knobs that change how this page reads - which signals it shows, and how much
+     of the fleet it will lease - are preferences rather than readouts, so they leave the header row
+     and live behind the gear. Being a panel and not a badge, each one can say in a line what it
+     does, which is what the hover tooltips used to have to do. */
+  button.pill.icon { padding: 3px 6px; color: var(--dim); }
+  button.pill.icon svg { display: block; width: 14px; height: 14px; }
+  .panel { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: 296px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+           box-shadow: 0 12px 32px rgba(0,0,0,.55); text-align: left; }
+  .panel[hidden] { display: none; }
+  .panel-head { padding: 9px 12px; border-bottom: 1px solid var(--line); color: var(--dim);
+                font-size: 11px; font-weight: 650; letter-spacing: .6px; text-transform: uppercase; }
+  .set-row { padding: 11px 12px; border-bottom: 1px solid var(--line); }
+  .set-row:last-child { border-bottom: 0; }
+  .set-main { display: flex; align-items: center; gap: 10px; }
+  .set-label { flex: 1; font-size: 13px; }
+  .set-desc { margin: 5px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+  .set-desc code { padding: 0 3px; border-radius: 3px; background: #262b33; color: var(--ink);
+                   font-size: 11px; }
+  .set-input { flex: none; width: 74px; padding: 3px 7px; border: 1px solid var(--line);
+               border-radius: 6px; background: #14161a; color: var(--ink); font: inherit;
+               font-size: 12px; text-align: right; }
+  .set-input:focus { outline: none; border-color: var(--accent); }
+  .switch { position: relative; flex: none; width: 34px; height: 18px; padding: 0; border-radius: 999px;
+            border: 1px solid var(--line); background: #23272f;
+            transition: background .15s ease, border-color .15s ease; }
+  .switch:hover { background: #2c313a; }
+  .switch .knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+                  border-radius: 999px; background: var(--dim);
+                  transition: transform .15s ease, background .15s ease; }
+  .switch[aria-checked="true"], .switch[aria-checked="true"]:hover {
+            background: rgba(79,169,107,.3); border-color: var(--ok); }
+  .switch[aria-checked="true"] .knob { transform: translateX(16px); background: var(--ok); }
+
+  /* The sandbox pool in full. The header can only ever say how many there are; this is the same
+     answer `sari_bench status --json` gives, kept current while it is open, because the reason to
+     open it is always that something in the fleet is not behaving. */
+  #fleet .overlay-box { width: min(820px, 100%); }
+  #fleet-sum { padding: 4px 14px 10px; display: flex; flex-wrap: wrap; align-items: center;
+               gap: 6px 10px; }
+  #fleet-stats { color: var(--dim); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  #fleet-tags { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+  #fleet-tags .badge { font-variant-numeric: tabular-nums; }
+  #fleet-rows { flex: 1 1 auto; min-height: 0; padding: 0 14px 14px; overflow: auto;
+                scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
+  #fleet-rows table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+  #fleet-rows th { position: sticky; top: 0; z-index: 1; padding: 6px 10px 6px 0; text-align: left;
+                   background: var(--panel); border-bottom: 1px solid var(--line);
+                   color: var(--dim); font-weight: 500; white-space: nowrap; }
+  #fleet-rows td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line);
+                   vertical-align: top; }
+  #fleet-rows tr:last-child td { border-bottom: 0; }
+  #fleet-rows td.dim { color: var(--dim); }
+  #fleet-rows td.mono { font-variant-numeric: tabular-nums; }
+  /* Last column, right-hand edge, one button per row. Taking a machine out of the pool is the only
+     thing this panel does rather than reports, so it sits away from everything being read. */
+  #fleet-rows td.act { width: 1%; padding-right: 0; text-align: right; white-space: nowrap; }
+  #fleet-rows td.act button { padding: 2px 9px; font-size: 11.5px; }
+
+  #fleet-rows .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #fleet-rows .st.leased { color: #cfe0f2; }
+  #fleet-rows .st.busy { color: #e8c48d; }
+  #fleet-rows .st.bad { color: #f0a596; }
 
   table.ov tfoot td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600;
                       background: #1a1d23; }
@@ -400,6 +534,12 @@
                   background: #1d2a22; color: #c5e8d0; box-shadow: 0 10px 28px rgba(0,0,0,.45);
                   opacity: 0; transform: translateY(-6px); transition: opacity .16s ease, transform .16s ease; }
   .notification.on { opacity: 1; transform: translateY(0); }
+  /* Leaving is given longer than arriving. A banner arrives where the reader is already looking, so
+     it can afford to snap in; it leaves while they are reading something else, and a fade slow enough
+     to catch in peripheral vision is what makes it register as gone rather than as never having been
+     there. After .on, so it wins the transition when both are briefly set. */
+  .notification.out { opacity: 0; transform: translateY(-6px);
+                      transition: opacity .38s ease, transform .38s ease; }
   /* The stack ignores the mouse so it never swallows a click meant for a card beneath it. The two
      things inside one that can be clicked have to take their own clicks back. */
   .notification .n-body { flex: 1; padding: 0; border: 0; background: none; color: inherit;
@@ -407,8 +547,8 @@
   .notification.act { border-color: #2f4a66; background: #1d2532; color: #cfe0f2; }
   .notification.act .n-body { pointer-events: auto; cursor: pointer; }
   .notification.act:hover { background: #243040; }
-  /* Every banner closes by hand, including the ones that would have expired on their own: an offer
-     the reader has already decided against should not have to be waited out. */
+  /* Every banner can also be closed by hand: one the reader has already decided against should not
+     have to be waited out, short as the wait is. */
   .n-close { pointer-events: auto; flex: none; padding: 0 4px; border: 0; background: none;
              color: inherit; opacity: .55; font-size: 15px; line-height: 1.2; }
   .n-close:hover { background: none; opacity: 1; }
@@ -418,8 +558,10 @@
 <header>
   <h1>Sari Bench</h1>
   <span class="picker">
-    <button class="pill" id="battery" data-act="battery-menu" aria-haspopup="listbox" aria-expanded="false">
-      <span class="dot" id="battery-dot"></span><span id="battery-name">—</span><span class="caret">▾</span>
+    <button class="pill clip" id="battery" data-act="battery-menu" aria-haspopup="listbox" aria-expanded="false">
+      <span class="dot" id="battery-dot"></span><span class="pill-clip" id="battery-name"
+        ><span class="pill-scroll"><span class="pill-copy">—</span></span></span
+        ><span class="caret">▾</span>
     </button>
     <ul class="menu" id="battery-menu" role="listbox" hidden></ul>
   </span>
@@ -427,19 +569,52 @@
     <button class="tab on" data-act="tab" data-tab="live">live</button>
     <button class="tab" data-act="tab" data-tab="overview">overview</button>
   </span>
-  <button class="pill" id="collapse" data-act="collapse-toggle" aria-pressed="false">
-    collapse signals: off</button>
-  <!-- Beside the pool, because the two are one thought: what is dispatched, and what it is waiting
-       on. -->
+  <!-- The queue and the pool are one thought - what is dispatched, and what it is waiting on - so
+       they sit together, ahead of the tally that is only a readout. The pool count is a door rather
+       than a label: how many sandboxes there are is the least of what you want to know once one of
+       them is misbehaving. -->
   <span class="picker">
     <button class="pill" id="queue" data-act="queue-menu" aria-haspopup="listbox" aria-expanded="false">
       <span id="queue-label">queue: —</span><span class="caret">▾</span>
     </button>
     <ul class="menu" id="queue-menu" role="listbox" hidden></ul>
   </span>
+  <button class="pill" id="pool" data-act="fleet-open" aria-haspopup="dialog"
+          aria-expanded="false"></button>
   <span class="muted" id="progress"></span>
-  <span class="muted" id="pool"></span>
   <span class="muted" id="updated" style="margin-left:auto"></span>
+  <span class="picker" id="settings-wrap">
+    <button class="pill icon" id="settings-open" data-act="settings" aria-haspopup="dialog"
+            aria-expanded="false" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3.1"></circle>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.08A1.7 1.7 0 0 0 10.1 3.04V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"></path>
+      </svg>
+    </button>
+    <div class="panel" id="settings" role="dialog" aria-label="Settings" hidden>
+      <div class="panel-head">Settings</div>
+      <div class="set-row">
+        <div class="set-main">
+          <span class="set-label" id="set-collapse-label">Show VLM collapse signals</span>
+          <button class="switch" id="set-collapse" role="switch" aria-checked="false"
+                  aria-labelledby="set-collapse-label" data-act="collapse-toggle">
+            <span class="knob"></span></button>
+        </div>
+        <p class="set-desc">Marks live runs the health scorer thinks are stuck and sorts the grid
+          worst-first. Reports and Discord alerts read the full score either way.</p>
+      </div>
+      <div class="set-row">
+        <div class="set-main">
+          <label class="set-label" for="set-cap">Sandbox lease cap</label>
+          <input class="set-input" id="set-cap" type="text" inputmode="numeric" spellcheck="false"
+                 autocomplete="off" aria-describedby="set-cap-desc">
+        </div>
+        <p class="set-desc" id="set-cap-desc">Most sandboxes the coordinator will lease at once;
+          <code>all</code> for no limit. <span id="set-cap-now"></span></p>
+      </div>
+    </div>
+  </span>
 </header>
 <main id="grid"><div class="empty" id="empty">Loading…</div></main>
 
@@ -448,9 +623,11 @@
     <a class="btn" href="/api/report.csv" download>export to CSV</a>
     <a class="btn" href="/api/report.csv?grain=roles" data-grain="roles" download
        title="one row per attempt per reasoner — tokens, calls and share of the attempt's spend">export tokens by role</a>
+    <!-- What a cell means and what a key does are the same question asked twice, so they are one
+         button: the bar keeps only the shape of the grid, and the glyphs and shortcuts move into a
+         panel that can show each cell as it actually looks. -->
+    <button id="legend-open" data-act="legend-open" aria-haspopup="dialog">legend &amp; controls</button>
     <span class="muted" id="ov-note"></span>
-    <span class="muted ov-hint">hover a try cell and press <kbd>P</kbd> pass, <kbd>F</kbd> fail,
-      <kbd>E</kbd> invalid, <kbd>A</kbd> already successful, <kbd>R</kbd> retry</span>
   </div>
   <div class="ov-scroll"><table class="ov" id="ov-table"></table></div>
 </section>
@@ -496,6 +673,7 @@
         <dt>held</dt><dd data-ref="held"></dd>
         <dt>elapsed</dt><dd data-ref="elapsed"></dd>
         <dt>tokens</dt><dd data-ref="tokens"></dd>
+        <dt>API calls</dt><dd data-ref="apiCalls"></dd>
         <dt>sandbox</dt><dd data-ref="sandbox"></dd>
         <dt data-ref="endLabel" hidden>end</dt><dd data-ref="end" hidden></dd>
       </dl>
@@ -514,6 +692,33 @@
       </div>
       <button class="link" data-act="verdict-clear" id="modal-clear" hidden>clear grade</button>
     </div>
+  </div>
+</div>
+
+<div id="legend" class="overlay" role="dialog" aria-modal="true" aria-labelledby="legend-title">
+  <div class="overlay-box">
+    <div class="overlay-head">
+      <strong id="legend-title">legend &amp; controls</strong>
+      <span class="muted">what a try cell means</span>
+      <button data-act="legend-close" style="margin-left:auto">close</button>
+    </div>
+    <div id="legend-rows"><table><tbody></tbody></table></div>
+    <div id="legend-note">Keys act on the try cell under the cursor: hover one and press.</div>
+  </div>
+</div>
+
+<div id="fleet" class="overlay" role="dialog" aria-modal="true" aria-labelledby="fleet-title">
+  <div class="overlay-box">
+    <div class="overlay-head">
+      <strong id="fleet-title">sandbox pool</strong>
+      <span class="muted" id="fleet-when"></span>
+      <button data-act="fleet-close" style="margin-left:auto">close</button>
+    </div>
+    <!-- Counts on the left as plain prose, because they are only counts. The two that a reader might
+         act on - the cap they can raise, and a quarantine they may need to clear - keep the pill
+         shape, over on the right where nothing else competes with them. -->
+    <div id="fleet-sum"><span id="fleet-stats"></span><span id="fleet-tags"></span></div>
+    <div id="fleet-rows"><table><thead></thead><tbody></tbody></table></div>
   </div>
 </div>
 
@@ -560,42 +765,26 @@ let activeTab = "live";
 // /api/state (Discord alerts and the report still use all of it), and flipping the switch is a
 // re-render rather than a round trip.
 const ALERT_AT = 0.6, WATCH_AT = 0.3;   // health.py's thresholds
-const STABLE_SIGNALS = new Set(["stalled"]);
 let showCollapse = localStorage.getItem("sari.collapse") === "on";
 
 // One attempt's health as this page is currently set to read it: the banner's level and words, and
-// the score the grid is ordered by. With the toggle off, only the signals in STABLE_SIGNALS count -
-// including toward the ranking, which is what stops the reshuffling.
+// the score the grid is ordered by. Off means no display signal and no health-based ordering.
 function healthOf(a) {
   const raw = (a && a.health) || {};
   if (showCollapse) {
     return { level: raw.level || "ok", summary: raw.summary || "", score: Number(raw.score) || 0 };
   }
-  const kept = (raw.signals || []).filter(s => STABLE_SIGNALS.has(s.name));
-  const score = Math.min(1, kept.reduce((sum, s) => sum + (Number(s.weight) || 0), 0));
-  return {
-    level: score >= ALERT_AT ? "alert" : score >= WATCH_AT ? "watch" : "ok",
-    summary: kept.map(s => s.detail).join(", "),
-    score,
-  };
+  return { level: "ok", summary: "", score: 0 };
 }
 
-const TIP_COLLAPSE =
-  "The repetition signals — spatial_loop, action_loop, mode_thrash, blocked, refusal_spiral and the "
-  + "budget burns — are inferred from how the agent has been moving over its last 10 steps. They are "
-  + "guesses, they come and go as that window slides, and the tiles are ranked by the score they "
-  + "produce, so leaving them on reshuffles the grid under you while you are reading one attempt. "
-  + "Off, a tile's banner and its place in the grid answer to `stalled` alone: no step record in "
-  + "five minutes, which means a hung call or a wedged sim rather than an opinion about the run. "
-  + "This is a display choice only — the full score is still recorded, still ranked in the report, "
-  + "and still what Discord collapse alerts are sent on.";
+// -- settings panel --------------------------------------------------------------------------
+// Both of these used to be pills in the header wearing hover tooltips, which put a preference in
+// the same row as the readouts and made you hover a badge to find out what it did. Behind the gear
+// each one gets a control that looks like what it is - a switch, a number field - and a line of
+// prose that is always on screen instead of on hover.
 
 function renderCollapseToggle() {
-  const button = document.getElementById("collapse");
-  setText(button, `collapse signals: ${showCollapse ? "on" : "off"}`);
-  button.setAttribute("aria-pressed", String(showCollapse));
-  button.dataset.tipTerm = "collapse signals";
-  button.dataset.tip = TIP_COLLAPSE;
+  document.getElementById("set-collapse").setAttribute("aria-checked", String(showCollapse));
 }
 
 function toggleCollapse() {
@@ -606,12 +795,108 @@ function toggleCollapse() {
   refresh();
 }
 
+const capText = fleet => fleet.capacity_limit === null || fleet.capacity_limit === undefined
+  ? "all" : String(fleet.capacity_limit);
+
+// The field is only rewritten from the server while it is not being edited: a poll landing mid-type
+// must not eat the digits, and one landing after a submit is what confirms the coordinator took it.
+function renderFleetSettings(fleet) {
+  const input = document.getElementById("set-cap");
+  if (document.activeElement !== input) input.value = capText(fleet);
+  setText(document.getElementById("set-cap-now"),
+    latestState.pool_error
+      ? "The coordinator is unreachable."
+      : `${Number(fleet.active_leases) || 0} of ${Number(fleet.effective_capacity) || 0} in use.`);
+}
+
+// Enter blurs the field, and a blur is itself a `change`, so a submitted value has to be remembered
+// until a poll brings the coordinator's own answer back - otherwise one keypress posts twice.
+let capSubmitting = false;
+
+async function submitFleetCap() {
+  const input = document.getElementById("set-cap");
+  const fleet = (latestState && latestState.fleet) || {};
+  const value = input.value.trim().toLowerCase();
+  const limit = value === "all" || value === "" ? null : Number(value);
+  if (capSubmitting) return;
+  if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
+    notify("Cap must be “all” or a non-negative whole number.");
+    input.value = capText(fleet);
+    return;
+  }
+  if (capText(fleet) === (limit === null ? "all" : String(limit))) return;
+  capSubmitting = true;
+  input.blur();
+  const response = await fetch("/api/fleet/cap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  const data = await response.json();
+  capSubmitting = false;
+  if (!data.ok) {
+    notify("Could not update the lease cap: " + (data.error || "unknown error"));
+    input.value = capText(fleet);
+  } else {
+    notify(`Sandbox lease cap set to ${limit === null ? "all" : limit}.`);
+  }
+  refresh();
+}
+
+function settingsOpen() { return !document.getElementById("settings").hidden; }
+
+function closeSettings() {
+  document.getElementById("settings").hidden = true;
+  document.getElementById("settings-open").setAttribute("aria-expanded", "false");
+}
+
+function toggleSettings() {
+  const panel = document.getElementById("settings");
+  const opening = panel.hidden;
+  closeMenu();
+  panel.hidden = !opening;
+  document.getElementById("settings-open").setAttribute("aria-expanded", String(opening));
+  if (opening) renderFleetSettings((latestState && latestState.fleet) || {});
+}
+
+{
+  const input = document.getElementById("set-cap");
+  input.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") { ev.preventDefault(); submitFleetCap(); }
+    // Escape abandons the edit rather than the panel: the field is what has focus, and closing the
+    // whole panel out from under a half-typed number is the more surprising of the two.
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
+      input.value = capText((latestState && latestState.fleet) || {});
+      input.blur();
+    }
+  });
+  input.addEventListener("change", () => submitFleetCap());
+}
+
 const fmtMin = s => (s === null || s === undefined) ? "—"
   : (s < 0 ? "-" : "") + Math.floor(Math.abs(s) / 60) + "m" + String(Math.floor(Math.abs(s) % 60)).padStart(2, "0") + "s";
 const fmtNum = n => Number(n || 0).toLocaleString();
 const fmtTok = a => `${fmtNum(a.tokens_in)} in / ${fmtNum(a.tokens_out)} out`;
+const hasApiCalls = a => !!a && a.api_calls !== null && a.api_calls !== undefined;
+const fmtApiCalls = a => hasApiCalls(a) ? fmtNum(a.api_calls) : "unknown";
+const apiAggregate = attempts => {
+  const eligible = attempts || [];
+  const known = eligible.filter(hasApiCalls);
+  return { sum: known.reduce((sum, a) => sum + Number(a.api_calls), 0),
+           known: known.length, total: eligible.length };
+};
+const fmtApiAggregate = value => !value.total ? "—"
+  : value.known === value.total ? fmtNum(value.sum)
+  : value.known ? `${fmtNum(value.sum)} (${value.known}/${value.total} metered)`
+  : `unknown (0/${value.total} metered)`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isLive = a => a.state === "starting" || a.state === "running";
+// Mirror of scan.py's `rank` tiers: live (0) above finished (1) above rotated-aside requeues (2).
+// A `requeued` attempt still holding `pending_retry` is work that is going to move, so it stays in
+// the live tier; one without it is the dead directory the retry replaced.
+const isArchivedRequeue = a => a.state === "requeued" && !a.pending_retry;
+const rankTier = a => isArchivedRequeue(a) ? 2 : (a.state === "finished" ? 1 : 0);
 
 // -- which battery this page is reading ------------------------------------------------------
 // The page holds one bench run and stays on it: a view that swaps itself out mid-review because the
@@ -640,6 +925,12 @@ const setHTML = (el, value) => { if (el.innerHTML !== value) el.innerHTML = valu
 
 // `onClick` turns the banner into a button and makes it wait: an offer the reader has to be able to
 // take is worth nothing if it expires while they are reading the card underneath it.
+// Every banner goes on its own after the same hold, the actionable ones included: a stack that only
+// clears when someone reaches for it ends up as a column of stale offers sitting over the grid. An
+// offer that expires unanswered costs nothing - the thing it pointed at is still on the page.
+const NOTIFY_HOLD_MS = 3000;
+const NOTIFY_FADE_MS = 420;   // must outlast the .out transition, or a banner is cut mid-fade
+
 function notify(message, onClick) {
   const el = document.createElement("div");
   el.className = "notification" + (onClick ? " act" : "");
@@ -659,14 +950,20 @@ function notify(message, onClick) {
   requestAnimationFrame(() => el.classList.add("on"));
 
   let timer = null;
+  let going = false;
   const dismiss = () => {
+    // A banner can be told to go twice - the × pressed on one that is already fading, an offer taken
+    // up as its own timer fires - and the second call must not restart the fade or double the remove.
+    if (going) return;
+    going = true;
     if (timer) clearTimeout(timer);
     el.classList.remove("on");
-    setTimeout(() => el.remove(), 180);
+    el.classList.add("out");
+    setTimeout(() => el.remove(), NOTIFY_FADE_MS);
   };
   close.addEventListener("click", dismiss);
   if (onClick) body.addEventListener("click", () => { dismiss(); onClick(); });
-  else timer = setTimeout(dismiss, 5000);
+  timer = setTimeout(dismiss, NOTIFY_HOLD_MS);
   return dismiss;
 }
 
@@ -719,10 +1016,13 @@ const OUTCOME_TIPS = {
 
 const TIP_RUNNING = "The agent process is alive in its sandbox right now. The frame, the log, and "
   + "the rows below advance as it steps.";
+const TIP_PENDING_RETRY = "The battery runner has scheduled this logical try again. It is waiting "
+  + "in the runner queue or for a reset sandbox; the failed execution is archived when the next "
+  + "dispatch begins.";
 const TIP_ORPHANED = "The manifest still says running, but the process id it recorded is gone: the "
   + "runner died before it could close this try out. Nothing will ever finish it, which is why it "
   + "takes no verdict — retry it.";
-const TIP_RETRY = "The watcher is tearing this try down and re-dispatching it: `queued` is waiting "
+const TIP_RETRY = "The watcher is tearing this try down and re-dispatching it: `waiting` is holding "
   + "for a worker, `running` is the fresh run. Its previous logs, frames, replay and verdict are "
   + "already gone.";
 const TIP_RETRY_ERROR = "The re-dispatch failed. The try is left as it was; the reason is on the "
@@ -750,6 +1050,7 @@ function tipAttrs(term, text, meta = "") {
 }
 
 function classOf(a) {
+  if (a.pending_retry) return "card watch";
   if (a.state === "retrying") return "card watch";
   if (a.state === "finished" || a.state === "requeued") return "card finished";
   if (a.state === "orphaned") return "card alert";
@@ -770,8 +1071,14 @@ function verdictBadge(a) {
 }
 
 function statusBadge(a) {
+  if (a.pending_retry || a.retry_state === "waiting") {
+    const meta = [a.retry_wait_reason || "", a.retry_last_checked_at || ""]
+      .filter(Boolean).join("\n");
+    return `<span class="badge waiting" ${tipAttrs("waiting to retry", TIP_PENDING_RETRY, meta)}`
+      + `>waiting to retry</span>`;
+  }
   if (a.retry_state) {
-    const error = a.retry_state === "error";
+    const error = a.retry_state === "failed";
     const cls = error ? "alert" : "watch";
     const tip = tipAttrs(`retry: ${a.retry_state}`, error ? TIP_RETRY_ERROR : TIP_RETRY,
       error ? (a.retry_error || "") : "");
@@ -924,6 +1231,7 @@ const CARD_HTML = `
     <dt>at</dt><dd data-ref="at"></dd>
     <dt>held</dt><dd data-ref="held"></dd>
     <dt>elapsed</dt><dd data-ref="elapsed"></dd>
+    <dt>API calls</dt><dd data-ref="apiCalls"></dd>
     <dt>sandbox</dt><dd data-ref="sandbox"></dd>
     <dt data-ref="endLabel" hidden>end</dt><dd data-ref="end" hidden></dd>
   </dl>
@@ -939,8 +1247,10 @@ const CARD_HTML = `
       <button class="vote" data-act="verdict" data-verdict="invalid">⊘ invalid</button>
       <button class="vote" data-act="verdict" data-verdict="already_successful"><b class="vkey">A</b> already successful</button>
       <span class="state" data-ref="unreviewed">unreviewed</span>
+      <!-- Inside the well, at the end of the row it undoes. Beneath it, it read as a fifth thing the
+           tile offers rather than as the way back out of the four above it. -->
+      <button class="link" data-act="verdict-clear" hidden>clear grade</button>
     </div>
-    <button class="link" data-act="verdict-clear" hidden>clear grade</button>
   </div>`;
 
 function buildCard(a) {
@@ -993,8 +1303,9 @@ function setRows(refs, a) {
   setText(refs.held, a.gripped_name ?? a.gripped ?? "—");
   setText(refs.elapsed, fmtMin(a.elapsed_seconds)
     + (live && a.remaining_seconds !== null ? " · " + fmtMin(a.remaining_seconds) + " left" : ""));
+  setText(refs.apiCalls, fmtApiCalls(a));
   setTok(refs.tokens, a);
-  setText(refs.sandbox, a.sandbox_id || "—");
+  setText(refs.sandbox, a.sandbox_alias || a.sandbox_id || "—");
   refs.endLabel.hidden = refs.end.hidden = !a.end_reason;
   if (a.end_reason) setText(refs.end, a.end_reason);
 }
@@ -1053,10 +1364,14 @@ function patchCard(entry, a) {
   refs.kill.title = orphaned
     ? "Record this abandoned attempt as stopped so it can be reviewed"
     : "Terminate the agent; the runner records the attempt";
-  refs.retry.disabled = Boolean(a.retry_state && a.retry_state !== "error");
-  refs.retry.title = a.retry_error || "Delete this try's history and run it again";
-  setText(refs.retry, a.retry_state && a.retry_state !== "error"
-    ? `retry: ${a.retry_state}` : "retry");
+  const runnerRetryPending = Boolean(a.pending_retry);
+  refs.retry.disabled = runnerRetryPending
+    || Boolean(a.retry_state && a.retry_state !== "failed");
+  refs.retry.title = runnerRetryPending
+    ? "The battery runner already has this try waiting to retry"
+    : (a.retry_error || "Delete this try's history and run it again");
+  setText(refs.retry, runnerRetryPending ? "waiting to retry"
+    : (a.retry_state && a.retry_state !== "failed" ? `retry: ${a.retry_state}` : "retry"));
 
   // Every finished attempt can be judged, regardless of how it ended. Live attempts remain hidden
   // because their outcome can still change; the server repeats that state check.
@@ -1239,12 +1554,14 @@ function setTok(el, a) {
   el.title = addRoles(totals, a.tokens_by_role) ? roleLines(totals)
     : "no per-role token accounting recorded for this attempt";
 }
-const ovRows = new Map();        // prompt_id -> { tr, cells[], res, stime, tokens }
+const ovRows = new Map();        // prompt_id -> { tr, cells[], res, stime, tokens, apiCalls }
 const ovIndex = new Map();       // attempt key -> AttemptView, for the hover card and the overlay
 let ovShape = "";                // battery id + try count; a change rebuilds the table outright
 
 function cellState(a) {
   if (!a) return { code: "none", glyph: "", label: "not run" };
+  if (a.pending_retry || a.retry_state === "waiting")
+    return { code: "w", glyph: "↻", label: "waiting to retry" };
   // A verdict is the strongest thing anyone knows about an attempt, so it is read first - including
   // over an operator kill, on the off chance a reviewer got to one before it was cut off.
   if (a.verified) return {
@@ -1254,7 +1571,7 @@ function cellState(a) {
     already_successful:
              { code: "a", glyph: "A", label: "halted: already successful — excluded from the totals" },
   }[verdictOf(a)];
-  if (a.retry_state && a.retry_state !== "error")
+  if (a.retry_state && a.retry_state !== "failed")
     return { code: "r", glyph: "R", label: `retry: ${a.retry_state}` };
   if (isLive(a)) return { code: "r", glyph: "R", label: "running" };
   if (a.verifiable) return { code: "q", glyph: "?", label: "awaiting review" };
@@ -1276,7 +1593,9 @@ function ovBuildTable(tries) {
   const table = document.getElementById("ov-table");
   const heads = ['<th class="task">task</th>', "<th>prompt</th>"];
   for (let t = 1; t <= tries; t++) heads.push(`<th class="num">try ${t}</th>`);
-  heads.push("<th>success?</th>", '<th class="num">success time</th>', '<th class="num">tokens in / out</th>');
+  heads.push("<th>success?</th>", '<th class="num">success time</th>',
+    '<th class="num">tokens in / out</th>',
+    '<th class="num">API calls<br>pass only / pass+fail</th>');
   table.innerHTML = `<thead><tr>${heads.join("")}</tr></thead><tbody></tbody><tfoot></tfoot>`;
   ovRows.clear();
   return table;
@@ -1287,7 +1606,8 @@ function ovBuildRow(prompt, tries) {
   const cellHTML = '<td class="cell none"><button class="cellbtn" data-act="detail"></button></td>';
   tr.innerHTML = `<td class="task"></td><td class="ptext"></td>`
     + cellHTML.repeat(tries)
-    + `<td class="res"></td><td class="num stime"></td><td class="num tok"></td>`;
+    + `<td class="res"></td><td class="num stime"></td><td class="num tok"></td>`
+    + `<td class="num api-calls"></td>`;
   const entry = {
     tr,
     task: tr.children[0],
@@ -1296,6 +1616,7 @@ function ovBuildRow(prompt, tries) {
     res: tr.querySelector("td.res"),
     stime: tr.querySelector("td.stime"),
     tokens: tr.querySelector("td.tok"),
+    apiCalls: tr.querySelector("td.api-calls"),
   };
   setText(entry.task, prompt.id);
   setText(entry.prompt, prompt.prompt || "");
@@ -1310,9 +1631,7 @@ function renderOverview(state) {
   const table = document.getElementById("ov-table");
 
   document.getElementById("ov-note").textContent = prompts.length
-    ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"} — P/F is the human `
-      + "verdict; ? is awaiting review; E is invalid and A is halted-already-successful, and "
-      + "neither counts for anything"
+    ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"}`
     : (state.error || "no battery loaded");
   if (!prompts.length) { table.innerHTML = ""; ovRows.clear(); ovShape = ""; return; }
 
@@ -1328,10 +1647,12 @@ function renderOverview(state) {
     ovIndex.set(a.key, a);
     const slot = `${a.prompt_id}#${a.attempt}`;
     const held = byTry.get(slot);
-    if (!held || (held.state === "requeued" && a.state !== "requeued")) byTry.set(slot, a);
+    if (!held || (held.state === "requeued" && a.state !== "requeued")
+        || (a.pending_retry && !held.pending_retry)) byTry.set(slot, a);
   }
 
   let solved = 0, reliabilitySum = 0, reliabilityN = 0, winIn = 0, winOut = 0;
+  const batteryPassApi = [], batteryJudgedApi = [];
   // Elapsed of the first passing try, over the prompts that have one. An attempt whose elapsed was
   // never recorded is left out of the mean rather than counted as an instant win.
   let winTime = 0, winTimeN = 0;
@@ -1358,7 +1679,8 @@ function renderOverview(state) {
     }
     if (body.children[index] !== entry.tr) body.insertBefore(entry.tr, body.children[index] || null);
 
-    let pass = null, ran = 0, passes = 0, pending = 0, live = 0, invalid = 0, halted = 0;
+    let pass = null, ran = 0, passes = 0, awaitingReview = 0, live = 0;
+    let pendingRetry = 0, invalid = 0, halted = 0;
     let tokIn = 0, tokOut = 0;
     const rowRoles = new Map();
     for (let t = 1; t <= tries; t++) {
@@ -1370,7 +1692,9 @@ function renderOverview(state) {
       if (td.className !== cls) td.className = cls;
       setText(button, st.glyph);
       button.dataset.key = a ? a.key : "";
-      button.title = a ? `${a.key} — ${st.label}` : "not run";
+      button.title = a
+        ? `${st.glyph} · ${hasApiCalls(a) ? fmtNum(a.api_calls) : "unknown"} API calls · ${a.key} — ${st.label}`
+        : "not run";
       if (!a) continue;
       // The tokens were spent whether or not the try counts, so cost stays honest even here - and
       // the role split is folded in on exactly the same rule, so the breakdown and the total below
@@ -1392,15 +1716,17 @@ function renderOverview(state) {
       if (st.code === "a") { halted += 1; continue; }
       ran += 1;
       if (st.code === "p") { passes += 1; if (!pass) pass = a; }
-      if (st.code === "q") pending += 1;
+      if (st.code === "q") awaitingReview += 1;
       if (st.code === "r") live += 1;
+      if (st.code === "w") pendingRetry += 1;
     }
 
     // FAIL is only said once there is nothing left that could still turn into a pass. A prompt
     // nobody has dispatched, or one whose halts are still queued for review, is undecided - painting
     // either of them red would read as a verdict the battery has not earned yet.
-    const verdict = pass ? "p" : (!ran ? "none" : (pending || live ? "q" : "f"));
-    const label = { p: "PASS", f: "FAIL", q: pending ? "?" : "…", none: "—" }[verdict];
+    const verdict = pass ? "p"
+      : (!ran ? "none" : (awaitingReview || live || pendingRetry ? "q" : "f"));
+    const label = { p: "PASS", f: "FAIL", q: awaitingReview ? "?" : "…", none: "—" }[verdict];
     entry.res.className = "res " + verdict;
     setText(entry.res, label);
     const excluded = [
@@ -1410,7 +1736,8 @@ function renderOverview(state) {
     entry.res.title = (pass ? `first pass: try ${pass.attempt}`
       : verdict === "none" ? (invalid || halted ? "every dispatched try was excluded"
                                                 : "no try dispatched")
-      : verdict === "q" ? `${pending} halt(s) awaiting review, ${live} still running`
+      : verdict === "q" ? `${awaitingReview} halt(s) awaiting review, ${live} still running, `
+        + `${pendingRetry} waiting to retry`
       : "every counted try decided, none passed") + excluded;
     setText(entry.stime, pass ? fmtMin(pass.elapsed_seconds) : "—");
     setText(entry.tokens, ran ? `${fmtNum(tokIn)} / ${fmtNum(tokOut)}` : "—");
@@ -1419,6 +1746,15 @@ function renderOverview(state) {
     // always about one prompt at a time. The battery-wide split is in the footer.
     entry.tokens.title = rowRoles.size ? roleLines(rowRoles)
       : "no per-role token accounting recorded for this prompt's tries";
+    const judged = [...byTry.values()].filter(a => a.prompt_id === prompt.id
+      && ["pass", "fail"].includes(verdictOf(a)));
+    const passing = judged.filter(a => verdictOf(a) === "pass");
+    const passApi = apiAggregate(passing), judgedApi = apiAggregate(judged);
+    setText(entry.apiCalls, `${fmtApiAggregate(passApi)} / ${fmtApiAggregate(judgedApi)}`);
+    entry.apiCalls.title = "actual OpenAI-compatible HTTP attempts\n"
+      + `pass only: ${fmtApiAggregate(passApi)}\npass+fail: ${fmtApiAggregate(judgedApi)}`;
+    batteryPassApi.push(...passing);
+    batteryJudgedApi.push(...judged);
 
     totalIn += tokIn;
     totalOut += tokOut;
@@ -1460,7 +1796,7 @@ function renderOverview(state) {
         roleTries < ranTries
           ? `, over the ${roleTries} of ${ranTries} dispatched tr(ies) that recorded roles`
           : ""}</td>
-      <td colspan="3">${fmtNum(roleSum)} total</td>
+      <td colspan="4">${fmtNum(roleSum)} total</td>
     </tr>` + roleNames.map(name => {
       const row = roleTotals.get(name);
       const share = roleSum ? (row.in + row.out) / roleSum : 0;
@@ -1476,36 +1812,41 @@ function renderOverview(state) {
     <tr class="role" ${tip}>
       <td class="lbl" colspan="${span}">${esc(name)}<span class="bar" style="width:${
         (share * 22).toFixed(2)}em"></span></td>
-      <td colspan="3">${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
+      <td colspan="4">${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
         (share * 100).toFixed(1)}% · ${fmtNum(row.calls)} call(s)</span></td>
     </tr>`;
     }).join("");
   setHTML(table.querySelector("tfoot"), `
     <tr>
       <td class="lbl" colspan="${span}">success rate — prompts with at least one human-verified pass</td>
-      <td colspan="3">${solved} / ${prompts.length} · ${pct}%</td>
+      <td colspan="4">${solved} / ${prompts.length} · ${pct}%</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg success time — mean elapsed of the first passing try over ${winTimeN} solved prompt(s)</td>
-      <td colspan="3">${winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—"}</td>
+      <td colspan="4">${winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg time per run — mean elapsed over ${
         allTimeTries === ranTries ? `all ${ranTries}` : `the ${allTimeTries} of ${ranTries}`
       } dispatched tr(ies) that finished, passing or not · ${fmtMin(Math.round(allTime))} in total</td>
-      <td colspan="3">${allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—"}</td>
+      <td colspan="4">${allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">reliability — mean of (passing tries / tries counted, invalid excluded) over ${reliabilityN} dispatched prompt(s)</td>
-      <td colspan="3">${reliabilityN ? rel + "%" : "—"}</td>
+      <td colspan="4">${reliabilityN ? rel + "%" : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">avg tokens per solved prompt — all its tries, failed and invalid ones included</td>
-      <td colspan="3">${solved ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out` : "—"}</td>
+      <td colspan="4">${solved ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out` : "—"}</td>
     </tr>
     <tr>
       <td class="lbl" colspan="${span}">total tokens — every try in this battery, failed and invalid ones included</td>
-      <td colspan="3">${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out</td>
+      <td colspan="4">${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out</td>
+    </tr>
+    <tr>
+      <td class="lbl" colspan="${span}">API calls — human-verified pass only / pass+fail</td>
+      <td colspan="4">${fmtApiAggregate(apiAggregate(batteryPassApi))} / ${
+        fmtApiAggregate(apiAggregate(batteryJudgedApi))}</td>
     </tr>${roleFoot}`);
 }
 
@@ -1549,6 +1890,7 @@ tip.innerHTML = `
       <dt>elapsed</dt><dd data-ref="elapsed"></dd>
       <dt>step</dt><dd data-ref="step"></dd>
       <dt>tokens</dt><dd data-ref="tokens"></dd>
+      <dt>API calls</dt><dd data-ref="apiCalls"></dd>
       <dt>end</dt><dd data-ref="end"></dd>
       <dt>sandbox</dt><dd data-ref="sandbox"></dd>
     </dl>
@@ -1572,8 +1914,9 @@ function showTip(key) {
   setText(tipRefs.step, `${a.step || 0}${a.max_steps ? " / " + a.max_steps : ""}`
     + (a.leg === null || a.leg === undefined ? "" : ` · leg ${a.leg}`));
   setTok(tipRefs.tokens, a);
+  setText(tipRefs.apiCalls, fmtApiCalls(a));
   setText(tipRefs.end, a.end_reason || a.outcome || a.state || "—");
-  setText(tipRefs.sandbox, a.sandbox_id || "—");
+  setText(tipRefs.sandbox, a.sandbox_alias || a.sandbox_id || "—");
   setResponse(tipRefs.resp, tipRefs.respText, a);
   const hints = [];
   if (canVerdict(a)) hints.push("<kbd>P</kbd> pass · <kbd>F</kbd> fail · <kbd>E</kbd> invalid"
@@ -1754,6 +2097,73 @@ function announceNewRuns(discovered, currentId) {
   });
 }
 
+// -- clipped run names ---------------------------------------------------------------------------
+// The geometry of the endless crawl, measured here and handed to CSS as three numbers so the motion
+// itself is a keyframe animation the browser drives rather than a loop this page has to run: the
+// resting offset that puts the name's tail in the box, the period that makes the loop seamless, and
+// the duration that turns the period into a speed.
+
+const CLIP_GAP = 26;      // px the separator between the two copies occupies
+const CLIP_SPEED = 26;    // px per second - slow enough to read a name as it goes past
+
+function setClip(box, name) {
+  const track = box.firstElementChild;
+  const first = track.firstElementChild;
+  // The separator and the second copy exist only while the name overruns the box, and they are torn
+  // down whenever the name changes: a stale clone would crawl a name this box no longer shows.
+  const drop = () => {
+    track.classList.remove("loop");
+    while (track.children.length > 1) track.lastElementChild.remove();
+  };
+  if (first.textContent !== name) { setText(first, name); drop(); }
+
+  // Off one copy, which nothing decorates, so this is the text's own width whether or not the crawl
+  // is already running.
+  const width = first.getBoundingClientRect().width;
+  // Hidden boxes measure zero, so an unopened menu would look like every name overflows. Nothing to
+  // decide until it has a width.
+  if (!box.clientWidth) return;
+  const overflow = width - box.clientWidth;
+  if (overflow <= 0.5) {
+    drop();
+    box.style.setProperty("--clip-rest", "0px");
+    return;
+  }
+  if (track.children.length === 1) {
+    const separator = document.createElement("span");
+    separator.className = "pill-sep";
+    separator.setAttribute("aria-hidden", "true");
+    separator.textContent = "·";
+    const clone = first.cloneNode(true);
+    clone.setAttribute("aria-hidden", "true");
+    track.append(separator, clone);
+  }
+  track.classList.add("loop");
+
+  // The track is [copy][sep][copy], and the box rests on the LAST copy's tail - one whole
+  // copy-plus-separator further along than the tail of a single copy would be. Travelling right by
+  // exactly that much lands on the first copy's tail, which is the identical frame.
+  const period = width + CLIP_GAP;
+  box.style.setProperty("--clip-gap", CLIP_GAP + "px");
+  box.style.setProperty("--clip-rest", (-(overflow + period)).toFixed(1) + "px");
+  box.style.setProperty("--clip-period", period.toFixed(1) + "px");
+  box.style.setProperty("--clip-dur", (period / CLIP_SPEED).toFixed(2) + "s");
+}
+
+function fitBatteryName() {
+  const box = document.getElementById("battery-name");
+  setClip(box, box.firstElementChild.firstElementChild.textContent);
+}
+
+function fitBatteryMenu() {
+  for (const box of document.querySelectorAll("#battery-menu .pill-clip")) {
+    setClip(box, box.dataset.name || "");
+  }
+}
+
+// The last row markup renderPicker produced, so it can tell a real change from its own handiwork.
+let menuHTML = "";
+
 function renderPicker(state) {
   // Two cases, one line. A first load asks for `newest` and pins whatever came back, which is what
   // makes holding one run the default. And a pin can outlive the run it named - a deleted bench_run,
@@ -1769,7 +2179,7 @@ function renderPicker(state) {
 
   const dot = document.getElementById("battery-dot");
   dot.classList.toggle("live", Boolean(here && here.live));
-  setText(document.getElementById("battery-name"), state.battery_id || "no battery");
+  setClip(document.getElementById("battery-name"), state.battery_id || "no battery");
   const batteryTag = document.getElementById("battery");
   batteryTag.dataset.tipTerm = "bench run (battery)";
   batteryTag.dataset.tip = TIP_BATTERY;
@@ -1794,9 +2204,13 @@ function renderPicker(state) {
     // whose blinking dot already means "a runner is working here" only reads as a second liveness
     // tag that disagrees with the first.
     const note = fmtWhen(d.mtime);
-    return `<li role="option" data-battery="${esc(d.id)}" aria-selected="${d.id === state.battery_id}">`
+    return `<li class="clip" role="option" data-battery="${esc(d.id)}"`
+      + ` aria-selected="${d.id === state.battery_id}">`
       + `<span class="dot${d.live ? " live" : ""}"></span>`
-      + `<span class="m-id">${esc(d.id)}</span>`
+      // The name it will be measured against once the list is on screen: a clip box has no width
+      // while the menu is hidden, so nothing here can be sized until it opens.
+      + `<span class="m-id pill-clip" data-name="${esc(d.id)}">`
+      + `<span class="pill-scroll"><span class="pill-copy">${esc(d.id)}</span></span></span>`
       + `<span class="m-note">${esc(note)}</span>`
       // Copying stays available on a live run: the name is just as useful to paste while the
       // runner is still working as it is afterwards.
@@ -1808,7 +2222,19 @@ function renderPicker(state) {
       + ` title="rename this bench run" aria-label="rename ${esc(d.id)}"`
       + `${d.live ? " disabled" : ""}>✎</button></li>`;
   });
-  setHTML(menu, rows.length ? rows.join("") : '<li class="m-empty">no bench runs on disk</li>');
+  // Against the last markup this function GENERATED, not against the menu's current innerHTML: a row
+  // whose name overruns its box has had a separator and a second copy injected into it since, so the
+  // live DOM never matches the string again and every poll would rewrite the list. Which is what it
+  // did - rebuilding the rows out from under the cursor twice a second, restarting the crawl a few
+  // pixels in each time and reading exactly like an animation that snaps back before it gets going.
+  const html = rows.length ? rows.join("") : '<li class="m-empty">no bench runs on disk</li>';
+  if (html !== menuHTML) {
+    menuHTML = html;
+    setHTML(menu, html);
+    // A real rebuild while the list is up - a new run appearing, a rename landing - has to be
+    // re-measured; one while it is down is measured when it opens.
+    if (!menu.hidden) fitBatteryMenu();
+  }
 }
 
 // The name is what every CLI flag and every share of a run is phrased in terms of, so it is worth
@@ -1871,20 +2297,20 @@ async function renameBattery(id) {
 }
 
 // -- run queue -------------------------------------------------------------------------------
-// What the watcher has been asked to dispatch and has not finished dispatching. It knows its own
+// What the watcher has been asked to dispatch and has not finished dispatching. It knows watcher
 // retries exactly - it started them - and it knows from the coordinator how many sandboxes are free
 // and how many acquires are parked. It cannot list the battery runner's pending tries: a worker
 // creates its run dir only once it holds a lease, so a try still waiting for one exists nowhere but
-// inside that process. Those are in the parked count and nowhere else, which the footer says.
-const TIP_QUEUE = "Retries this watcher is dispatching, oldest first. A retry stops and deletes its "
-  + "old try, then asks the coordinator for a sandbox and waits its turn behind everything already "
-  + "asking — it never displaces a run that is already going.";
+// inside that process. A battery retry whose failed execution has a manifest appears as a ↻ cell,
+// but it has no ordered position in this watcher-owned menu.
+const TIP_QUEUE = "Automatic and requested retries. Waiting rows have no claimed position among "
+  + "other coordinator clients.";
 const QUEUE_NOTE = {
   stopping: "stopping the old run",
-  cleaning: "deleting its old history",
-  queued: "waiting for a sandbox",
+  cleaning: "cleaning the old run",
+  waiting: "waiting for a sandbox",
   running: "running",
-  error: "dispatch failed",
+  failed: "retry failed",
 };
 
 function renderQueue(state) {
@@ -1892,8 +2318,10 @@ function renderQueue(state) {
   const entries = queue.entries || [];
   const waiting = Number(queue.waiting) || 0;
   const running = Number(queue.running) || 0;
+  const failed = Number(queue.failed) || 0;
   setText(document.getElementById("queue-label"),
-    waiting ? `queue: ${waiting} waiting` : (running ? `queue: ${running} running` : "queue: empty"));
+    waiting ? `queue: ${waiting} waiting`
+      : (running ? `queue: ${running} running` : (failed ? `queue: ${failed} failed` : "queue: empty")));
   const pill = document.getElementById("queue");
   pill.dataset.tipTerm = "run queue";
   pill.dataset.tip = TIP_QUEUE;
@@ -1905,7 +2333,7 @@ function renderQueue(state) {
     const where = e.battery_id && e.battery_id !== state.battery_id ? ` · ${e.battery_id}` : "";
     return `<li class="q-row" role="option" aria-selected="false"`
       + ` title="${esc(e.error || note)}">`
-      + `<span class="q-pos">${e.position ? e.position + "." : "▸"}</span>`
+      + `<span class="q-pos">▸</span>`
       + `<span class="dot${e.state === "running" ? " live" : ""}"></span>`
       + `<span class="m-id">${esc(e.key)}</span>`
       + `<span class="m-note">${esc(note + where)}</span></li>`;
@@ -1914,13 +2342,10 @@ function renderQueue(state) {
 
   const free = Number(queue.free_sandboxes) || 0;
   const parked = Number(queue.coordinator_waiting) || 0;
-  // The parked count is the only sign of the battery runner's own waiting tries: a worker writes
-  // nothing to disk until it holds a lease, so those cannot have rows of their own up there.
   const fleet = queue.pool_error
-    ? "coordinator unreachable — the fleet and the wait ahead are unknown"
+    ? "coordinator unreachable — fleet availability is unknown"
     : `${free} of ${(state.pool || []).length} sandbox(es) free`
-      + (parked ? ` · ${parked} waiting to lease one: the queued rows above, plus any battery `
-                  + `tries, which get a row only once they are running` : "");
+      + (parked ? ` · ${parked} coordinator request(s) waiting` : "");
   rows.push(`<li class="q-foot">${esc(fleet)}</li>`);
   setHTML(document.getElementById("queue-menu"), rows.join(""));
 }
@@ -1982,8 +2407,11 @@ async function refresh() {
   // this page is set to read (scan.py's key otherwise, exactly) so that with the repetition signals
   // hidden the grid also stops moving to them - hiding a banner while its attempt still jumps to
   // the top of the grid would be the same interruption in a quieter coat.
+  //
+  // Tiers first, matching scan.py's `rank`: a rotated-aside requeue is an archive of a run that no
+  // longer exists, so it sinks below even the finished ones no matter how badly it scores.
   atts.sort((x, y) =>
-    (x.state === "finished") - (y.state === "finished")
+    rankTier(x) - rankTier(y)
     || healthOf(y).score - healthOf(x).score
     || String(x.prompt_id).localeCompare(String(y.prompt_id))
     || (x.attempt || 0) - (y.attempt || 0));
@@ -1998,12 +2426,16 @@ async function refresh() {
       + `${c.disagree ? ", " + c.disagree + " disagree" : ""})`
     : "";
   const waiting = c.awaiting_verdict ? ` · ${c.awaiting_verdict} awaiting review` : "";
+  const retryWaiting = c.pending_retry ? ` · ${c.pending_retry} waiting to retry` : "";
   document.getElementById("progress").textContent =
     (b.planned_attempts ? `${done}/${b.planned_attempts} done · ${live} live` : `${atts.length} attempt(s)`)
-    + review + waiting;
-  document.getElementById("pool").textContent = state.pool_error
+    + review + waiting + retryWaiting;
+  setText(document.getElementById("pool"), state.pool_error
     ? "pool: coordinator unreachable"
-    : `pool: ${(state.pool || []).length} sandbox(es)`;
+    : `pool: ${(state.pool || []).length} sandbox(es)`);
+  const fleet = state.fleet || {};
+  renderFleetSettings(fleet);
+  if (fleetOpen()) renderFleet();
   document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
 
   const grid = document.getElementById("grid");
@@ -2061,6 +2493,217 @@ function reorder(grid, atts) {
     if (entry.term.follow) termStick(entry.term);
     else if (entry.term.el.scrollTop !== top) entry.term.el.scrollTop = top;
   }
+}
+
+// -- legend ---------------------------------------------------------------------------------
+// Every state a try cell can be drawn in, in the order a reviewer meets them: the two verdicts
+// first, then the states a run passes through on its way to one, then the three that score nothing.
+// The `code` is the same class the grid puts on the cell, so a sample is the real thing and not a
+// drawing of it - a new cell colour cannot land in the table without also landing here.
+const LEGEND = [
+  { code: "p", glyph: "P", key: "P", what: "Human verdict: the agent did the task. Counts as a pass "
+    + "for the prompt." },
+  { code: "f", glyph: "F", key: "F", what: "Human verdict: it did not - or the try ended badly on "
+    + "its own, with no review yet." },
+  { code: "q", glyph: "?", what: "Finished and awaiting review. Nobody has ruled on it, so it "
+    + "counts as neither." },
+  { code: "r", glyph: "R", key: "R", what: "Running, or a retry in flight. The key requeues a "
+    + "finished try to run again." },
+  { code: "w", glyph: "↻", what: "Waiting to retry: requeued, and holding for a free sandbox." },
+  { code: "k", glyph: "K", what: "Killed or orphaned. Nobody found out how the task would have "
+    + "gone, so it is not scored." },
+  { code: "e", glyph: "E", key: "E", what: "Human verdict: invalid - the try was broken, not the "
+    + "agent. Excluded from the totals." },
+  { code: "a", glyph: "A", key: "A", what: "Halted because a sibling try had already won the "
+    + "prompt. Excluded from the totals." },
+  { code: "none", glyph: "", what: "Not run." },
+];
+
+// Built once, on the first open: the rows are fixed text, and nothing about them follows the state.
+let legendBuilt = false;
+function openLegend() {
+  const box = document.getElementById("legend");
+  if (!legendBuilt) {
+    box.querySelector("tbody").innerHTML = LEGEND.map(row =>
+      `<tr><td class="sample"><span class="cell ${row.code}">`
+      + `<span class="cellbtn">${row.glyph || "\u00a0"}</span></span></td>`
+      + `<td class="what">${row.key ? `<kbd>${row.key}</kbd>` : ""}${row.what}</td></tr>`).join("");
+    legendBuilt = true;
+  }
+  box.classList.add("open");
+  document.getElementById("legend-open").setAttribute("aria-expanded", "true");
+}
+function closeLegend() {
+  document.getElementById("legend").classList.remove("open");
+  document.getElementById("legend-open").setAttribute("aria-expanded", "false");
+}
+const legendOpen = () => document.getElementById("legend").classList.contains("open");
+
+// -- sandbox pool ----------------------------------------------------------------------------
+// The header can only ever say how many sandboxes there are, and that is never the question: the
+// question is which one is quarantined, which one is stuck in a reset, and who holds the leases. So
+// the count opens the whole fleet - the same object `sari_bench status --json` prints - and keeps it
+// current on its own clock, faster than the page's poll, because this is opened to watch something
+// move.
+
+const FLEET_POLL_MS = 1500;
+const FLEET_COLS = ["sandbox", "state", "lease", "store", "note", ""];
+let fleetData = null;
+let fleetTimer = null;
+let fleetHead = false;
+
+const fleetOpen = () => document.getElementById("fleet").classList.contains("open");
+
+async function pollFleet() {
+  let next;
+  try {
+    const response = await fetch("/api/fleet/status");
+    // Checked before parsing, because the interesting failure answers plain text: a watcher process
+    // started before this route existed 404s, and letting JSON.parse choke on "not found" reported
+    // the reader a bare "the string did not match the expected pattern" - true, and no help at all
+    // in working out that the fix is to restart the watcher.
+    if (!response.ok) {
+      next = {
+        error: response.status === 404
+          ? "This watcher does not serve /api/fleet/status — it is running an older build than the "
+            + "page it just served you. Restart it."
+          : `The watcher answered ${response.status} ${response.statusText || ""}`.trim(),
+        sandboxes: [],
+      };
+    } else {
+      next = await response.json();
+    }
+  } catch (error) {
+    next = { error: "Could not read the fleet: " + ((error && error.message) || error),
+             sandboxes: [] };
+  }
+  fleetData = next;
+  if (fleetOpen()) renderFleet();
+}
+
+// Quarantine is the one thing an operator does to a sandbox from here, and it is worth saying what
+// it costs: the coordinator drops the lease outright and releases the player WITHOUT a reset, so an
+// attempt holding it loses its sandbox mid-run and gets requeued.
+//
+// The reason is asked for rather than stamped, and the asking IS the confirmation - cancelling the
+// dialog cancels the quarantine. It is the only record of why a machine was pulled: it comes back in
+// the pool table's note column, in `sari_bench status`, and in the coordinator's own log, and the
+// next person to look at a benched sandbox has nothing else to go on. A default is offered so the
+// hurried case is one keypress, and blank falls back to it rather than recording nothing.
+const QUARANTINE_REASON = "quarantined from the watch UI";
+
+async function setQuarantine(selector, clear) {
+  let reason = QUARANTINE_REASON;
+  if (!clear) {
+    const typed = prompt(
+      `Quarantine ${selector}?\n\nIt stops being leasable. If it is holding a lease right now, that `
+      + `lease is dropped and the attempt on it loses its sandbox and is requeued.\n\n`
+      + `Why — this is what the pool table and the coordinator log will show:`,
+      QUARANTINE_REASON,
+    );
+    if (typed === null) return;
+    reason = typed.trim() || QUARANTINE_REASON;
+  }
+  const response = await fetch(clear ? "/api/fleet/unquarantine" : "/api/fleet/quarantine", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sandbox: selector, reason }),
+  });
+  const data = await response.json().catch(() => ({ ok: false, error: "the watcher did not answer in JSON" }));
+  if (!data.ok) notify(`Could not ${clear ? "release" : "quarantine"} ${selector}: `
+    + (data.error || "unknown error"));
+  else notify(`${selector} ${clear ? "released back into the pool" : "quarantined"}.`);
+  pollFleet();
+  refresh();
+}
+
+function openFleet() {
+  document.getElementById("fleet").classList.add("open");
+  document.getElementById("pool").setAttribute("aria-expanded", "true");
+  renderFleet();
+  pollFleet();
+  if (fleetTimer === null) fleetTimer = setInterval(pollFleet, FLEET_POLL_MS);
+}
+
+function closeFleet() {
+  document.getElementById("fleet").classList.remove("open");
+  document.getElementById("pool").setAttribute("aria-expanded", "false");
+  // Nothing reads the fleet while the panel is shut, and the coordinator should not be asked once a
+  // second for an answer no one is looking at.
+  if (fleetTimer !== null) { clearInterval(fleetTimer); fleetTimer = null; }
+}
+
+// A sandbox's row-level condition, worst first: the thing that will stop it being leased is what a
+// reader opened this panel to find, so it wins over whatever the state field says.
+function fleetState(sandbox) {
+  if (sandbox.quarantined) return { cls: "bad", word: "quarantined" };
+  if (sandbox.reset_seconds !== null && sandbox.reset_seconds !== undefined) {
+    return { cls: "busy", word: `resetting ${sandbox.reset_seconds}s` };
+  }
+  if (!sandbox.store_loaded) return { cls: "bad", word: "store not loaded" };
+  if (sandbox.lease_id) return { cls: "leased", word: sandbox.state || "leased" };
+  return { cls: "", word: sandbox.state || "unknown" };
+}
+
+function fleetNote(sandbox) {
+  if (sandbox.quarantined) {
+    return [sandbox.quarantine_reason, sandbox.quarantine_source && `via ${sandbox.quarantine_source}`]
+      .filter(Boolean).join(" · ");
+  }
+  return sandbox.reset_reason ? `reset: ${sandbox.reset_reason}` : "";
+}
+
+function renderFleet() {
+  const data = fleetData || {};
+  const boxes = data.sandboxes || [];
+  const num = value => Number(value) || 0;
+
+  setText(document.getElementById("fleet-when"),
+    data.error ? "coordinator unreachable" : fleetData ? "live" : "");
+
+  const cap = data.capacity_limit === null || data.capacity_limit === undefined
+    ? "all" : String(data.capacity_limit);
+  const quarantined = num(data.quarantined_sandboxes);
+  const waiting = num(data.waiting);
+  setText(document.getElementById("fleet-stats"), [
+    `${num(data.registered_sandboxes) || boxes.length} registered`,
+    `${num(data.eligible_sandboxes)} eligible`,
+    `${num(data.active_leases)} leased`,
+    `${num(data.effective_capacity)} effective capacity`,
+    waiting ? `${waiting} waiting for a lease` : "",
+  ].filter(Boolean).join(" · "));
+  setHTML(document.getElementById("fleet-tags"), [
+    quarantined ? `<span class="badge alert">${quarantined} quarantined</span>` : "",
+    `<span class="badge">cap: ${esc(cap)}</span>`,
+  ].filter(Boolean).join(""));
+
+  const table = document.getElementById("fleet-rows");
+  if (!fleetHead) {
+    setHTML(table.querySelector("thead"),
+      "<tr>" + FLEET_COLS.map(label => `<th>${label}</th>`).join("") + "</tr>");
+    fleetHead = true;
+  }
+  setHTML(table.querySelector("tbody"), boxes.length
+    ? boxes.map(sandbox => {
+        const state = fleetState(sandbox);
+        const note = fleetNote(sandbox);
+        return "<tr>"
+          + `<td><div>${esc(sandbox.sandbox_alias || "—")}</div>`
+          + `<div class="dim" style="font-size:11px">${esc(sandbox.sandbox_id || "")}</div></td>`
+          + `<td><span class="st ${state.cls}">${esc(state.word)}</span></td>`
+          + `<td class="dim mono">${esc(sandbox.lease_alias || sandbox.lease_id || "free")}</td>`
+          + `<td class="dim">${esc(sandbox.store_name || "—")}</td>`
+          + `<td class="dim">${esc(note || "—")}</td>`
+          // The alias if it has one, because that is what the coordinator's own CLI takes and what
+          // shows up in its log; the id is only the fallback for a sandbox that never sent one.
+          + `<td class="act"><button data-act="${sandbox.quarantined ? "fleet-release" : "fleet-hold"}"`
+          + ` data-sandbox="${esc(sandbox.sandbox_alias || sandbox.sandbox_id || "")}"`
+          + `${sandbox.quarantined ? "" : ' class="danger"'}>`
+          + `${sandbox.quarantined ? "release" : "quarantine"}</button></td>`
+          + "</tr>";
+      }).join("")
+    : `<tr><td class="dim" colspan="${FLEET_COLS.length}">`
+      + `${esc(data.error || (fleetData ? "No sandboxes registered." : "Loading…"))}</td></tr>`);
 }
 
 // -- detail overlay ------------------------------------------------------------------------
@@ -2307,7 +2950,8 @@ function siblingsAtRisk(key) {
   const self = latest.find(a => a.key === key);
   if (!self) return { live: [], pending: 0 };
   const mine = latest.filter(a => a.prompt_id === self.prompt_id);
-  const live = mine.filter(a => a.key !== key && (isLive(a) || a.state === "retrying"));
+  const live = mine.filter(a => a.key !== key
+    && (isLive(a) || a.state === "retrying" || a.pending_retry));
   let pending = 0;
   if (batteryLive()) {
     const tries = Math.max(1, Number((latestState.battery || {}).tries) || 1);
@@ -2340,6 +2984,11 @@ async function recordVerdict(key, verdict) {
 
 document.addEventListener("click", async ev => {
   if (ev.target.id === "modal") { closeModal(); return; }
+  if (ev.target.id === "legend") { closeLegend(); return; }
+  if (ev.target.id === "fleet") { closeFleet(); return; }
+  // The settings panel holds a text field, so it cannot ride the button-only dispatch below: a click
+  // on the input would fall through to "anywhere else" and shut the panel mid-edit.
+  if (settingsOpen() && !ev.target.closest("#settings-wrap")) closeSettings();
   // Ahead of the option itself: the pencil sits inside a row whose entire surface means "switch to
   // this run", and renaming a battery must not also drag the page onto it.
   const rename = ev.target.closest("#battery-menu button[data-act='battery-rename']");
@@ -2364,13 +3013,26 @@ document.addEventListener("click", async ev => {
     closeMenu();
     menu.hidden = !opening;
     button.setAttribute("aria-expanded", String(opening));
+    // Now that the rows have a width, and not before: a clip box measures zero while its menu is
+    // hidden, which would read as "every name overflows" and start all of them crawling.
+    if (opening && act === "battery-menu") fitBatteryMenu();
     // The cursor is still on the pill either way, and no mousemove is coming to re-ask.
     if (menu.hidden) showHelp(button); else hideHelp();
     return;
   }
   if (act === "tab") { setTab(button.dataset.tab); return; }
   if (act === "collapse-toggle") { toggleCollapse(); return; }
+  if (act === "settings") { toggleSettings(); return; }
   if (act === "modal-close") { closeModal(); return; }
+  if (act === "legend-open") { openLegend(); return; }
+  if (act === "legend-close") { closeLegend(); return; }
+  if (act === "fleet-open") { openFleet(); return; }
+  if (act === "fleet-close") { closeFleet(); return; }
+  if (act === "fleet-hold" || act === "fleet-release") {
+    button.disabled = true;
+    await setQuarantine(button.dataset.sandbox, act === "fleet-release");
+    return;
+  }
   // Both entry points - a tile's ⛶ and an overview cell - open the same overlay the same way: on
   // the run itself, and without starting an encode nobody asked for.
   if (act === "detail") { if (key) openModal(key); return; }
@@ -2415,8 +3077,8 @@ document.addEventListener("click", async ev => {
 // for tearing down a try and re-queueing it.
 async function retryAttempt(key) {
   if (!confirm(
-    `Retry ${key}?\n\nThis stops the current run if needed and permanently deletes every log, ` +
-    `frame, replay, verdict, and result previously recorded for this try number.`
+    `Retry ${key}?\n\nThis stops the current run if needed and archives the previous execution ` +
+    `when its replacement starts.`
   )) return false;
   const res = await fetch(api(key, "retry"), { method: "POST" });
   const data = await res.json();
@@ -2436,7 +3098,7 @@ function announceRetry(key, placement) {
   }
   const ahead = Number(placement.ahead) || 0;
   const why = placement.pool_error ? "the coordinator is unreachable"
-    : (ahead ? `${ahead} run(s) asked first` : "the fleet is busy");
+    : "the fleet is busy or another coordinator client is waiting";
   // The banner opens the list it is talking about: the queue is where this retry can be watched
   // from here on, and the toast is gone in five seconds. Deferred by a tick because the click that
   // dismissed the banner is still bubbling, and it closes every open menu on its way to the
@@ -2451,7 +3113,7 @@ function announceRetry(key, placement) {
 // Which attempts the R shortcut and retry button act on: anything not already mid-retry. Unlike
 // canVerdict this allows a live attempt — retrying stops the current run if one is going.
 function canRetry(a) {
-  return !!a && !(a.retry_state && a.retry_state !== "error");
+  return !!a && !a.pending_retry && !(a.retry_state && a.retry_state !== "failed");
 }
 
 // The hover card, delegated off the section so it survives every table patch.
@@ -2473,6 +3135,9 @@ document.addEventListener("keydown", async ev => {
   if (ev.key === "Escape") {
     hideHelp();
     closeMenu();
+    closeSettings();
+    if (legendOpen()) closeLegend();
+    if (fleetOpen()) closeFleet();
     if (modalKey) closeModal();
     return;
   }
@@ -2502,6 +3167,12 @@ document.addEventListener("keydown", async ev => {
 
 tipVotes(document.getElementById("modal-foot"));
 renderCollapseToggle();
+// The crawl is measured in pixels, so it has to be re-measured when the box changes width - which a
+// `ch`-sized box does whenever the window's font metrics do.
+window.addEventListener("resize", () => {
+  fitBatteryName();
+  if (!document.getElementById("battery-menu").hidden) fitBatteryMenu();
+});
 refresh();
 setInterval(refresh, POLL_MS);
 setInterval(refreshLiveFrames, FRAME_POLL_MS);

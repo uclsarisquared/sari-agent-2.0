@@ -10,8 +10,10 @@ Two routes on the coordinator:
     coord -> sandbox   coord.welcome, coord.lease, coord.reset, coord.release
 
 ``/bench``  one connection per benchmark worker, at most one lease each
-    bench -> coord     bench.acquire, bench.release, bench.status
-    coord -> bench     bench.lease, bench.released, bench.pool, bench.sandbox_lost, bench.error
+    bench -> coord     bench.acquire, bench.release, bench.status, bench.capacity,
+                       bench.quarantine, bench.unquarantine
+    coord -> bench     bench.lease, bench.released, bench.pool, bench.capacity,
+                       bench.quarantined, bench.unquarantined, bench.sandbox_lost, bench.error
 """
 
 from __future__ import annotations

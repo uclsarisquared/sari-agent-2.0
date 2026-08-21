@@ -223,7 +223,8 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         battery = Path(temp) / "b"
         run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(6), pid=999_999_998)
         _stamp(run_dir, {"killed_by": "watcher", "lease_id": "lease-1", "tokens_in": 0})
-        _write(run_dir / "tokens.json", json.dumps({"tokens_in": 900, "tokens_out": 40}))
+        _write(run_dir / "tokens.json", json.dumps({
+            "tokens_in": 900, "tokens_out": 40, "api_calls": 12}))
         state = WatchState(bench_root=Path(temp), fixed_battery=battery,
                            discord=Discord(enabled=False), min_interval=0.0)
 
@@ -240,6 +241,7 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         assert manifest["end_reason"] == "runner_gone" and manifest["exit_code"] is None
         assert manifest["closed_out_by"] == "watcher", manifest
         assert manifest["tokens_in"] == 900, manifest["tokens_in"]
+        assert manifest["api_calls"] == 12, manifest
         # Measured to the run dir's last sign of life, not to the click: an orphan closed out a week
         # after it was abandoned did not run for a week.
         assert 55.0 <= manifest["wall_seconds"] <= 65.0, manifest["wall_seconds"]
@@ -248,6 +250,13 @@ def test_orphan_is_closed_out_rather_than_stranded() -> None:
         rows = [json.loads(line) for line in
                 (battery / "attempts.jsonl").read_text(encoding="utf-8").splitlines() if line]
         assert [(r["prompt_id"], r["attempt"], r["outcome"]) for r in rows] == [("p", 1, "operator_kill")]
+        assert rows[0]["api_calls"] == 12, rows[0]
+        closed = scan.scan_battery(battery, time.time()).as_dict()["attempts"][0]
+        assert closed["api_calls"] == 12, closed
+
+        from sari_bench.report import collect
+        exported, _legs = collect(battery)
+        assert exported[0]["api_calls"] == 12, exported[0]
         assert rows[0]["tokens_in"] == 900
 
         # And it is now an ordinary finished attempt: reviewable, and no longer killable.
@@ -457,6 +466,76 @@ def test_rotated_requeue_dir_stays_separate() -> None:
         print("ok  a rotated-aside requeue dir does not merge into its replacement")
 
 
+def test_pending_retry_scan_contract_and_legacy_default() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        legacy = make_attempt(
+            battery, "legacy", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        pending = make_attempt(
+            battery, "pending", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        _stamp(pending, {
+            "pending_retry": True,
+            "requeue_reason": "api_retry_exhausted",
+            "retry_queued_at": "2026-08-19T11:59:00",
+            "retry_acquire_attempts": 2,
+            "retry_wait_reason": "fleet has 1 registered sandbox(es): ready=0",
+            "retry_last_checked_at": "2026-08-19T12:00:00",
+            "started_epoch": 100.0,
+            "deadline_epoch": 700.0,
+            "wall_seconds": 41.5,
+        })
+        archived = make_attempt(
+            battery, "archived", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
+        )
+        _stamp(archived, {"pending_retry": False, "requeue_reason": "sandbox_lost"})
+        archived.rename(archived.with_name("try01.requeue00"))
+
+        view = scan.scan_battery(battery, time.time()).as_dict()
+        attempts = {attempt["key"]: attempt for attempt in view["attempts"]}
+        assert attempts["legacy/try01"]["pending_retry"] is False
+        assert attempts["pending/try01"]["pending_retry"] is True
+        assert attempts["pending/try01"]["retry_acquire_attempts"] == 2
+        assert "ready=0" in attempts["pending/try01"]["retry_wait_reason"]
+        assert attempts["pending/try01"]["elapsed_seconds"] == 41.5
+        assert attempts["pending/try01"]["remaining_seconds"] is None
+        later = scan.scan_attempt(pending, battery, time.time() + 3600).as_dict()
+        assert later["elapsed_seconds"] == 41.5 and later["remaining_seconds"] is None
+        assert attempts["archived/try01.requeue00"]["pending_retry"] is False
+        assert view["counts"]["pending_retry"] == 1, view["counts"]
+        assert view["counts"]["requeued"] == 2, view["counts"]
+
+        state = WatchState(
+            bench_root=Path(temp), fixed_battery=battery,
+            discord=Discord(enabled=False), min_interval=0.0,
+        )
+        refused = state.retry("pending/try01")
+        assert refused["ok"] is False
+        assert refused["error"] == "battery runner retry already pending"
+        queue = state.snapshot(force=True)["queue"]
+        assert [(entry["key"], entry["state"]) for entry in queue["entries"]] == [
+            ("pending/try01", "waiting")
+        ]
+        print("ok  scanner separates pending retries and defaults legacy manifests to false")
+
+
+def test_dashboard_pending_retry_contract() -> None:
+    dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
+    assert 'code: "w", glyph: "↻"' in dashboard
+    assert "a.retry_wait_reason" in dashboard
+    assert ".cell.w .cellbtn" in dashboard and ".badge.waiting" in dashboard
+    assert 'if (st.code === "w") pendingRetry += 1' in dashboard
+    assert "awaitingReview || live || pendingRetry" in dashboard
+    assert "c.pending_retry" in dashboard and "retryWaiting" in dashboard
+    assert "refs.retry.disabled = runnerRetryPending" in dashboard
+    assert "!a.pending_retry" in dashboard
+    assert "a.state === \"retrying\" || a.pending_retry" in dashboard
+    assert 'a.retry_state === "waiting"' in dashboard
+    assert "Automatic and requested retries" in dashboard
+    print("ok  dashboard renders and rolls up pending retries separately")
+
+
 def test_http_surface_and_traversal_refusal() -> None:
     import urllib.request
     from http.server import ThreadingHTTPServer
@@ -484,6 +563,11 @@ def test_http_surface_and_traversal_refusal() -> None:
             assert payload["battery_id"] == "b"
             assert payload["mode"] == "pinned"
             assert len(payload["attempts"]) == 1
+            fleet = json.loads(
+                urllib.request.urlopen(f"{base}/api/fleet/status", timeout=5).read()
+            )
+            assert fleet["sandboxes"] == []
+            assert fleet["quarantined_sandboxes"] == 0
 
             frame = urllib.request.urlopen(f"{base}/api/attempt/p/try01/frame.png", timeout=5)
             assert frame.headers["Content-Type"] == "image/png"
@@ -613,6 +697,59 @@ def test_snapshot_exposes_log_size_for_change_driven_terminals() -> None:
         second = scan.scan_battery(battery, time.time()).as_dict()["attempts"][0]
         assert second["log_bytes"] > first["log_bytes"]
         print("ok  snapshots expose late log growth after an orphan transition")
+
+
+def test_api_calls_preserve_unknown_zero_and_mixed_coverage() -> None:
+    """Legacy absence is unknown, measured zero survives, and excluded verdicts stay identifiable."""
+    import csv
+
+    from sari_bench.report import ATTEMPT_COLUMNS, _write_csv, collect
+
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        fixtures = [
+            ("legacy", "pass", None),
+            ("zero", "fail", 0),
+            ("known", "pass", 14),
+            ("invalid", "invalid", 99),
+            ("unreviewed", "", 77),
+        ]
+        for prompt_id, verdict, api_calls in fixtures:
+            run_dir = make_attempt(
+                battery, prompt_id, 1, steps=healthy_steps(2), state="finished",
+                outcome="completed", success=verdict == "pass",
+            )
+            if verdict:
+                _stamp(run_dir, {"verified_verdict": verdict, "verified_by": "tester"})
+            tokens = {"tokens_in": 10, "tokens_out": 2, "calls": 1}
+            if api_calls is not None:
+                tokens["api_calls"] = api_calls
+            _write(run_dir / "tokens.json", json.dumps(tokens))
+
+        attempts = {row["prompt_id"]: row for row in
+                    scan.scan_battery(battery, time.time()).as_dict()["attempts"]}
+        assert attempts["legacy"]["api_calls"] is None, attempts["legacy"]
+        assert attempts["zero"]["api_calls"] == 0, attempts["zero"]
+        assert attempts["known"]["api_calls"] == 14, attempts["known"]
+
+        rows, _legs = collect(battery)
+        exported = {row["prompt_id"]: row["api_calls"] for row in rows}
+        assert exported == {
+            "invalid": 99, "known": 14, "legacy": None, "unreviewed": 77, "zero": 0,
+        }, exported
+        csv_path = battery / "attempts.csv"
+        _write_csv(csv_path, ATTEMPT_COLUMNS, rows)
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            csv_calls = {row["prompt_id"]: row["api_calls"] for row in csv.DictReader(handle)}
+        assert csv_calls["legacy"] == "" and csv_calls["zero"] == "0", csv_calls
+
+        dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
+        assert "API calls<br>pass only / pass+fail" in dashboard
+        assert "[\"pass\", \"fail\"].includes(verdictOf(a))" in dashboard
+        assert "metered" in dashboard and "unknown (0/" in dashboard
+        assert dashboard.count('data-ref="apiCalls"') == 3  # live card, detail, hover
+        assert "`${st.glyph} · ${hasApiCalls(a)" in dashboard
+    print("ok  API-call coverage keeps legacy unknown, measured zero, and mixed data honest")
 
 
 def test_log_query_params_are_clamped() -> None:
@@ -1206,6 +1343,9 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
                 "coordinator": "ws://127.0.0.1:9000",
                 "completion_guard": "vlm",
                 "context_policy": "a5",
+                "api_max_attempts": 7,
+                "max_api_requeues": 0,
+                "sandbox_command_timeout_seconds": 23.0,
             }),
         )
         state = WatchState(
@@ -1214,9 +1354,17 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
             discord=Discord(enabled=False),
             min_interval=0.0,
         )
-        config = state._retry_config(battery, {"command": []})
+        config = state._retry_config(
+            battery, {"command": [], "sandbox_command_timeout": 31.0}
+        )
         assert config["completion_guard"] == "vlm", config
         assert config["context_policy"] == "a5", config
+        assert config["api_max_attempts"] == 7, config
+        assert config["max_api_requeues"] == 0, config
+        assert config["sandbox_command_timeout"] == 31.0, config
+
+        config = state._retry_config(battery, {"command": []})
+        assert config["sandbox_command_timeout"] == 23.0, config
     print("ok  watcher retry preserves completion guard and context policy")
 
 
@@ -1245,12 +1393,12 @@ def test_queue_orders_retries_and_predicts_the_wait() -> None:
             {"sandbox_id": "s3", "state": "Ready", "lease_id": None, "store_loaded": False},
         ], waiting=2)
         job("p/try02", "p", 2, "running")
-        job("q/try01", "q", 1, "queued")
+        job("q/try01", "q", 1, "waiting")
         job("q/try02", "q", 2, "stopping")
 
         queue = state.queue()
         assert [(e["key"], e["position"]) for e in queue["entries"]] == [
-            ("p/try02", None), ("q/try01", 1), ("q/try02", 2),
+            ("p/try02", None), ("q/try01", None), ("q/try02", None),
         ], queue["entries"]
         assert queue["waiting"] == 2 and queue["running"] == 1, queue
         assert queue["free_sandboxes"] == 1, queue
@@ -1260,7 +1408,7 @@ def test_queue_orders_retries_and_predicts_the_wait() -> None:
         # `queued` is already blocked inside bench.acquire, so it is counted there and not again
         # here. Two claims on one free sandbox, so this one waits.
         placement = state._placement_locked("q/try02")
-        assert placement["ahead"] == 2 and placement["immediate"] is False, placement
+        assert placement["ahead"] is None and placement["immediate"] is False, placement
         # Nothing else asking and a sandbox idle: it starts as soon as its old try is cleared.
         state.set_pool([
             {"sandbox_id": "s1", "state": "Ready", "lease_id": None, "store_loaded": True},
@@ -1386,6 +1534,75 @@ def test_success_verdict_cancels_only_same_prompt_siblings() -> None:
         })
         assert posts == [], "administrative skip emitted a Discord finish notification"
         print("ok  successful review durably cancels only sibling tries, and fail/clear do not undo it")
+
+
+def test_success_materializes_waiting_retry_once() -> None:
+    """A sibling pass withdraws a watcher retry and preserves exactly one failed execution."""
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        _write(battery / "battery.json", json.dumps({"tries": 3, "planned_attempts": 3}))
+        make_attempt(
+            battery, "p", 1, steps=healthy_steps(2), state="finished",
+            outcome="completed", success=True, end_reason="halt_granted",
+        )
+        failed = make_attempt(
+            battery, "p", 2, steps=healthy_steps(2), state="finished",
+            outcome="agent_error", success=False,
+        )
+        automatic = make_attempt(
+            battery, "p", 3, steps=healthy_steps(2), state="requeued", outcome="requeued",
+        )
+        _stamp(automatic, {
+            "pending_retry": True,
+            "retry_queued_at": "2026-08-20T12:00:00",
+            "context_policy": "baseline",
+        })
+        source = json.loads((failed / "attempt.json").read_text())
+        state = WatchState(
+            bench_root=Path(temp), fixed_battery=battery,
+            discord=Discord(enabled=False), min_interval=0.0,
+        )
+        state._retry_jobs["p/try02"] = {
+            "key": "p/try02", "battery_id": "b", "run_id": "retry-test",
+            "state": "waiting", "error": "", "source_manifest": source,
+            "attempt": scan.scan_attempt(failed, battery, time.time()).as_dict(),
+            "queued_at": time.time(),
+        }
+        before = state.snapshot(force=True)["queue"]["entries"]
+        assert {(entry["key"], entry["kind"]) for entry in before} == {
+            ("p/try02", "retry"), ("p/try03", "automatic_retry")
+        }
+
+        result = state.verdict("p/try01", "pass", by="reviewer")
+        assert result["ok"] is True
+        assert not state.queue()["entries"]
+        canonical = json.loads((failed / "attempt.json").read_text())
+        assert canonical["end_reason"] == "already_successful"
+        assert canonical["winning_attempt_key"] == "p/try01"
+        automatic_canonical = json.loads((automatic / "attempt.json").read_text())
+        assert automatic_canonical["end_reason"] == "already_successful"
+        assert automatic_canonical["winning_attempt_key"] == "p/try01"
+        from sari_bench.runner import Prompt, materialize_already_successful
+
+        durable = json.loads((battery / "battery.json").read_text())
+        assert materialize_already_successful(
+            output_dir=battery,
+            prompt=Prompt(id="p", prompt="task for p", family="pickup"),
+            attempt=2,
+            winner=durable["human_verified_winners"]["p"],
+            arm="graph",
+            context_policy="baseline",
+        ) is None
+        archives = list(failed.parent.glob("try02.requeue*"))
+        assert len(archives) == 1
+        archived = json.loads((archives[0] / "attempt.json").read_text())
+        assert archived["prompt_id"] == source["prompt_id"] == "p"
+        assert archived["state"] == archived["outcome"] == "requeued"
+        assert len(list(automatic.parent.glob("try03.requeue*"))) == 1
+        rows = [json.loads(line) for line in (battery / "attempts.jsonl").read_text().splitlines()]
+        assert len(rows) == 2 and {row["attempt"] for row in rows} == {2, 3}
+        assert all(row["end_reason"] == "already_successful" for row in rows)
+        print("ok  a sibling pass materializes one canonical already-successful retry")
 
 
 def test_response_body_ignores_client_disconnects_only() -> None:
@@ -1709,8 +1926,8 @@ def test_roles_grain_reports_per_reasoner_token_spend() -> None:
         _write(metered / "tokens.json", json.dumps({
             "tokens_in": 900, "tokens_out": 100, "calls": 6, "untracked_calls": 0,
             "by_role": {
-                "guard": {"tokens_in": 300, "tokens_out": 20, "calls": 2},
-                "actor": {"tokens_in": 600, "tokens_out": 80, "calls": 4},
+                "guard": {"tokens_in": 300, "tokens_out": 20, "calls": 2, "api_calls": 3},
+                "actor": {"tokens_in": 600, "tokens_out": 80, "calls": 4, "api_calls": 5},
             },
             "tokens_total": 1000,
         }))
@@ -1726,6 +1943,7 @@ def test_roles_grain_reports_per_reasoner_token_spend() -> None:
         assert [row["role"] for row in rows] == ["actor", "guard"], rows
         assert [row["tokens_total"] for row in rows] == [680, 320], rows
         assert [row["calls"] for row in rows] == [4, 2], rows
+        assert [row["api_calls"] for row in rows] == [5, 3], rows
         assert round(sum(row["share_in"] for row in rows), 6) == 1.0, rows
         # The join key back to attempts.csv, and the arm an ablation groups by.
         assert rows[0]["run_dir"] == str(metered) and rows[0]["arm"] == "graph"
@@ -1823,10 +2041,13 @@ def main() -> int:
     test_a_browser_can_read_a_battery_the_watcher_is_not_watching()
     test_a_running_battery_is_marked_live()
     test_rotated_requeue_dir_stays_separate()
+    test_pending_retry_scan_contract_and_legacy_default()
+    test_dashboard_pending_retry_contract()
     test_http_surface_and_traversal_refusal()
     test_log_cursor_appends_only_what_is_new()
     test_full_log_is_not_limited_by_tail_window()
     test_snapshot_exposes_log_size_for_change_driven_terminals()
+    test_api_calls_preserve_unknown_zero_and_mixed_coverage()
     test_log_query_params_are_clamped()
     test_report_and_kill_stamp()
     test_target_bitrate_math()
@@ -1845,6 +2066,7 @@ def main() -> int:
     test_queue_orders_retries_and_predicts_the_wait()
     test_invalid_verdict_in_the_report()
     test_success_verdict_cancels_only_same_prompt_siblings()
+    test_success_materializes_waiting_retry_once()
     test_response_body_ignores_client_disconnects_only()
     test_verdict_and_replay_over_http()
     test_report_carries_the_human_verdict()

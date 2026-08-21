@@ -1,29 +1,54 @@
-# Sari runtime configuration.
+# SARI RUNTIME CONFIGURATION.
 #
 # Both entrypoints accept this file:
-#   uv run python overhaul/orchestrator/subtask_agents.py --config runconfig.toml --task "..."
+#   uv run python agent/run_agent.py --config runconfig.toml --task "..."
 #   uv run python -m sari_bench run --config runconfig.toml
 #
 # Explicit command-line flags override this file. Relative paths are resolved from this file,
 # regardless of the directory from which the command is launched.
+#
+# A leg is one typed subtask produced by the task decomposer (for example, goto, pickup, inspect,
+# compare, or checkout). Each leg gets its own agent loop and limits; failed legs may be retried.
+# A step is one observe-decide-act iteration inside a leg: the agent receives a fresh observation,
+# chooses and executes an action batch, and then updates state. A leg usually contains many steps.
+
+[api_retry]
+# Total attempts per OpenAI-compatible model call, including the initial request. Retries wait
+# 1, 2, 4, 8, 15, then 30 seconds for every remaining retry. With 10 attempts the nine waits total
+# 150 seconds; request timeouts are additional. Transport and malformed-content failures share it.
+max_attempts = 10
 
 [agent]
 # Optional fixed task. Usually leave this commented and pass the prompt on the command line.
 # task = "Pick up Ritz Crackers"
 
 # Navigation strategy: "graph", "vlm", or "graph-advised".
-arm = "graph"
+navigation_strategy = "graph"
 context_policy = "baseline"
 
-# Backend VLM used to resolve a target to map checkpoints: "qwen" or "claude-cli".
-resolver_backend = "qwen"
+# Backend VLM used to resolve a target to map checkpoints.
+#   "endpoint"   - the OpenAI-compatible endpoint from config.env, asked for $OPENAI_MODEL: the same
+#                  model every other reasoner in the run uses (decomposer, actor, memory, ...).
+#   "claude-cli" - a `claude -p` subprocess, independent of the endpoint and of $OPENAI_MODEL.
+# "qwen" is the old name for "endpoint": still accepted, warns on load, and will be removed.
+resolver_backend = "endpoint"
 
-# Pickup/compare/unknown completion verification: "deterministic" or "vlm".
-# Inspect tasks are VLM-verified in either mode.
+# Completion verification: "deterministic", "vlm", or "none".
+# "none" disables verification and accepts an explicit STOP without running completion guards.
 completion_guard = "vlm"
 
 # Failed-leg retries before the entire task is aborted.
 leg_retries = 1
+
+# What to do when a leg exhausts the completion guard's refusal cap (three refused STOPs, recorded as
+# end_reason "halt_forced"), after its retries above are spent.
+#   "continue" - leave the leg failed and unverified, then run the remaining legs anyway, treating
+#                the capped STOP as the agent's override to move on. The run still reaches a final
+#                answer, summary.json reports legs_unverified > 0, and task success stays false, so a
+#                guard that refused a correct leg costs a review rather than the whole run.
+#   "halt"     - abort the task on it, like every other failed leg.
+# Other end reasons (step_cap, time_cap, errors) always abort: those legs never claimed to be done.
+refusal_cap_action = "continue"
 
 [limits]
 # Standalone-agent limits. Both caps apply independently to each leg.
@@ -32,24 +57,32 @@ max_minutes = 40.0
 
 [environment]
 # Map artifacts used by graph navigation.
-map_dir = "overhaul/slamtest/output_runs/run_0724_164652"
+map_dir = "agent/mapping/output_runs/run_0724_164652"
 
 # Move only the agent back to its fixed spawn pose before the run.
-reset_start = false
+reset_start = true
 
 # Reset the entire store, including item and checkout state, before the run.
-restart_env = false
+restart_env = true
 
 # Optional service overrides. If omitted, environment variables and built-in defaults are used.
 # ws_uri = "ws://localhost:8080/commands"
 # ocr_url = "http://127.0.0.1:9100"
 
+# Deadline for an ordinary sandbox websocket command. WaitUntilReady keeps its separate startup
+# deadline because the simulator intentionally holds that request until reset has settled.
+sandbox_command_timeout = 10.0
+
 [output]
 # Optional standalone output locations. If omitted, the agent creates its normal timestamped run.
-# run_dir = "overhaul/runs/debug"
-# summary = "overhaul/runs/debug/summary.json"
+# run_dir = "agent/runs/debug"
+# summary = "agent/runs/debug/summary.json"
 
 [bench]
+# Whole-process launches allowed after a call exhausts [api_retry].max_attempts. Three requeues
+# permit four launches in total; the next exhaustion is recorded as api_retry_exhausted.
+max_api_requeues = 3
+
 # Prompt battery and attempts per prompt.
 prompts = "sari_bench/prompts/context_window_ablation.json"
 tries = 3
@@ -58,19 +91,27 @@ tries = 3
 time_limit = 120.0
 per_leg_minutes = 40.0
 
-# Coordinator and sandbox startup behavior. Zero startup timeout waits indefinitely.
+# Coordinator and sandbox startup behavior. Zero startup timeout waits indefinitely; an individual
+# parked lease request reconnects after lease_acquire_timeout and retries with capped backoff.
 coordinator = "ws://127.0.0.1:9000"
 sandbox_startup_timeout = 30.0
+lease_acquire_timeout = 30.0
+
+# Per-command sandbox deadline passed to every agent process in this battery. A timeout signals a
+# wedged player to the harness, which quarantines it and requeues the logical attempt.
+sandbox_command_timeout = 10.0
 
 # Optional battery destination. Without it, results use bench_runs/<timestamp>[_<name>].
+# Required when resuming a run (see `resume`)
 # output_dir = "bench_runs/my_ablation"
 name = ""
 
-# Resume requires output_dir to name an existing compatible battery.
+# Resume continues a run that was interrupted.
+# Requires output_dir to name an existing compatible battery.
 resume = false
 
-# Maximum parallel attempts. If omitted, concurrency tracks the registered sandbox fleet.
-# concurrency = 4
+# Maximum parallel attempts. If omitted, concurrency fills the registered sandbox fleet.
+concurrency = 5
 
 # Supplementary screenshot interval in seconds. Zero disables supplementary capture.
 capture_interval = 0.25
@@ -83,7 +124,9 @@ capture_interval = 0.25
 max_steps = 150
 arm = "graph"
 context_policy = "baseline"
-map_dir = "overhaul/slamtest/output_runs/run_0724_164652"
+map_dir = "agent/mapping/output_runs/run_0724_164652"
 # ocr_url = "http://127.0.0.1:9100"
 leg_retries = 1
 completion_guard = "vlm"
+# See [agent].refusal_cap_action above. Changing it makes a battery incompatible with a resume.
+refusal_cap_action = "continue"

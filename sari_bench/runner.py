@@ -5,9 +5,9 @@ agent subprocess against it, and hands it back - the coordinator resets it befor
 so no attempt inherits state from the one before it. By default the worker pool grows with the
 coordinator's sandbox fleet; ``--concurrency`` remains available as an explicit upper bound.
 
-Failures are contained per attempt: a crashed agent, an attempt that blows its time limit, or a
-sandbox that dies mid-run all record an outcome and move on. Only a sandbox death requeues the
-attempt, because that one is the harness's fault rather than the agent's.
+Failures are contained per attempt: a crashed agent or an attempt that blows its time limit records
+an outcome and moves on. Sandbox loss and exhaustion of the agent's transient API retry budget
+requeue the logical attempt because neither is evidence about agent quality.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -29,7 +30,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sari_bench import capture
-from sari_bench.client import CoordinatorClient, Lease, SandboxLost
+from sari_bench.client import (
+    DEFAULT_ACQUIRE_TIMEOUT_SECONDS,
+    CoordinatorClient,
+    Lease,
+    SandboxLost,
+)
 from sari_bench.protocol import DEFAULT_COORDINATOR_PORT, STATE_READY
 from sari_bench.watch import scan   # per-role token block parsing; pure filesystem/dict helpers
 from sari_bench.storage import (
@@ -42,13 +48,13 @@ from sari_bench.storage import (
     upsert_attempt_row,
     write_json_atomic,
 )
-from overhaul.vision.ocr_client import OcrUnavailable, check_ocr_health, resolve_ocr_url
+from agent.vision.ocr_client import OcrUnavailable, check_ocr_health, resolve_ocr_url
 from sari_runconfig import RunConfigError, load_run_config
-from overhaul.agent_core.context_policy import CONTEXT_POLICY_NAMES, resolve_context_policy
+from agent.agent_core.context_policy import CONTEXT_POLICY_NAMES, resolve_context_policy
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERHAUL_DIR = REPO_ROOT / "overhaul"
-ORCHESTRATOR_ENTRY = "orchestrator/subtask_agents.py"
+OVERHAUL_DIR = REPO_ROOT / "agent"
+ORCHESTRATOR_ENTRY = "run_agent.py"
 
 # Grace on top of the agent's own --max-minutes before the harness kills it. The agent's cap is
 # per leg, so a multi-leg task legitimately runs longer than one cap; this is the outer bound.
@@ -60,8 +66,18 @@ TERMINATE_GRACE_SECONDS = 20.0
 # An attempt whose sandbox died is retried this many times before being recorded as failed. Guards
 # against a permanently sick machine turning into an infinite requeue loop.
 MAX_SANDBOX_LOST_REQUEUES = 3
+DEFAULT_MAX_API_REQUEUES = 3
+DEFAULT_API_MAX_ATTEMPTS = 10
+API_RETRY_EXHAUSTED_SIGNAL = "api_retry_exhausted.json"
+API_RETRY_EXHAUSTED_PATH_ENV = "SARI_API_RETRY_EXHAUSTED_PATH"
+SANDBOX_FAULT_SIGNAL = "sandbox_fault.json"
+SANDBOX_FAULT_PATH_ENV = "SARI_SANDBOX_FAULT_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
 DEFAULT_CAPACITY_POLL_SECONDS = 1.0
+DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS = 10.0
+SANDBOX_COMMAND_TIMEOUT_ENV = "SARI_SANDBOX_COMMAND_TIMEOUT"
+MAX_LEASE_ACQUIRE_BACKOFF_SECONDS = 30.0
 
 
 class SandboxStartupError(RuntimeError):
@@ -74,6 +90,18 @@ class ResumeError(RuntimeError):
 
 class OcrPreflightError(RuntimeError):
     """The required central OCR service was unavailable before sandbox leasing."""
+
+
+class ApiRetriesExhausted(RuntimeError):
+    """The agent exhausted its transient OpenAI-compatible API retry budget."""
+
+
+class PromptAlreadySuccessful(RuntimeError):
+    """A durable sibling winner appeared while retry dispatch was waiting."""
+
+    def __init__(self, winner: dict[str, Any]) -> None:
+        super().__init__(str(winner.get("winning_attempt_key") or ALREADY_SUCCESSFUL))
+        self.winner = winner
 
 
 # Per-attempt manifest, written INTO the run dir before the agent is spawned. attempts.jsonl only
@@ -124,6 +152,19 @@ class Prompt:
     looking_for: str = ""
 
 
+@dataclass(order=True)
+class WorkItem:
+    """Priority queue entry; retries outrank fresh work and remain FIFO among themselves."""
+
+    priority: int
+    sequence: int
+    prompt_id: str = field(compare=False)
+    attempt: int = field(compare=False)
+    api_requeues: int = field(default=0, compare=False)
+    sandbox_requeues: int = field(default=0, compare=False)
+    logical_retry: bool = field(default=False, compare=False)
+
+
 @dataclass
 class AttemptResult:
     prompt_id: str
@@ -135,12 +176,17 @@ class AttemptResult:
     success: bool = False
     end_reason: str = ""
     sandbox_id: str = ""
+    sandbox_alias: str = ""
+    lease_alias: str = ""
     commands_uri: str = ""
     ocr_url: str = ""
     exit_code: int | None = None
     wall_seconds: float = 0.0
     run_dir: str = ""
     requeues: int = 0
+    api_requeues: int = 0
+    api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS
+    max_api_requeues: int = DEFAULT_MAX_API_REQUEUES
     error: str = ""
     winning_attempt_key: str = ""
     legs: dict[str, Any] = field(default_factory=dict)
@@ -150,16 +196,94 @@ class AttemptResult:
     tokens_in: int = 0
     tokens_out: int = 0
     llm_calls: int = 0
+    # Actual OpenAI-compatible HTTP sends. None means the attempt predates request metering (or
+    # ended before its first meter snapshot); measured zero remains a real zero.
+    api_calls: int | None = None
     # role -> {tokens_in, tokens_out, calls}, from the same source as the totals above. Empty for an
     # attempt whose agent predates per-role accounting; see scan.normalize_by_role on why that is
     # not zero-filled.
     tokens_by_role: dict[str, Any] = field(default_factory=dict)
 
 
+def materialize_already_successful(
+    *,
+    output_dir: Path,
+    prompt: Prompt,
+    attempt: int,
+    winner: dict[str, Any],
+    arm: str,
+    context_policy: str,
+    api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
+    max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
+    ocr_url: str = "",
+    requeues: int = 0,
+) -> AttemptResult | None:
+    """Idempotently archive one prior execution and materialize its cancelled logical try."""
+    run_dir = output_dir / prompt.id / f"try{attempt:02d}"
+    lock_path = run_dir.parent / f".try{attempt:02d}.materialize.lock"
+    with file_lock(lock_path):
+        existing = BenchmarkRunner._read_manifest(run_dir / ATTEMPT_MANIFEST)
+        if (
+            existing.get("state") == "finished"
+            and existing.get("end_reason") == ALREADY_SUCCESSFUL
+        ):
+            return None
+
+        BenchmarkRunner._rotate_run_dir(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ended_at = datetime.now().isoformat(timespec="seconds")
+        fields = BenchmarkRunner._cancellation_fields(winner)
+        _write_json_atomic(
+            run_dir / ATTEMPT_MANIFEST,
+            {
+                "run_id": uuid.uuid4().hex,
+                "prompt_id": prompt.id,
+                "prompt": prompt.prompt,
+                "family": prompt.family,
+                "looking_for": prompt.looking_for,
+                "attempt": attempt,
+                "arm": arm,
+                "context_policy": context_policy,
+                "api_max_attempts": api_max_attempts,
+                "max_api_requeues": max_api_requeues,
+                "ocr_url": ocr_url,
+                "run_dir": str(run_dir),
+                "state": "finished",
+                "outcome": "skipped",
+                "success": False,
+                "end_reason": ALREADY_SUCCESSFUL,
+                "pid": None,
+                "wall_seconds": 0.0,
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "finalized_at": ended_at,
+                **fields,
+            },
+        )
+        result = AttemptResult(
+            prompt_id=prompt.id,
+            attempt=attempt,
+            prompt=prompt.prompt,
+            family=prompt.family,
+            outcome="skipped",
+            context_policy=context_policy,
+            end_reason=ALREADY_SUCCESSFUL,
+            wall_seconds=0.0,
+            run_dir=str(run_dir),
+            requeues=requeues,
+            api_max_attempts=api_max_attempts,
+            max_api_requeues=max_api_requeues,
+            ocr_url=ocr_url,
+            winning_attempt_key=str(winner.get("winning_attempt_key") or ""),
+        )
+        upsert_attempt_row(output_dir, asdict(result))
+        return result
+
+
 def load_prompts(path: Path) -> list[Prompt]:
     """Reads a prompt battery.
 
-    Accepts the shape already used by ``overhaul/tests/decompose_battery.json`` - either a bare
+    Accepts the shape used by ``validation/fixtures/decomposition/decompose_battery.json`` - either a bare
     list or an object with a ``prompts`` key - so existing batteries work unchanged.
     """
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -208,24 +332,31 @@ class BenchmarkRunner:
         map_dir: str | None,
         leg_retries: int,
         completion_guard: str = "deterministic",
+        refusal_cap_action: str = "continue",
+        api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
+        max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
         context_policy: str = "baseline",
         per_leg_minutes: float | None = None,
         timeout_grace: float = DEFAULT_TIMEOUT_GRACE_SECONDS,
         sandbox_startup_timeout: float = 0.0,
+        lease_acquire_timeout: float = DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS,
+        sandbox_command_timeout: float | None = None,
         capture_interval: float = capture.DEFAULT_INTERVAL_SECONDS,
         capacity_poll_interval: float = DEFAULT_CAPACITY_POLL_SECONDS,
         python_executable: str | None = None,
         agent_entry: str = ORCHESTRATOR_ENTRY,
         agent_cwd: Path = OVERHAUL_DIR,
         work_items: list[tuple[str, int]] | None = None,
+        retry_work_items: bool = False,
         initialize_battery: bool = True,
         resume: bool = False,
         ocr_url: str | None = None,
         ocr_health_check: Callable[[str], dict[str, Any]] = check_ocr_health,
+        attempt_started_callback: Callable[[str, Path], None] | None = None,
     ) -> None:
         self.prompts = {prompt.id: prompt for prompt in prompts}
         self.coordinator_url = coordinator_url
-        # The agent subprocess runs with cwd=overhaul/, not the runner's cwd. Keep the attempt path
+        # The agent subprocess runs with cwd=agent/, not the runner's cwd. Keep the attempt path
         # absolute so --run-dir and the harness manifests always name the same directory.
         self.output_dir = output_dir.resolve()
         self.tries = tries
@@ -243,11 +374,39 @@ class BenchmarkRunner:
         self.context_policy = context_policy
         self.map_dir = map_dir
         self.leg_retries = leg_retries
-        if completion_guard not in {"deterministic", "vlm"}:
+        if completion_guard not in {"deterministic", "vlm", "none"}:
             raise ValueError(f"unsupported completion guard: {completion_guard!r}")
         self.completion_guard = completion_guard
+        if refusal_cap_action not in {"continue", "halt"}:
+            raise ValueError(f"unsupported refusal cap action: {refusal_cap_action!r}")
+        self.refusal_cap_action = refusal_cap_action
+        if api_max_attempts < 1:
+            raise ValueError("api_max_attempts must be at least 1")
+        if max_api_requeues < 0:
+            raise ValueError("max_api_requeues cannot be negative")
+        self.api_max_attempts = api_max_attempts
+        self.max_api_requeues = max_api_requeues
         self.timeout_grace = timeout_grace
         self.sandbox_startup_timeout = sandbox_startup_timeout
+        if lease_acquire_timeout <= 0:
+            raise ValueError("lease_acquire_timeout must be positive")
+        self.lease_acquire_timeout = lease_acquire_timeout
+        if sandbox_command_timeout is None:
+            inherited_timeout = os.environ.get(SANDBOX_COMMAND_TIMEOUT_ENV, "").strip()
+            if inherited_timeout:
+                try:
+                    sandbox_command_timeout = float(inherited_timeout)
+                except ValueError as error:
+                    raise ValueError(
+                        f"{SANDBOX_COMMAND_TIMEOUT_ENV} must be a positive finite number"
+                    ) from error
+            else:
+                sandbox_command_timeout = DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS
+        if not math.isfinite(sandbox_command_timeout) or sandbox_command_timeout <= 0:
+            raise ValueError("sandbox_command_timeout must be a positive finite number")
+        # Store the effective value rather than None so manifests, resumes, and watcher retries do
+        # not change behaviour if their parent process has a different environment.
+        self.sandbox_command_timeout = float(sandbox_command_timeout)
         self.capture_interval = capture_interval
         self.capacity_poll_interval = capacity_poll_interval
         self.python_executable = python_executable or sys.executable
@@ -256,17 +415,21 @@ class BenchmarkRunner:
         self.agent_entry = agent_entry
         self.agent_cwd = agent_cwd
         self.work_items = work_items
+        self.retry_work_items = retry_work_items
         self.initialize_battery = initialize_battery
         self.resume = resume
         self.ocr_url = resolve_ocr_url(ocr_url)
         self.ocr_health_check = ocr_health_check
+        self.attempt_started_callback = attempt_started_callback
 
-        self._queue: asyncio.Queue[tuple[str, int, int]] = asyncio.Queue()
+        self._queue: asyncio.PriorityQueue[WorkItem] = asyncio.PriorityQueue()
+        self._work_sequence = 0
         self._results: list[AttemptResult] = []
         self._results_lock = asyncio.Lock()
         self._started_at = 0.0
         self._peak_workers = 0
         self._prior_wall_seconds = 0.0
+        self._local_quarantines: set[str] = set()
 
     async def run(self) -> dict[str, Any]:
         if self.initialize_battery:
@@ -297,7 +460,17 @@ class BenchmarkRunner:
         for prompt_id, attempt in work_items:
             if prompt_id not in self.prompts:
                 raise ValueError(f"unknown work-item prompt: {prompt_id}")
-            self._queue.put_nowait((prompt_id, attempt, 0))
+            if self.retry_work_items:
+                winner = self._human_verified_winner(prompt_id)
+                if winner is not None:
+                    await self._record_skipped(prompt_id, attempt, 0, winner)
+                    continue
+            self._enqueue_work(
+                prompt_id,
+                attempt,
+                priority=0 if self.retry_work_items else 1,
+                logical_retry=self.retry_work_items,
+            )
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         total = self._queue.qsize()
@@ -341,6 +514,27 @@ class BenchmarkRunner:
             await asyncio.gather(*workers, return_exceptions=True)
 
         return self._write_summary()
+
+    def _enqueue_work(
+        self,
+        prompt_id: str,
+        attempt: int,
+        *,
+        priority: int,
+        api_requeues: int = 0,
+        sandbox_requeues: int = 0,
+        logical_retry: bool = False,
+    ) -> None:
+        self._queue.put_nowait(WorkItem(
+            priority=priority,
+            sequence=self._work_sequence,
+            prompt_id=prompt_id,
+            attempt=attempt,
+            api_requeues=api_requeues,
+            sandbox_requeues=sandbox_requeues,
+            logical_retry=logical_retry,
+        ))
+        self._work_sequence += 1
 
     @staticmethod
     def _payload_entries(path: Path) -> list[Path]:
@@ -450,7 +644,9 @@ class BenchmarkRunner:
         _log(
             f"resuming {self.output_dir}: {len(completed)} finished, {len(pending)} pending"
         )
-        return sorted(pending)
+        prompt_order = {prompt_id: index for index, prompt_id in enumerate(self.prompts)}
+        pending.sort(key=lambda key: (prompt_order[key[0]], key[1]))
+        return pending
 
     def _semantic_config(self) -> dict[str, Any]:
         return {
@@ -464,8 +660,12 @@ class BenchmarkRunner:
             "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
             "leg_retries": self.leg_retries,
             "completion_guard": self.completion_guard,
+            "refusal_cap_action": self.refusal_cap_action,
+            "api_max_attempts": self.api_max_attempts,
+            "max_api_requeues": self.max_api_requeues,
             "ocr_url": self.ocr_url,
             "timeout_grace_seconds": self.timeout_grace,
+            "sandbox_command_timeout_seconds": self.sandbox_command_timeout,
             "agent_entry": self.agent_entry,
             "agent_cwd": str(Path(self.agent_cwd).resolve()),
             "planned_attempts": len(self.prompts) * self.tries,
@@ -481,8 +681,17 @@ class BenchmarkRunner:
                 return "deterministic"
             if key == "context_policy" and key not in battery:
                 return "baseline"
+            # Batteries recorded before the option existed aborted the task on the refusal cap.
+            if key == "refusal_cap_action" and key not in battery:
+                return "halt"
             if key == "ocr_url" and key not in battery:
                 return resolve_ocr_url()
+            if key == "api_max_attempts" and key not in battery:
+                return DEFAULT_API_MAX_ATTEMPTS
+            if key == "max_api_requeues" and key not in battery:
+                return DEFAULT_MAX_API_REQUEUES
+            if key == "sandbox_command_timeout_seconds" and key not in battery:
+                return DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS
             return battery.get(key)
 
         mismatches = [
@@ -528,11 +737,22 @@ class BenchmarkRunner:
         )
         result.end_reason = str(manifest.get("end_reason") or result.end_reason)
         result.sandbox_id = str(manifest.get("sandbox_id") or "")
+        result.sandbox_alias = str(manifest.get("sandbox_alias") or "")
+        result.lease_alias = str(manifest.get("lease_alias") or "")
         result.commands_uri = str(manifest.get("commands_uri") or "")
         result.ocr_url = str(manifest.get("ocr_url") or self.ocr_url)
         result.wall_seconds = float(manifest.get("wall_seconds") or 0.0)
         result.run_dir = str(run_dir)
         result.requeues = int(manifest.get("requeues") or 0)
+        result.api_requeues = int(manifest.get("api_requeues") or 0)
+        result.api_max_attempts = int(
+            manifest.get("api_max_attempts") or self.api_max_attempts
+        )
+        result.max_api_requeues = int(
+            manifest.get("max_api_requeues")
+            if manifest.get("max_api_requeues") is not None
+            else self.max_api_requeues
+        )
         result.winning_attempt_key = str(manifest.get("winning_attempt_key") or "")
         return result
 
@@ -694,6 +914,7 @@ class BenchmarkRunner:
                             1
                             for sandbox in pool
                             if bool(sandbox.get("store_loaded", True))
+                            and not sandbox.get("quarantined")
                         )
                         desired = min(planned_attempts, capacity)
                         while len(workers) < desired:
@@ -730,7 +951,10 @@ class BenchmarkRunner:
         def pool_problem() -> str:
             if not last_pool:
                 return "none registered"
-            if not any(bool(sandbox.get("store_loaded", True)) for sandbox in last_pool):
+            if not any(
+                bool(sandbox.get("store_loaded", True)) and not sandbox.get("quarantined")
+                for sandbox in last_pool
+            ):
                 return "registered sandbox(es) have no store loaded"
             states: dict[str, int] = {}
             for sandbox in last_pool:
@@ -767,6 +991,7 @@ class BenchmarkRunner:
                 # Booting/Resetting members get the full startup window to become Ready.
                 if any(
                     bool(sandbox.get("store_loaded", True))
+                    and not sandbox.get("quarantined")
                     and (bool(sandbox.get("lease_id")) or sandbox.get("state") == STATE_READY)
                     for sandbox in last_pool
                 ):
@@ -782,6 +1007,181 @@ class BenchmarkRunner:
                     )
 
             await asyncio.sleep(min(1.0, max(0.0, remaining)))
+
+    async def _retry_fleet_status(self) -> str:
+        """Return a bounded, operator-readable fleet snapshot before a retry acquire."""
+        client = CoordinatorClient(self.coordinator_url)
+        try:
+            await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
+            pool = await asyncio.wait_for(client.pool(), timeout=self.lease_acquire_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - included in retry diagnostics
+            return f"fleet health check failed ({type(error).__name__}: {error})"
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+        ready = sum(
+            1
+            for sandbox in pool
+            if bool(sandbox.get("store_loaded", True))
+            and not sandbox.get("quarantined")
+            and sandbox.get("state") == STATE_READY
+            and not sandbox.get("lease_id")
+        )
+        leased = sum(1 for sandbox in pool if bool(sandbox.get("lease_id")))
+        unavailable = max(0, len(pool) - ready - leased)
+        return (
+            f"fleet has {len(pool)} registered sandbox(es): "
+            f"ready={ready}, leased={leased}, unavailable={unavailable}"
+        )
+
+    def _locally_quarantined(self, sandbox_id: str) -> bool:
+        """Read the battery denylist so sibling worker processes see faults immediately."""
+        if sandbox_id in self._local_quarantines:
+            return True
+        battery = self._read_manifest(self.output_dir / BATTERY_MANIFEST)
+        records = battery.get("quarantined_sandboxes") or {}
+        if isinstance(records, dict):
+            self._local_quarantines.update(str(key) for key in records)
+        elif isinstance(records, list):
+            self._local_quarantines.update(str(key) for key in records)
+        return sandbox_id in self._local_quarantines
+
+    def _record_local_quarantine(
+        self, lease: Lease, *, reason: str, source: str
+    ) -> None:
+        """Compatibility quarantine shared through battery.json for old coordinators."""
+        self._local_quarantines.add(lease.sandbox_id)
+        if not self.initialize_battery and not (self.output_dir / BATTERY_MANIFEST).exists():
+            return
+        with edit_json_locked(self.output_dir / BATTERY_MANIFEST) as battery:
+            records = battery.get("quarantined_sandboxes")
+            if not isinstance(records, dict):
+                records = {}
+            records[lease.sandbox_id] = {
+                "sandbox_alias": lease.sandbox_alias,
+                "reason": reason,
+                "source": source,
+                "quarantined_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            battery["quarantined_sandboxes"] = records
+
+    async def _acquire_sandbox(
+        self,
+        index: int,
+        prompt_id: str,
+        attempt: int,
+        run_dir: Path,
+        *,
+        is_retry: bool,
+    ) -> tuple[CoordinatorClient, Lease]:
+        """Acquire with bounded RPCs and capped backoff, reconnecting after every failure.
+
+        The overall wait remains open-ended so a temporarily unavailable fleet does not turn an
+        infrastructure retry into a scored agent failure. Each individual connect/acquire is
+        bounded, however, and retry acquisitions re-check the fleet on every pass.
+        """
+        failures = 0
+        while True:
+            fleet_status = await self._retry_fleet_status() if is_retry else ""
+            client = CoordinatorClient(self.coordinator_url)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=self.lease_acquire_timeout)
+                acquire_task = asyncio.create_task(
+                    client.acquire(
+                        timeout=self.lease_acquire_timeout,
+                        lease_alias=f"{prompt_id}/try{attempt:02d}",
+                    )
+                )
+                winner_task = (
+                    asyncio.create_task(self._wait_for_prompt_winner(prompt_id))
+                    if is_retry else None
+                )
+                try:
+                    if winner_task is None:
+                        lease = await acquire_task
+                    else:
+                        done, _pending = await asyncio.wait(
+                            {acquire_task, winner_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if winner_task in done and winner_task.result() is not None:
+                            acquire_task.cancel()
+                            await asyncio.gather(acquire_task, return_exceptions=True)
+                            await client.close()
+                            raise PromptAlreadySuccessful(winner_task.result())
+                        lease = await acquire_task
+                finally:
+                    if winner_task is not None and not winner_task.done():
+                        winner_task.cancel()
+                        await asyncio.gather(winner_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await client.close()
+                raise
+            except PromptAlreadySuccessful:
+                with contextlib.suppress(Exception):
+                    await client.close()
+                raise
+            except Exception as error:  # noqa: BLE001 - coordinator/fleet recovery loop
+                with contextlib.suppress(Exception):
+                    await client.close()
+                failures += 1
+                initial_backoff = max(0.1, self.capacity_poll_interval)
+                backoff = min(
+                    MAX_LEASE_ACQUIRE_BACKOFF_SECONDS,
+                    initial_backoff * (2 ** min(failures - 1, 10)),
+                )
+                detail = f"{type(error).__name__}: {error}"
+                if is_retry:
+                    _patch_json(
+                        run_dir / ATTEMPT_MANIFEST,
+                        {
+                            "retry_acquire_attempts": failures,
+                            "retry_wait_reason": fleet_status or detail,
+                            "retry_last_checked_at": datetime.now().isoformat(
+                                timespec="seconds"
+                            ),
+                        },
+                    )
+                suffix = f"; {fleet_status}" if fleet_status else ""
+                _log(
+                    f"[w{index}] {prompt_id} try {attempt}: sandbox acquire failed "
+                    f"({detail}); retrying in {backoff:g}s{suffix}"
+                )
+                if is_retry:
+                    try:
+                        winner = await asyncio.wait_for(
+                            self._wait_for_prompt_winner(prompt_id), timeout=backoff
+                        )
+                    except asyncio.TimeoutError:
+                        winner = None
+                    if winner is not None:
+                        raise PromptAlreadySuccessful(winner)
+                else:
+                    await asyncio.sleep(backoff)
+                continue
+            if self._locally_quarantined(lease.sandbox_id):
+                _log(
+                    f"[w{index}] {prompt_id} try {attempt}: skipped locally quarantined "
+                    f"{lease.sandbox_alias}; releasing and reacquiring"
+                )
+                with contextlib.suppress(Exception):
+                    await client.release(lease, outcome="locally_quarantined")
+                with contextlib.suppress(Exception):
+                    await client.close()
+                await asyncio.sleep(max(0.1, self.capacity_poll_interval))
+                continue
+            return client, lease
+
+    async def _wait_for_prompt_winner(self, prompt_id: str) -> dict[str, Any]:
+        while True:
+            winner = self._human_verified_winner(prompt_id)
+            if winner is not None:
+                return winner
+            await asyncio.sleep(min(0.1, max(0.01, self.capacity_poll_interval)))
 
     def _write_battery_manifest(self, planned_attempts: int) -> None:
         """Battery-level facts the watcher cannot infer from run dirs alone.
@@ -811,9 +1211,14 @@ class BenchmarkRunner:
                 "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
                 "leg_retries": self.leg_retries,
                 "completion_guard": self.completion_guard,
+                "refusal_cap_action": self.refusal_cap_action,
+                "api_max_attempts": self.api_max_attempts,
+                "max_api_requeues": self.max_api_requeues,
                 "ocr_url": self.ocr_url,
                 "timeout_grace_seconds": self.timeout_grace,
                 "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
+                "lease_acquire_timeout_seconds": self.lease_acquire_timeout,
+                "sandbox_command_timeout_seconds": self.sandbox_command_timeout,
                 "agent_entry": self.agent_entry,
                 "agent_cwd": str(Path(self.agent_cwd).resolve()),
                 "planned_attempts": planned_attempts,
@@ -838,14 +1243,67 @@ class BenchmarkRunner:
             index += 1
         run_dir.rename(aside)
         # The manifest inside still says "running"; correct it so the watcher shows an abandoned
-        # attempt rather than a live one that will never advance.
-        _patch_json(aside / ATTEMPT_MANIFEST, {"state": "requeued", "outcome": "requeued"})
+        # attempt rather than a live one that will never advance. That includes closing its clock:
+        # without a `wall_seconds` the dashboard has only a start to work from, and an elapsed
+        # measured against `now` climbs forever on a directory nothing will ever write to again.
+        ended = time.time()
+        manifest_path = aside / ATTEMPT_MANIFEST
+        started = _manifest_field(manifest_path, "started_epoch")
+        patch: dict[str, Any] = {
+            "state": "requeued",
+            "outcome": "requeued",
+            "pending_retry": False,
+            "ended_at": datetime.fromtimestamp(ended).isoformat(timespec="seconds"),
+        }
+        if _manifest_field(manifest_path, "wall_seconds") is None and isinstance(
+            started, (int, float)
+        ):
+            patch["wall_seconds"] = round(max(0.0, ended - float(started)), 1)
+        _patch_json(manifest_path, patch)
         _log(f"rotated a previous run dir aside: {aside.name}")
+
+    def _schedule_requeue(
+        self,
+        run_dir: Path,
+        *,
+        reason: str,
+        item: tuple[str, int, int, int],
+        wall_seconds: float,
+    ) -> None:
+        """Publish a logical retry before putting it back on the worker queue."""
+        queued_wall = time.time()
+        _patch_json(
+            run_dir / ATTEMPT_MANIFEST,
+            {
+                "state": "requeued",
+                "outcome": "requeued",
+                "pending_retry": True,
+                "requeue_reason": reason,
+                "retry_queued_at": datetime.fromtimestamp(queued_wall).isoformat(timespec="seconds"),
+                "retry_queued_epoch": round(queued_wall, 3),
+                "wall_seconds": round(max(0.0, wall_seconds), 1),
+                "ended_at": datetime.fromtimestamp(queued_wall).isoformat(timespec="seconds"),
+            },
+        )
+        prompt_id, attempt, api_requeues, sandbox_requeues = item
+        self._enqueue_work(
+            prompt_id,
+            attempt,
+            priority=0,
+            api_requeues=api_requeues,
+            sandbox_requeues=sandbox_requeues,
+            logical_retry=True,
+        )
 
     async def _worker(self, index: int) -> None:
         """One worker owns one coordinator connection, and therefore one lease at a time."""
         while True:
-            prompt_id, attempt, requeues = await self._queue.get()
+            item = await self._queue.get()
+            prompt_id = item.prompt_id
+            attempt = item.attempt
+            api_requeues = item.api_requeues
+            sandbox_requeues = item.sandbox_requeues
+            requeues = api_requeues + sandbox_requeues
             try:
                 winner = self._human_verified_winner(prompt_id)
                 if winner is not None:
@@ -855,7 +1313,14 @@ class BenchmarkRunner:
                         f"{winner['winning_attempt_key']} is human-verified successful"
                     )
                     continue
-                await self._run_attempt(index, prompt_id, attempt, requeues)
+                await self._run_attempt(
+                    index,
+                    prompt_id,
+                    attempt,
+                    api_requeues,
+                    sandbox_requeues,
+                    logical_retry=item.logical_retry,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - one bad attempt must not stop the battery
@@ -874,14 +1339,41 @@ class BenchmarkRunner:
             finally:
                 self._queue.task_done()
 
-    async def _run_attempt(self, index: int, prompt_id: str, attempt: int, requeues: int) -> None:
+    async def _run_attempt(
+        self,
+        index: int,
+        prompt_id: str,
+        attempt: int,
+        api_requeues: int,
+        sandbox_requeues: int,
+        *,
+        logical_retry: bool = False,
+    ) -> None:
         prompt = self.prompts[prompt_id]
+        requeues = api_requeues + sandbox_requeues
         run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
 
-        async with CoordinatorClient(self.coordinator_url) as client:
-            _log(f"[w{index}] {prompt_id} try {attempt}: waiting for a sandbox")
-            lease = await client.acquire()
-            _log(f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_id} ({lease.commands_uri})")
+        _log(f"[w{index}] {prompt_id} try {attempt}: waiting for a sandbox")
+        try:
+            client, lease = await self._acquire_sandbox(
+                index,
+                prompt_id,
+                attempt,
+                run_dir,
+                is_retry=logical_retry or requeues > 0,
+            )
+        except PromptAlreadySuccessful as successful:
+            await self._record_skipped(prompt_id, attempt, requeues, successful.winner)
+            _log(
+                f"[w{index}] {prompt_id} try {attempt}: retry withdrawn; "
+                f"{successful.winner['winning_attempt_key']} is human-verified successful"
+            )
+            return
+        try:
+            _log(
+                f"[w{index}] {prompt_id} try {attempt}: leased {lease.sandbox_alias} "
+                f"as {lease.lease_alias} ({lease.commands_uri})"
+            )
 
             # A winner can land while this worker is blocked in acquire(). Do not start an agent
             # merely because the work item was dequeued before the reviewer clicked success.
@@ -898,12 +1390,43 @@ class BenchmarkRunner:
 
             started = time.monotonic()
             try:
-                result = await self._spawn_agent(client, lease, prompt, attempt, run_dir)
+                result = await self._spawn_agent(
+                    client, lease, prompt, attempt, run_dir,
+                    api_requeues=api_requeues,
+                    sandbox_requeues=sandbox_requeues,
+                )
+            except ApiRetriesExhausted as exhausted:
+                # Endpoint availability is infrastructure state, not an agent result. Preserve the
+                # failed process as an archive and retry the same logical attempt after reset.
+                if api_requeues < self.max_api_requeues:
+                    self._schedule_requeue(
+                        run_dir,
+                        reason="api_retry_exhausted",
+                        item=(prompt_id, attempt, api_requeues + 1, sandbox_requeues),
+                        wall_seconds=time.monotonic() - started,
+                    )
+                    _log(
+                        f"[w{index}] {prompt_id} try {attempt}: {exhausted}; requeueing"
+                    )
+                    return
+                result = self._result_from_run_dir(
+                    prompt,
+                    attempt,
+                    run_dir,
+                    exit_code=None,
+                    outcome="api_retry_exhausted",
+                )
+                result.error = str(exhausted)
             except SandboxLost as lost:
                 # The machine went away, not the agent. Put the attempt back rather than scoring it.
-                if requeues < MAX_SANDBOX_LOST_REQUEUES:
+                if sandbox_requeues < MAX_SANDBOX_LOST_REQUEUES:
+                    self._schedule_requeue(
+                        run_dir,
+                        reason="sandbox_lost",
+                        item=(prompt_id, attempt, api_requeues, sandbox_requeues + 1),
+                        wall_seconds=time.monotonic() - started,
+                    )
                     _log(f"[w{index}] {prompt_id} try {attempt}: {lost}; requeueing")
-                    self._queue.put_nowait((prompt_id, attempt, requeues + 1))
                     return
                 result = AttemptResult(
                     prompt_id=prompt_id,
@@ -920,10 +1443,15 @@ class BenchmarkRunner:
                     await client.release(lease, outcome="done")
 
             result.sandbox_id = lease.sandbox_id
+            result.sandbox_alias = lease.sandbox_alias
+            result.lease_alias = lease.lease_alias
             result.commands_uri = lease.commands_uri
             result.ocr_url = self.ocr_url
             result.wall_seconds = round(time.monotonic() - started, 1)
             result.requeues = requeues
+            result.api_requeues = api_requeues
+            result.api_max_attempts = self.api_max_attempts
+            result.max_api_requeues = self.max_api_requeues
             result.run_dir = str(run_dir)
             if _manifest_field(run_dir / ATTEMPT_MANIFEST, "stop_reason") == ALREADY_SUCCESSFUL:
                 result.end_reason = ALREADY_SUCCESSFUL
@@ -943,6 +1471,11 @@ class BenchmarkRunner:
                     "wall_seconds": result.wall_seconds,
                     "tokens_in": result.tokens_in,
                     "tokens_out": result.tokens_out,
+                    "api_calls": result.api_calls,
+                    "requeues": result.requeues,
+                    "api_requeues": result.api_requeues,
+                    "api_max_attempts": self.api_max_attempts,
+                    "max_api_requeues": self.max_api_requeues,
                     "tokens_by_role": result.tokens_by_role,
                     "ended_at": datetime.now().isoformat(timespec="seconds"),
                 },
@@ -955,8 +1488,12 @@ class BenchmarkRunner:
             _log(
                 f"[w{index}] {prompt_id} try {attempt}: {result.outcome} "
                 f"(success={result.success}, {result.wall_seconds}s, "
-                f"tokens {result.tokens_in}in/{result.tokens_out}out)"
+                f"tokens {result.tokens_in}in/{result.tokens_out}out, "
+                f"api calls {result.api_calls if result.api_calls is not None else 'unknown'})"
             )
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
 
     async def _spawn_agent(
         self,
@@ -965,6 +1502,9 @@ class BenchmarkRunner:
         prompt: Prompt,
         attempt: int,
         run_dir: Path,
+        *,
+        api_requeues: int = 0,
+        sandbox_requeues: int = 0,
     ) -> AttemptResult:
         self._rotate_run_dir(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -978,13 +1518,19 @@ class BenchmarkRunner:
         # How the agent finds its sandbox. sim/env.py reads this for every command's default URI.
         env["SARI_WS_URI"] = lease.commands_uri
         env["SARI_OCR_URL"] = self.ocr_url
+        env["SARI_MAX_API_REQUEUES"] = str(self.max_api_requeues)
+        env[SANDBOX_COMMAND_TIMEOUT_ENV] = str(self.sandbox_command_timeout)
+        api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
+        env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)
+        sandbox_fault_signal = run_dir / SANDBOX_FAULT_SIGNAL
+        env[SANDBOX_FAULT_PATH_ENV] = str(sandbox_fault_signal)
         if self.map_dir:
             # Belt to --output-dir's braces. The flag only reaches the call sites the orchestrator
             # explicitly threads it through; this reaches every StoreMap() in the attempt's process
             # (nav/store_map.default_output_dir reads it), so no helper can silently fall back to
-            # the frozen slamtest/output - which in this checkout has no topology_final_shelf.json
+            # the frozen mapping/output - which in this checkout has no topology_final_shelf.json
             # and used to take every attempt down in ~2s as a bare `agent_error`.
-            # Absolute because the agent runs with cwd=overhaul/.
+            # Absolute because the agent runs with cwd=agent/.
             env["SARI_MAP_DIR"] = str(Path(self.map_dir).resolve())
 
         timeout = self.time_limit_minutes * 60.0 + self.timeout_grace
@@ -1002,10 +1548,17 @@ class BenchmarkRunner:
                 "arm": self.arm,
                 "context_policy": self.context_policy,
                 "completion_guard": self.completion_guard,
+                "api_max_attempts": self.api_max_attempts,
+                "max_api_requeues": self.max_api_requeues,
+                "api_requeues": api_requeues,
+                "sandbox_requeues": sandbox_requeues,
                 "ocr_url": self.ocr_url,
+                "sandbox_command_timeout": self.sandbox_command_timeout,
                 "sandbox_id": lease.sandbox_id,
+                "sandbox_alias": lease.sandbox_alias,
                 "commands_uri": lease.commands_uri,
                 "lease_id": getattr(lease, "lease_id", ""),
+                "lease_alias": lease.lease_alias,
                 "run_dir": str(run_dir),
                 "state": "starting",
                 "pid": None,
@@ -1043,6 +1596,9 @@ class BenchmarkRunner:
                     "process_start_ticks": self._process_start_ticks(process.pid),
                 },
             )
+            if self.attempt_started_callback is not None:
+                with contextlib.suppress(Exception):
+                    self.attempt_started_callback(f"{prompt.id}/try{attempt:02d}", run_dir)
 
             # Close the last publication race: success may have been reviewed after the pre-spawn
             # check, or the watcher may have stamped this starting manifest before it had a PID to
@@ -1057,6 +1613,12 @@ class BenchmarkRunner:
 
             wait_task = asyncio.create_task(process.wait())
             lost_task = asyncio.create_task(client.wait_for_sandbox_lost(lease))
+            api_retry_task = asyncio.create_task(
+                self._wait_for_path_or_exit(process, api_retry_signal)
+            )
+            sandbox_fault_task = asyncio.create_task(
+                self._wait_for_path_or_exit(process, sandbox_fault_signal)
+            )
             capture_task = (
                 asyncio.create_task(
                     self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
@@ -1067,7 +1629,7 @@ class BenchmarkRunner:
 
             try:
                 done, pending = await asyncio.wait(
-                    {wait_task, lost_task},
+                    {wait_task, lost_task, api_retry_task, sandbox_fault_task},
                     timeout=timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -1090,9 +1652,45 @@ class BenchmarkRunner:
                     await capture_task
                 raise
             finally:
-                for task in (wait_task, lost_task):
+                for task in (wait_task, lost_task, api_retry_task, sandbox_fault_task):
                     if not task.done():
                         task.cancel()
+
+            # Like the API signal check below, inspect the path too so an agent that writes and
+            # exits in one scheduler slice cannot turn an infrastructure fault into agent_error.
+            if sandbox_fault_signal.exists():
+                await self._kill(process)
+                if capture_task is not None:
+                    await capture_task
+                reason = self._sandbox_fault_message(sandbox_fault_signal)
+                source = f"{prompt.id}/try{attempt:02d}"
+                self._record_local_quarantine(lease, reason=reason, source=source)
+                coordinator_quarantined = False
+                try:
+                    await client.quarantine(lease, reason=reason, source=source)
+                    coordinator_quarantined = True
+                except Exception as error:  # old coordinator: battery denylist remains authoritative
+                    _log(
+                        f"{source}: coordinator quarantine unavailable ({error}); "
+                        f"using battery-local quarantine for {lease.sandbox_alias}"
+                    )
+                _patch_json(
+                    manifest_path,
+                    {
+                        "sandbox_fault": reason,
+                        "sandbox_quarantined": coordinator_quarantined,
+                        "local_quarantine": not coordinator_quarantined,
+                    },
+                )
+                raise SandboxLost(lease.sandbox_id, f"quarantined: {reason}")
+
+            # Check the file itself as well as the watcher task. This closes the race where the
+            # agent writes the signal immediately before exiting and process.wait() wins the loop.
+            if api_retry_signal.exists():
+                await self._kill(process)
+                if capture_task is not None:
+                    await capture_task
+                raise ApiRetriesExhausted(self._api_retry_exhaustion_message(api_retry_signal))
 
             if lost_task in done:
                 await self._kill(process)
@@ -1132,6 +1730,46 @@ class BenchmarkRunner:
                 _manifest_field(run_dir / ATTEMPT_MANIFEST, "winning_attempt_key") or ""
             )
         return result
+
+    @staticmethod
+    async def _wait_for_path_or_exit(
+        process: asyncio.subprocess.Process, path: Path
+    ) -> bool:
+        """Return promptly when an attempt-local signal appears or its process exits."""
+        while process.returncode is None:
+            if path.exists():
+                return True
+            await asyncio.sleep(0.1)
+        return path.exists()
+
+    @staticmethod
+    def _api_retry_exhaustion_message(path: Path) -> str:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "transient API retry budget exhausted"
+        attempts = payload.get("attempts")
+        call_name = payload.get("call_name") or "model_call"
+        failure_kind = payload.get("failure_kind") or "unknown"
+        error_type = payload.get("error_type") or "API error"
+        error = payload.get("error") or "transient endpoint failure"
+        prefix = f"transient API retry budget exhausted after {attempts} attempts" if attempts else (
+            "transient API retry budget exhausted"
+        )
+        return (
+            f"{prefix} (call={call_name}, failure_kind={failure_kind}, "
+            f"{error_type}: {error})"
+        )
+
+    @staticmethod
+    def _sandbox_fault_message(path: Path) -> str:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "sandbox protocol fault"
+        code = str(payload.get("code") or "sandbox_protocol_fault")
+        message = str(payload.get("message") or "sandbox protocol fault")
+        return f"{code}: {message}"[:240]
 
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""
@@ -1199,51 +1837,21 @@ class BenchmarkRunner:
     ) -> None:
         """Materialises a queued/non-spawned try as a real terminal attempt."""
         prompt = self.prompts[prompt_id]
-        run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
-        self._rotate_run_dir(run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        ended_at = datetime.now().isoformat(timespec="seconds")
-        fields = self._cancellation_fields(winner)
-        _write_json_atomic(
-            run_dir / ATTEMPT_MANIFEST,
-            {
-                "run_id": uuid.uuid4().hex,
-                "prompt_id": prompt.id,
-                "prompt": prompt.prompt,
-                "family": prompt.family,
-                "looking_for": prompt.looking_for,
-                "attempt": attempt,
-                "arm": self.arm,
-                "context_policy": self.context_policy,
-                "ocr_url": self.ocr_url,
-                "run_dir": str(run_dir),
-                "state": "finished",
-                "outcome": "skipped",
-                "success": False,
-                "end_reason": ALREADY_SUCCESSFUL,
-                "pid": None,
-                "wall_seconds": 0.0,
-                "started_at": ended_at,
-                "ended_at": ended_at,
-                **fields,
-            },
+        result = materialize_already_successful(
+            output_dir=self.output_dir,
+            prompt=prompt,
+            attempt=attempt,
+            winner=winner,
+            arm=self.arm,
+            context_policy=self.context_policy,
+            api_max_attempts=self.api_max_attempts,
+            max_api_requeues=self.max_api_requeues,
+            ocr_url=self.ocr_url,
+            requeues=requeues,
         )
-        await self._record(
-            AttemptResult(
-                prompt_id=prompt.id,
-                attempt=attempt,
-                prompt=prompt.prompt,
-                family=prompt.family,
-                outcome="skipped",
-                end_reason=ALREADY_SUCCESSFUL,
-                wall_seconds=0.0,
-                run_dir=str(run_dir),
-                requeues=requeues,
-                ocr_url=self.ocr_url,
-                winning_attempt_key=str(winner.get("winning_attempt_key") or ""),
-            )
-        )
-        _patch_json(run_dir / ATTEMPT_MANIFEST, {"finalized_at": ended_at})
+        if result is None:
+            return
+        await self._record(result)
 
     async def _capture_until_exit(
         self,
@@ -1296,6 +1904,10 @@ class BenchmarkRunner:
             str(self.leg_retries),
             "--completion-guard",
             self.completion_guard,
+            "--refusal-cap-action",
+            self.refusal_cap_action,
+            "--api-max-attempts",
+            str(self.api_max_attempts),
             "--ws-uri",
             lease.commands_uri,
             "--ocr-url",
@@ -1303,8 +1915,8 @@ class BenchmarkRunner:
         ]
         if self.map_dir:
             # Resolved, for the same reason SARI_MAP_DIR is (see _spawn_agent): --map-dir is given
-            # relative to the repo root, but the agent runs with cwd=overhaul/, so handing the flag
-            # over verbatim points it at overhaul/<map-dir> and StoreMap dies on its first load.
+            # relative to the repo root, but the agent runs with cwd=agent/, so handing the flag
+            # over verbatim points it at agent/<map-dir> and StoreMap dies on its first load.
             command += ["--output-dir", str(Path(self.map_dir).resolve())]
         return command
 
@@ -1409,6 +2021,9 @@ class BenchmarkRunner:
 
         result.tokens_in = int(source.get("tokens_in") or 0)
         result.tokens_out = int(source.get("tokens_out") or 0)
+        result.api_calls = (
+            int(source.get("api_calls") or 0) if source.get("api_calls") is not None else None
+        )
         result.tokens_by_role = scan.normalize_by_role(source.get("by_role"))
         if not result.llm_calls:
             result.llm_calls = int(source.get("calls") or 0)
@@ -1416,6 +2031,8 @@ class BenchmarkRunner:
     async def _record(self, result: AttemptResult) -> None:
         async with self._results_lock:
             result.context_policy = self.context_policy
+            result.api_max_attempts = self.api_max_attempts
+            result.max_api_requeues = self.max_api_requeues
             self._results.append(result)
             # Written incrementally and atomically so an interrupted battery remains usable, while
             # one logical prompt/attempt slot always has exactly one canonical row.
@@ -1455,12 +2072,17 @@ class BenchmarkRunner:
                     "sandboxes": [],
                     "tokens_in": 0,
                     "tokens_out": 0,
+                    "api_calls": 0,
+                    "api_calls_measured_attempts": 0,
                 },
             )
             row["attempts"] += 1
             row["successes"] += int(result.success)
             row["tokens_in"] += result.tokens_in
             row["tokens_out"] += result.tokens_out
+            if result.api_calls is not None:
+                row["api_calls"] += result.api_calls
+                row["api_calls_measured_attempts"] += 1
             row["outcomes"][result.outcome] = row["outcomes"].get(result.outcome, 0) + 1
             if result.end_reason:
                 row["end_reasons"][result.end_reason] = row["end_reasons"].get(result.end_reason, 0) + 1
@@ -1473,19 +2095,32 @@ class BenchmarkRunner:
             # sandbox-lost requeues and --only are in play - the totals alone don't compare.
             row["tokens_in_avg"] = round(row["tokens_in"] / row["attempts"]) if row["attempts"] else 0
             row["tokens_out_avg"] = round(row["tokens_out"] / row["attempts"]) if row["attempts"] else 0
+            row["api_calls_coverage"] = {
+                "known": row["api_calls_measured_attempts"],
+                "total": row["attempts"],
+            }
 
         total_in = sum(result.tokens_in for result in results)
         total_out = sum(result.tokens_out for result in results)
+        metered_api_calls = [result.api_calls for result in results if result.api_calls is not None]
         # Battery-wide cost per reasoner: the number an ablation compares across arms. Attempts that
         # recorded no roles simply contribute nothing here, so this can total less than `tokens_in`
         # above - which is why the two are kept as separate lines rather than one being derived.
-        tokens_by_role: dict[str, dict[str, int]] = {}
+        tokens_by_role: dict[str, dict[str, Any]] = {}
+        role_api_coverage: dict[str, dict[str, int]] = {}
         for result in results:
             for name, row in (result.tokens_by_role or {}).items():
                 into = tokens_by_role.setdefault(
-                    name, {"tokens_in": 0, "tokens_out": 0, "calls": 0})
-                for field_name in into:
+                    name, {"tokens_in": 0, "tokens_out": 0, "calls": 0, "api_calls": 0})
+                for field_name in ("tokens_in", "tokens_out", "calls"):
                     into[field_name] += int(row.get(field_name) or 0)
+                coverage = role_api_coverage.setdefault(name, {"known": 0, "total": 0})
+                coverage["total"] += 1
+                if "api_calls" in row:
+                    into["api_calls"] += int(row.get("api_calls") or 0)
+                    coverage["known"] += 1
+        for name, row in tokens_by_role.items():
+            row["api_calls_coverage"] = role_api_coverage[name]
         summary = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "wall_seconds": round(
@@ -1502,11 +2137,15 @@ class BenchmarkRunner:
             "max_steps": self.max_steps,
             "arm": self.arm,
             "context_policy": self.context_policy,
+            "api_max_attempts": self.api_max_attempts,
+            "max_api_requeues": self.max_api_requeues,
             "total_attempts": len(results),
             "total_successes": sum(1 for r in results if r.success),
             "tokens_in": total_in,
             "tokens_out": total_out,
             "tokens_total": total_in + total_out,
+            "api_calls": sum(metered_api_calls),
+            "api_calls_coverage": {"known": len(metered_api_calls), "total": len(results)},
             "tokens_by_role": {name: tokens_by_role[name]
                                for name in scan.sorted_roles(tokens_by_role)},
             "llm_calls": sum(result.llm_calls for result in results),
@@ -1542,6 +2181,9 @@ async def async_main(argv: list[str] | None = None) -> int:
     def configured(key: str, fallback: Any = None) -> Any:
         return config.get("bench", key, fallback) if config else fallback
 
+    def api_configured(key: str, fallback: Any = None) -> Any:
+        return config.get("api_retry", key, fallback) if config else fallback
+
     parser = argparse.ArgumentParser(description="Run a prompt battery across a sandbox fleet.")
     parser.add_argument(
         "--config",
@@ -1576,6 +2218,23 @@ async def async_main(argv: list[str] | None = None) -> int:
         type=float,
         default=configured("sandbox_startup_timeout", 0.0),
         help="Seconds to wait for a usable registered sandbox before failing (0 waits indefinitely).",
+    )
+    parser.add_argument(
+        "--lease-acquire-timeout",
+        type=float,
+        default=configured(
+            "lease_acquire_timeout", DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS
+        ),
+        help="Seconds before a parked sandbox lease request reconnects and retries.",
+    )
+    parser.add_argument(
+        "--sandbox-command-timeout",
+        type=float,
+        default=configured("sandbox_command_timeout"),
+        help="Seconds an ordinary sandbox command may go unanswered before the agent treats the "
+             "sandbox as wedged, quarantines it, and requeues the attempt (default: sim.env's "
+             "own default, currently 10s - sandboxes run on the same local network as the agent, "
+             "so a live one answers in well under that).",
     )
     parser.add_argument("--output-dir", type=Path,
                         default=Path(configured("output_dir"))
@@ -1622,7 +2281,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         help="named context-window policy passed to every agent attempt",
     )
     parser.add_argument("--map-dir", default=configured("map_dir"),
-                        help="slamtest output dir the agent loads its map from.")
+                        help="mapping output dir the agent loads its map from.")
     parser.add_argument(
         "--ocr-url",
         default=configured("ocr_url"),
@@ -1631,10 +2290,30 @@ async def async_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--leg-retries", type=int, default=configured("leg_retries", 1))
     parser.add_argument(
+        "--api-max-attempts",
+        type=int,
+        default=api_configured("max_attempts", DEFAULT_API_MAX_ATTEMPTS),
+        help="total attempts per OpenAI-compatible model call, including the initial request",
+    )
+    parser.add_argument(
+        "--max-api-requeues",
+        type=int,
+        default=configured("max_api_requeues", DEFAULT_MAX_API_REQUEUES),
+        help="whole-process requeues after one model call exhausts its attempt budget",
+    )
+    parser.add_argument(
         "--completion-guard",
-        choices=["deterministic", "vlm"],
+        choices=["deterministic", "vlm", "none"],
         default=configured("completion_guard", "deterministic"),
-        help="Pickup completion guard passed to the agent (default deterministic).",
+        help="Completion verification passed to the agent; none accepts STOP without "
+             "verification (default deterministic).",
+    )
+    parser.add_argument(
+        "--refusal-cap-action",
+        choices=["continue", "halt"],
+        default=configured("refusal_cap_action", "continue"),
+        help="what an exhausted refusal cap does to the attempt, after leg retries: continue "
+             "(default) runs the remaining legs with the leg left unverified, halt aborts.",
     )
     args = parser.parse_args(argv)
 
@@ -1652,8 +2331,18 @@ async def async_main(argv: list[str] | None = None) -> int:
         parser.error("--concurrency must be at least 1")
     if args.sandbox_startup_timeout < 0:
         parser.error("--sandbox-startup-timeout cannot be negative")
+    if args.lease_acquire_timeout <= 0:
+        parser.error("--lease-acquire-timeout must be positive")
+    if args.sandbox_command_timeout is not None and (
+        not math.isfinite(args.sandbox_command_timeout) or args.sandbox_command_timeout <= 0
+    ):
+        parser.error("--sandbox-command-timeout must be a positive finite number")
     if args.capture_interval < 0:
         parser.error("--capture-interval cannot be negative")
+    if args.api_max_attempts < 1:
+        parser.error("--api-max-attempts must be at least 1")
+    if args.max_api_requeues < 0:
+        parser.error("--max-api-requeues cannot be negative")
     if args.resume and args.output_dir is None:
         parser.error("--resume requires an explicit --output-dir")
     if args.map_dir:
@@ -1693,8 +2382,13 @@ async def async_main(argv: list[str] | None = None) -> int:
         map_dir=args.map_dir,
         leg_retries=max(0, args.leg_retries),
         completion_guard=args.completion_guard,
+        refusal_cap_action=args.refusal_cap_action,
+        api_max_attempts=args.api_max_attempts,
+        max_api_requeues=args.max_api_requeues,
         ocr_url=args.ocr_url,
         sandbox_startup_timeout=args.sandbox_startup_timeout,
+        lease_acquire_timeout=args.lease_acquire_timeout,
+        sandbox_command_timeout=args.sandbox_command_timeout,
         capture_interval=args.capture_interval,
         resume=args.resume,
     )

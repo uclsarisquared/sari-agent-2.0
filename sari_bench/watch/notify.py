@@ -49,7 +49,13 @@ _BLUE = 0x4F7FA9
 # Every finish is announced, successes included. This reverses an earlier decision to post failures
 # only: back then a success was a bare line of metrics, which really was noise at 3 tries x 20 prompts.
 # Now each message carries the attempt's replay, and a clip of a win is worth watching too.
-_HARNESS_FAILURES = {"agent_error", "harness_timeout", "sandbox_lost", "harness_error"}
+_HARNESS_FAILURES = {
+    "agent_error",
+    "api_retry_exhausted",
+    "harness_timeout",
+    "sandbox_lost",
+    "harness_error",
+}
 
 
 class Discord:

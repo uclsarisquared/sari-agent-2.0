@@ -1,6 +1,6 @@
 """Runner tests: the full lease -> spawn -> release cycle against a stub agent.
 
-The stub stands in for orchestrator/subtask_agents.py (importing the real one pulls the whole model
+The stub stands in for run_agent.py (importing the real one pulls the whole model
 stack). It writes the same summary.json the orchestrator does, so the result-folding path is
 exercised for real. What is being pinned down:
 
@@ -23,6 +23,7 @@ import signal
 import socket
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +35,7 @@ from sari_bench import capture
 from sari_bench.runner import (
     BenchmarkRunner,
     OcrPreflightError,
+    ORCHESTRATOR_ENTRY,
     Prompt,
     ResumeError,
     load_prompts,
@@ -41,6 +43,7 @@ from sari_bench.runner import (
 from sari_bench.tests.test_coordinator import FakeSandbox
 from sari_bench.watch.notify import Discord
 from sari_bench.watch.server import WatchState
+from sari_bench.watch import scan
 
 # Records its own liveness window so the test can prove two agents overlapped (or did not), and
 # honours the run-dir contract the runner reads results back out of.
@@ -59,14 +62,27 @@ with open(os.path.join(run_dir, "liveness.json"), "w") as f:
 # The real agent's token_meter rewrites this every few seconds, so it exists even for an attempt
 # that never reaches summary.json.
 with open(os.path.join(run_dir, "tokens.json"), "w") as f:
-    json.dump({"tokens_in": 1200, "tokens_out": 300, "calls": 4,
-               "by_role": {"actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2},
-                           "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2}}}, f)
+    json.dump({"tokens_in": 1200, "tokens_out": 300, "calls": 4, "api_calls": 5,
+               "by_role": {"actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2,
+                                      "api_calls": 3},
+                           "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2,
+                                      "api_calls": 2}}}, f)
 
 mode = os.environ.get("STUB_MODE", "ok")
 if mode == "crash":
     sys.exit(3)
 if mode == "hang":
+    time.sleep(600)
+if mode == "api_retry_exhausted":
+    with open(os.environ["SARI_API_RETRY_EXHAUSTED_PATH"], "w") as f:
+        json.dump({"attempts": 10, "error_type": "TimeoutError",
+                   "error": "server stayed down", "call_name": "semantic_reasoning",
+                   "failure_kind": "timeout"}, f)
+    time.sleep(600)
+if mode == "sandbox_fault" and "51001" in os.environ.get("SARI_WS_URI", ""):
+    with open(os.environ["SARI_SANDBOX_FAULT_PATH"], "w") as f:
+        json.dump({"code": "lidar_protocol_nonbinary",
+                   "message": "RequestLidarScan returned a text frame"}, f)
     time.sleep(600)
 if mode == "cancel_siblings" and task == "winner prompt" and not run_dir.endswith("try01"):
     time.sleep(600)
@@ -76,17 +92,24 @@ with open(os.path.join(run_dir, "summary.json"), "w") as f:
     json.dump({"task": task, "success": True, "legs_planned": 1, "legs_completed": 1,
                "response": "Done — the requested task was completed.",
                "response_source": "model",
-               "llm_calls": 6,
+               "llm_calls": 6, "api_calls": 8,
                "tokens_in": 2000, "tokens_out": 500,
                "tokens": {"tokens_in": 2000, "tokens_out": 500, "calls": 6,
-                          "by_role": {"actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4},
-                                      "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2}}},
+                          "api_calls": 8,
+                          "by_role": {"actor": {"tokens_in": 1400, "tokens_out": 350,
+                                                  "calls": 4, "api_calls": 5},
+                                      "guard": {"tokens_in": 600, "tokens_out": 150,
+                                                  "calls": 2, "api_calls": 3}}},
                "legs": [{"end_reason": "halt_granted", "success": True,
-                         "tokens_in": 2000, "tokens_out": 500}]}, f)
+                         "tokens_in": 2000, "tokens_out": 500, "api_calls": 8}]}, f)
 with open(os.path.join(run_dir, "liveness.json"), "r+") as f:
     data = json.load(f); data["end"] = time.time()
     f.seek(0); json.dump(data, f); f.truncate()
 '''
+
+
+def test_default_agent_entry_uses_the_public_launcher() -> None:
+    assert ORCHESTRATOR_ENTRY == "run_agent.py"
 
 
 async def _start_coordinator() -> tuple[Coordinator, str]:
@@ -160,6 +183,32 @@ def test_load_prompts_accepts_the_battery_schema() -> None:
     print("ok  prompt batteries load in every documented shape")
 
 
+def test_automatic_retries_outrank_fresh_work_fifo() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id=name, prompt=name) for name in ("api", "lost", "fresh-a", "fresh-b")],
+            workspace,
+        )
+        runner._enqueue_work("fresh-a", 1, priority=1)
+        runner._enqueue_work("fresh-b", 1, priority=1)
+        for prompt_id, reason in (("api", "api_retry_exhausted"), ("lost", "sandbox_lost")):
+            run_dir = runner.output_dir / prompt_id / "try01"
+            run_dir.mkdir(parents=True)
+            (run_dir / "attempt.json").write_text("{}", encoding="utf-8")
+            runner._schedule_requeue(
+                run_dir,
+                reason=reason,
+                item=(prompt_id, 1, int(prompt_id == "api"), int(prompt_id == "lost")),
+                wall_seconds=3.0,
+            )
+
+        ordered = [runner._queue.get_nowait().prompt_id for _ in range(4)]
+        assert ordered == ["api", "lost", "fresh-a", "fresh-b"], ordered
+    print("ok  API and sandbox-loss retries outrank fresh work and remain FIFO")
+
+
 def test_completion_guard_is_threaded_into_agent_command_and_battery_config() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
@@ -169,6 +218,9 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
             workspace,
             completion_guard="vlm",
             context_policy="a5",
+            api_max_attempts=6,
+            max_api_requeues=2,
+            sandbox_command_timeout=17.0,
         )
         lease = type("LeaseStub", (), {"commands_uri": "ws://127.0.0.1:51001/commands"})()
         command = runner._agent_command(
@@ -176,18 +228,47 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         index = command.index("--completion-guard")
         assert command[index + 1] == "vlm", command
         assert runner._semantic_config()["completion_guard"] == "vlm"
+        retry_index = command.index("--api-max-attempts")
+        assert command[retry_index + 1] == "6"
+        assert runner._semantic_config()["api_max_attempts"] == 6
+        assert runner._semantic_config()["max_api_requeues"] == 2
         policy_index = command.index("--context-policy")
         assert command[policy_index + 1] == "a5"
         assert runner._semantic_config()["context_policy"] == "a5"
         ocr_index = command.index("--ocr-url")
         assert command[ocr_index + 1] == "http://127.0.0.1:9100"
         assert runner._semantic_config()["ocr_url"] == "http://127.0.0.1:9100"
+        assert runner._semantic_config()["sandbox_command_timeout_seconds"] == 17.0
         runner.output_dir.mkdir(parents=True)
         runner._write_battery_manifest(1)
         battery = json.loads((runner.output_dir / "battery.json").read_text())
         assert battery["completion_guard"] == "vlm"
         assert battery["context_policy"] == "a5"
+        assert battery["api_max_attempts"] == 6
+        assert battery["max_api_requeues"] == 2
         assert battery["ocr_url"] == "http://127.0.0.1:9100"
+        assert battery["sandbox_command_timeout_seconds"] == 17.0
+
+        changed_timeout = runner._semantic_config()
+        changed_timeout["sandbox_command_timeout_seconds"] = 18.0
+        try:
+            runner._validate_resume_config(changed_timeout)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("a battery resumed with a different sandbox command timeout")
+
+        disabled = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p", prompt="pick it up")],
+            workspace,
+            completion_guard="none",
+        )
+        disabled_command = disabled._agent_command(
+            disabled.prompts["p"], lease, workspace / "runs" / "p" / "try02")
+        disabled_index = disabled_command.index("--completion-guard")
+        assert disabled_command[disabled_index + 1] == "none"
+        assert disabled._semantic_config()["completion_guard"] == "none"
 
         # A legacy battery without this field means deterministic, never an implicit VLM switch.
         legacy = runner._semantic_config()
@@ -210,8 +291,56 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         legacy = deterministic._semantic_config()
         legacy.pop("completion_guard")
         legacy.pop("context_policy")
+        legacy.pop("sandbox_command_timeout_seconds")
         deterministic._validate_resume_config(legacy)
     print("ok  completion guard reaches the agent command and durable battery config")
+
+
+def test_refusal_cap_action_is_threaded_and_resume_checked() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p", prompt="pick it up")],
+            workspace,
+            refusal_cap_action="halt",
+        )
+        lease = type("LeaseStub", (), {"commands_uri": "ws://127.0.0.1:51001/commands"})()
+        command = runner._agent_command(
+            runner.prompts["p"], lease, workspace / "runs" / "p" / "try01")
+        index = command.index("--refusal-cap-action")
+        assert command[index + 1] == "halt", command
+        assert runner._semantic_config()["refusal_cap_action"] == "halt"
+
+        # The default is continue, and a battery predating the option ran with halt semantics: a
+        # resume must refuse rather than silently switch what a refusal cap does to the attempt.
+        second_workspace = workspace / "continuing"
+        second_workspace.mkdir()
+        continuing = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p", prompt="pick it up")],
+            second_workspace,
+            refusal_cap_action="continue",
+        )
+        legacy = continuing._semantic_config()
+        legacy.pop("refusal_cap_action")
+        try:
+            continuing._validate_resume_config(legacy)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("a legacy halting battery resumed as continue")
+
+        bad_workspace = workspace / "bad"
+        bad_workspace.mkdir()
+        try:
+            _runner("ws://127.0.0.1:1", [Prompt(id="p", prompt="x")],
+                    bad_workspace, refusal_cap_action="skip")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unsupported refusal cap action was accepted")
+    print("ok  refusal cap action reaches the agent command and is resume-checked")
 
 
 async def test_ocr_preflight_fails_before_coordinator_or_lease() -> None:
@@ -220,7 +349,7 @@ async def test_ocr_preflight_fails_before_coordinator_or_lease() -> None:
         reached_coordinator = False
 
         def fail(_url):
-            from overhaul.vision.ocr_client import OcrUnavailable
+            from agent.vision.ocr_client import OcrUnavailable
 
             raise OcrUnavailable("OCR is down")
 
@@ -492,6 +621,255 @@ async def test_crashed_agent_still_releases_its_sandbox() -> None:
             await sandbox.close()
             await coordinator.stop()
     print("ok  a crashed agent still releases, so the battery finishes")
+
+
+async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="wait for the endpoint")],
+                        workspace,
+                        concurrency=1,
+                    ).run(),
+                    timeout=60,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            attempt = summary["attempts"][0]
+            assert attempt["outcome"] == "api_retry_exhausted", attempt
+            assert attempt["requeues"] == 3, attempt
+            assert attempt["success"] is False
+            run_parent = workspace / "runs" / "p1"
+            assert all(
+                (run_parent / f"try01.requeue{index:02d}").is_dir()
+                for index in range(3)
+            )
+            assert sandbox.reset_count == 4
+        finally:
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  exhausted API retries requeue the logical attempt with a finite budget")
+
+
+async def test_sandbox_protocol_fault_quarantines_and_requeues() -> None:
+    coordinator, url = await _start_coordinator()
+    faulty = FakeSandbox("sandbox-faulty", 51001)
+    replacement = FakeSandbox("sandbox-healthy", 51002)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await faulty.connect(url)
+            await replacement.connect(url)
+            os.environ["STUB_MODE"] = "sandbox_fault"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="survive bad lidar")],
+                        workspace,
+                        concurrency=1,
+                    ).run(),
+                    timeout=20,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            assert summary["total_successes"] == 1
+            assert summary["attempts"][0]["sandbox_id"] == "sandbox-healthy"
+            pool = {row["sandbox_id"]: row for row in coordinator.pool_snapshot()}
+            assert pool["sandbox-faulty"]["quarantined"] is True
+            assert pool["sandbox-faulty"]["quarantine_reason"].startswith(
+                "lidar_protocol_nonbinary"
+            )
+            battery = json.loads((workspace / "runs" / "battery.json").read_text())
+            assert "sandbox-faulty" in battery["quarantined_sandboxes"]
+        finally:
+            await faulty.close()
+            await replacement.close()
+            await coordinator.stop()
+    print("ok  a sandbox protocol fault quarantines the player and requeues on a healthy one")
+
+
+async def test_api_requeue_is_pending_until_redispatch() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001, auto_ready=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        run_task: asyncio.Task[dict] | None = None
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            runner = _runner(
+                url,
+                [Prompt(id="p1", prompt="wait for the endpoint")],
+                workspace,
+                concurrency=1,
+                max_api_requeues=1,
+                lease_acquire_timeout=0.05,
+            )
+            run_task = asyncio.create_task(runner.run())
+
+            await asyncio.wait_for(sandbox.reset_requested.wait(), timeout=10)
+            run_dir = workspace / "runs" / "p1" / "try01"
+            pending = json.loads((run_dir / "attempt.json").read_text())
+            assert pending["state"] == "requeued" and pending["outcome"] == "requeued"
+            assert pending["pending_retry"] is True
+            assert pending["requeue_reason"] == "api_retry_exhausted"
+            assert pending["retry_queued_at"]
+            assert pending["wall_seconds"] >= 0
+            view = scan.scan_battery(workspace / "runs", time.time()).as_dict()
+            assert view["attempts"][0]["pending_retry"] is True
+            assert view["counts"]["pending_retry"] == 1
+            assert view["counts"].get("requeued", 0) == 0
+            elapsed = view["attempts"][0]["elapsed_seconds"]
+            later = scan.scan_attempt(run_dir, workspace / "runs", time.time() + 600).as_dict()
+            assert later["elapsed_seconds"] == elapsed
+            assert later["remaining_seconds"] is None
+
+            # The reset is deliberately held. The retry must time out, disconnect its parked
+            # acquire, re-check fleet health, and keep trying instead of hanging in one RPC.
+            for _ in range(100):
+                pending = json.loads((run_dir / "attempt.json").read_text())
+                if int(pending.get("retry_acquire_attempts") or 0) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("retry acquire did not time out and re-check the fleet")
+            assert "ready=0" in pending["retry_wait_reason"]
+            assert pending["retry_last_checked_at"]
+
+            os.environ["STUB_MODE"] = "ok"
+            await sandbox.report_ready()
+            await asyncio.wait_for(run_task, timeout=20)
+
+            archived = json.loads(
+                (workspace / "runs" / "p1" / "try01.requeue00" / "attempt.json").read_text()
+            )
+            assert archived["pending_retry"] is False
+            assert archived["state"] == "requeued" and archived["outcome"] == "requeued"
+            replacement = json.loads((run_dir / "attempt.json").read_text())
+            assert "pending_retry" not in replacement
+            assert replacement["state"] == "finished"
+        finally:
+            os.environ.pop("STUB_MODE", None)
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run_task
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  API requeue stays pending until redispatch rotates the failed execution")
+
+
+async def test_sandbox_loss_uses_the_pending_requeue_lifecycle() -> None:
+    coordinator, url = await _start_coordinator()
+    first = FakeSandbox("sandbox-a", 51001)
+    replacement = FakeSandbox("sandbox-b", 51002)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        run_task: asyncio.Task[dict] | None = None
+        first_closed = False
+        try:
+            await first.connect(url)
+            os.environ["STUB_MODE"] = "hang"
+            runner = _runner(
+                url,
+                [Prompt(id="p1", prompt="survive a lost sandbox")],
+                workspace,
+                concurrency=1,
+            )
+            run_task = asyncio.create_task(runner.run())
+            manifest_path = workspace / "runs" / "p1" / "try01" / "attempt.json"
+            for _ in range(100):
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text())
+                    if manifest.get("state") == "running":
+                        break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError("first sandbox attempt did not start")
+
+            await first.close()
+            first_closed = True
+            for _ in range(100):
+                manifest = json.loads(manifest_path.read_text())
+                if manifest.get("pending_retry"):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError("sandbox loss was not published as a pending retry")
+            assert manifest["requeue_reason"] == "sandbox_lost"
+            assert manifest["state"] == "requeued" and manifest["outcome"] == "requeued"
+
+            os.environ["STUB_MODE"] = "ok"
+            await replacement.connect(url)
+            await asyncio.wait_for(run_task, timeout=20)
+
+            archived = json.loads(
+                (workspace / "runs" / "p1" / "try01.requeue00" / "attempt.json").read_text()
+            )
+            assert archived["requeue_reason"] == "sandbox_lost"
+            assert archived["pending_retry"] is False
+        finally:
+            os.environ.pop("STUB_MODE", None)
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await run_task
+            if not first_closed:
+                await first.close()
+            await replacement.close()
+            await coordinator.stop()
+    print("ok  sandbox loss shares pending-retry bookkeeping and preserves its reason")
+
+
+async def test_zero_api_requeues_records_first_exhaustion() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await sandbox.connect(url)
+            os.environ["STUB_MODE"] = "api_retry_exhausted"
+            try:
+                summary = await asyncio.wait_for(
+                    _runner(
+                        url,
+                        [Prompt(id="p1", prompt="do not requeue")],
+                        workspace,
+                        concurrency=1,
+                        api_max_attempts=4,
+                        max_api_requeues=0,
+                    ).run(),
+                    timeout=60,
+                )
+            finally:
+                os.environ.pop("STUB_MODE", None)
+
+            attempt = summary["attempts"][0]
+            assert attempt["outcome"] == "api_retry_exhausted", attempt
+            assert attempt["requeues"] == 0 and attempt["api_requeues"] == 0
+            assert attempt["api_max_attempts"] == 4
+            assert attempt["max_api_requeues"] == 0
+            assert sandbox.reset_count == 1
+            manifest = json.loads(
+                (workspace / "runs" / "p1" / "try01" / "attempt.json").read_text()
+            )
+            assert manifest["api_max_attempts"] == 4
+            assert manifest["max_api_requeues"] == 0
+        finally:
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  zero API requeues records the first exhausted process")
 
 
 async def test_capture_lifecycle_follows_the_agent_process() -> None:
@@ -777,20 +1155,29 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             # summary.json wins over tokens.json: it is the agent's final word.
             assert (attempt["tokens_in"], attempt["tokens_out"]) == (2000, 500), attempt
             assert attempt["llm_calls"] == 6, attempt
+            assert attempt["api_calls"] == 8, attempt
             assert summary["tokens_in"] == 2000 and summary["tokens_out"] == 500, summary
             assert summary["tokens_total"] == 2500, summary
+            assert summary["api_calls"] == 8, summary
+            assert summary["api_calls_coverage"] == {"known": 1, "total": 1}, summary
             row = summary["prompts"][0]
             assert (row["tokens_in"], row["tokens_out"]) == (2000, 500), row
             assert (row["tokens_in_avg"], row["tokens_out_avg"]) == (2000, 500), row
+            assert row["api_calls"] == 8, row
 
             # Per-reasoner attribution follows the same authority chain as the totals, and the role
             # rows must re-total to them - a breakdown that does not add up to the number beside it
             # is worse than no breakdown.
             assert attempt["tokens_by_role"] == {
-                "actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4},
-                "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2},
+                "actor": {"tokens_in": 1400, "tokens_out": 350, "calls": 4,
+                          "api_calls": 5},
+                "guard": {"tokens_in": 600, "tokens_out": 150, "calls": 2,
+                          "api_calls": 3},
             }, attempt
             assert summary["tokens_by_role"]["actor"]["tokens_in"] == 1400, summary
+            assert summary["tokens_by_role"]["guard"]["api_calls"] == 3, summary
+            assert summary["tokens_by_role"]["guard"]["api_calls_coverage"] == {
+                "known": 1, "total": 1}, summary
             assert sum(r["tokens_in"] for r in summary["tokens_by_role"].values()) == 2000, summary
             # Pipeline order, so the battery summary reads as the agent's own pipeline.
             assert list(summary["tokens_by_role"]) == ["actor", "guard"], summary
@@ -799,6 +1186,7 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             manifest = json.loads(
                 (workspace / "runs" / "p1" / "try01" / "attempt.json").read_text(encoding="utf-8"))
             assert (manifest["tokens_in"], manifest["tokens_out"]) == (2000, 500), manifest
+            assert manifest["api_calls"] == 8, manifest
             assert manifest["tokens_by_role"]["guard"]["calls"] == 2, manifest
         finally:
             await sandbox.close()
@@ -829,9 +1217,12 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             # does which reasoner spent them, which is the case an ablation most wants: the attempts
             # that ran to the wall are the expensive ones.
             assert (attempt["tokens_in"], attempt["tokens_out"]) == (1200, 300), attempt
+            assert attempt["api_calls"] == 5, attempt
             assert attempt["tokens_by_role"] == {
-                "actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2},
-                "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2},
+                "actor": {"tokens_in": 800, "tokens_out": 200, "calls": 2,
+                          "api_calls": 3},
+                "guard": {"tokens_in": 400, "tokens_out": 100, "calls": 2,
+                          "api_calls": 2},
             }, attempt
         finally:
             await sandbox.close()
@@ -883,7 +1274,9 @@ async def test_watcher_retry_replaces_a_finished_try_after_runner_exit() -> None
             replacement = json.loads((run_dir / "attempt.json").read_text())
             assert replacement["run_id"] != old_manifest["run_id"]
             assert replacement["state"] == "finished"
-            assert not archive.exists(), "sandbox-loss history survived destructive retry"
+            assert archive.exists(), "existing sandbox-loss history was discarded"
+            preserved = battery / "p1" / "try01.requeue01" / "attempt.json"
+            assert json.loads(preserved.read_text())["run_id"] == old_manifest["run_id"]
             rows = [
                 json.loads(line)
                 for line in (battery / "attempts.jsonl").read_text().splitlines()
@@ -899,7 +1292,7 @@ async def test_watcher_retry_replaces_a_finished_try_after_runner_exit() -> None
         finally:
             await sandbox.close()
             await coordinator.stop()
-    print("ok  watcher retry deletes history and replaces a finished try after runner exit")
+    print("ok  watcher retry archives history and replaces a finished try after runner exit")
 
 
 async def test_watcher_retry_stops_and_replaces_a_live_try() -> None:
@@ -1215,7 +1608,9 @@ async def test_resume_stops_an_orphan_before_pid_publication() -> None:
 
 async def main() -> int:
     test_load_prompts_accepts_the_battery_schema()
+    test_automatic_retries_outrank_fresh_work_fifo()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
+    test_refusal_cap_action_is_threaded_and_resume_checked()
     for test in (
         test_ocr_preflight_fails_before_coordinator_or_lease,
         test_battery_runs_every_prompt_and_attempt,
@@ -1225,6 +1620,11 @@ async def main() -> int:
         test_startup_timeout_explains_an_empty_pool,
         test_overrunning_attempt_is_killed_and_recorded,
         test_crashed_agent_still_releases_its_sandbox,
+        test_api_retry_exhaustion_requeues_the_logical_attempt,
+        test_sandbox_protocol_fault_quarantines_and_requeues,
+        test_api_requeue_is_pending_until_redispatch,
+        test_sandbox_loss_uses_the_pending_requeue_lifecycle,
+        test_zero_api_requeues_records_first_exhaustion,
         test_capture_lifecycle_follows_the_agent_process,
         test_cancelling_runner_kills_agent_and_releases_sandbox,
         test_human_success_stops_running_and_skips_queued_siblings,

@@ -63,11 +63,18 @@ class AttemptView:
 
     state: str = "unknown"        # starting | running | finished | requeued | orphaned
     outcome: str = ""
+    pending_retry: bool = False
+    retry_acquire_attempts: int = 0
+    retry_wait_reason: str = ""
+    retry_last_checked_at: str = ""
+    retry_queued_at: str = ""
     success: bool = False
     end_reason: str = ""
     exit_code: int | None = None
 
     sandbox_id: str = ""
+    sandbox_alias: str = ""
+    lease_alias: str = ""
     commands_uri: str = ""
     pid: int | None = None
     alive: bool = False
@@ -102,6 +109,9 @@ class AttemptView:
     # live attempt's spend is visible while it runs and not only once it exits.
     tokens_in: int = 0
     tokens_out: int = 0
+    # None is deliberately distinct from zero: legacy attempts have no request meter, while a
+    # newly metered attempt can genuinely make zero OpenAI-compatible requests.
+    api_calls: int | None = None
     # The same spend split by which reasoner made the call: role -> {tokens_in, tokens_out, calls}.
     # Empty for an attempt run before roles existed (or one whose agent died before its first
     # tokens.json write), which readers must show as "unknown", never as a battery of zeroes - the
@@ -172,7 +182,7 @@ ROLE_ORDER = ("decomposer", "resolver", "actor", "semantic", "episodic", "adviso
 
 
 def normalize_by_role(raw: Any) -> dict[str, dict[str, int]]:
-    """Coerces a tokens.json ``by_role`` block into role -> {tokens_in, tokens_out, calls} ints.
+    """Coerces a tokens.json role block, retaining response and request call counts.
 
     Defensive because it parses a file another process is rewriting under it, and because run dirs
     predating per-role accounting have no block at all. Returns {} rather than a zero-filled skeleton
@@ -186,8 +196,11 @@ def normalize_by_role(raw: Any) -> dict[str, dict[str, int]]:
         if not isinstance(row, dict):
             continue
         try:
-            rows[str(name)] = {field_name: int(row.get(field_name) or 0)
-                               for field_name in ("tokens_in", "tokens_out", "calls")}
+            normalized = {field_name: int(row.get(field_name) or 0)
+                          for field_name in ("tokens_in", "tokens_out", "calls")}
+            if "api_calls" in row:
+                normalized["api_calls"] = int(row.get("api_calls") or 0)
+            rows[str(name)] = normalized
         except (TypeError, ValueError):
             continue
     return rows
@@ -242,6 +255,18 @@ def agent_is_alive(manifest: dict[str, Any], pid: int | None) -> bool:
         return False
     recorded_start = str(manifest.get("process_start_ticks") or "")
     return not recorded_start or recorded_start == _process_start_ticks(int(pid))
+
+
+def is_archived_requeue(state: str, pending_retry: bool) -> bool:
+    """Whether this run dir is a rotated-aside requeue rather than work still to come.
+
+    `_rotate_run_dir` keeps the dead attempt's directory as `tryNN.requeueNN` and stamps its manifest
+    `requeued`, so a requeue that has been superseded and one that is still queued to run share a
+    state. The difference is `pending_retry`: the queued one is going to move, and this one never
+    will. It is an archive, and treating it as live is what put a frozen tile at the top of the grid
+    with an elapsed clock still climbing.
+    """
+    return state == "requeued" and not pending_retry
 
 
 def is_verifiable(state: str, _end_reason: str) -> bool:
@@ -344,6 +369,23 @@ def _leg_files(run_dir: Path) -> list[Path]:
     ) if run_dir.is_dir() else []
 
 
+def _last_write(run_dir: Path) -> float:
+    """When the process that owned this run dir last wrote to it, or 0.0 if that cannot be told.
+
+    The stand-in for an end time that was never recorded. The three files an attempt writes as it
+    goes are its manifest, its log and its step records, so the newest of those is the last moment
+    anything was alive here - which for an attempt whose runner died is the closest thing to a time
+    of death that survives it.
+    """
+    newest = 0.0
+    for path in (run_dir / ATTEMPT_MANIFEST, run_dir / "agent.log", *_leg_files(run_dir)):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
 def _latest_frame(run_dir: Path) -> Path | None:
     """Newest live observation.
 
@@ -396,11 +438,18 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
         run_dir=str(run_dir),
         state=str(manifest.get("state") or "unknown"),
         outcome=outcome,
+        pending_retry=bool(manifest.get("pending_retry", False)),
+        retry_acquire_attempts=int(manifest.get("retry_acquire_attempts") or 0),
+        retry_wait_reason=str(manifest.get("retry_wait_reason") or ""),
+        retry_last_checked_at=str(manifest.get("retry_last_checked_at") or ""),
+        retry_queued_at=str(manifest.get("retry_queued_at") or ""),
         # Repair old affected manifests at read time as well as preventing new ones in the runner.
         success=bool(manifest.get("success")) if outcome == "completed" else False,
         end_reason=str(manifest.get("end_reason") or ""),
         exit_code=manifest.get("exit_code"),
         sandbox_id=str(manifest.get("sandbox_id") or ""),
+        sandbox_alias=str(manifest.get("sandbox_alias") or ""),
+        lease_alias=str(manifest.get("lease_alias") or ""),
         commands_uri=str(manifest.get("commands_uri") or ""),
         pid=manifest.get("pid"),
         killed_by=str(manifest.get("killed_by") or ""),
@@ -421,23 +470,47 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
     tokens = _read_json(run_dir / "tokens.json")
     view.tokens_in = int(tokens.get("tokens_in") or manifest.get("tokens_in") or 0)
     view.tokens_out = int(tokens.get("tokens_out") or manifest.get("tokens_out") or 0)
+    raw_api_calls = (
+        tokens.get("api_calls")
+        if tokens.get("api_calls") is not None else manifest.get("api_calls")
+    )
+    view.api_calls = int(raw_api_calls) if raw_api_calls is not None else None
     view.tokens_by_role = normalize_by_role(tokens.get("by_role") or manifest.get("tokens_by_role"))
 
-    started = manifest.get("started_epoch")
-    deadline = manifest.get("deadline_epoch")
-    if view.state == "finished":
-        view.elapsed_seconds = float(manifest.get("wall_seconds") or 0.0)
-    elif isinstance(started, (int, float)):
-        view.elapsed_seconds = round(now - float(started), 1)
-    if view.state != "finished" and isinstance(deadline, (int, float)):
-        view.remaining_seconds = round(float(deadline) - now, 1)
-
+    # Ahead of the clocks below, because an orphan is a stopped attempt and they have to know that.
     if view.state in {"starting", "running"}:
         view.alive = agent_is_alive(manifest, view.pid)
         if not view.alive and view.pid:
             # The manifest says live but the process is gone: the runner died before it could close
             # the attempt out. Say so rather than showing a tile frozen forever at its last step.
             view.state = "orphaned"
+
+    started = manifest.get("started_epoch")
+    deadline = manifest.get("deadline_epoch")
+    archived = is_archived_requeue(view.state, view.pending_retry)
+    # An attempt that has stopped keeps the wall clock it stopped at, and has no deadline left to
+    # count down to. Three of the four ways to stop are not the tidy one:
+    #
+    #   - a rotated-aside requeue, whose directory nothing will ever write into again;
+    #   - an orphan, whose runner died without closing the attempt out;
+    #   - and, for either, a manifest written before this code learned to stamp a wall time.
+    #
+    # None of those leave a `wall_seconds` behind, and a clock still climbing on one of them says the
+    # opposite of what the tile's own badge says: that something is still running.
+    stopped = view.state in {"finished", "orphaned"} or view.pending_retry or archived
+    if stopped:
+        wall = manifest.get("wall_seconds")
+        if wall is None and isinstance(started, (int, float)):
+            # The last time anything in the run dir was touched. For an orphan that is the last thing
+            # the agent managed to write before it went; for a requeue it is the moment the directory
+            # was set aside. Either way it is the honest end, and it is all there is.
+            ended = _last_write(run_dir) or float(started)
+            wall = round(max(0.0, ended - float(started)), 1)
+        view.elapsed_seconds = float(wall or 0.0)
+    elif isinstance(started, (int, float)):
+        view.elapsed_seconds = round(now - float(started), 1)
+    if not stopped and isinstance(deadline, (int, float)):
+        view.remaining_seconds = round(float(deadline) - now, 1)
 
     view.response = read_response(run_dir)
 
@@ -599,18 +672,24 @@ def scan_battery(battery: Path, now: float, *, discovered: list[Path] | None = N
     attempts = [scan_attempt(run_dir, battery, now) for run_dir in run_dirs_of(battery)]
     # Worst-first. With eight concurrent attempts you want to look at one tile, not scan eight, so
     # the ranking is the feature: live attempts sort by collapse score, finished ones sink.
-    attempts.sort(
-        key=lambda a: (
-            a.state == "finished",
-            -float(a.health.get("score") or 0.0),
-            a.prompt_id,
-            a.attempt,
-        )
-    )
+    #
+    # Rotated-aside requeues sink furthest, below even the finished ones. They used to lead the grid,
+    # because an attempt abandoned mid-step scores terribly on every collapse signal there is - and
+    # that score is about a run that no longer exists. Nothing can be done with one and nothing will
+    # happen to one; the retry that replaced it is the tile worth looking at.
+    def rank(a: AttemptView) -> tuple[int, float, str, int]:
+        tier = 2 if is_archived_requeue(a.state, a.pending_retry) else int(a.state == "finished")
+        return (tier, -float(a.health.get("score") or 0.0), a.prompt_id, a.attempt)
+
+    attempts.sort(key=rank)
 
     counts: dict[str, int] = {}
     for attempt in attempts:
-        bucket = attempt.outcome if attempt.state == "finished" else attempt.state
+        bucket = (
+            "pending_retry"
+            if attempt.pending_retry
+            else (attempt.outcome if attempt.state == "finished" else attempt.state)
+        )
         counts[bucket] = counts.get(bucket, 0) + 1
         if attempt.success:
             counts["success"] = counts.get("success", 0) + 1

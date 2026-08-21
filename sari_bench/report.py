@@ -29,7 +29,7 @@ ATTEMPT_COLUMNS = [
     "battery_id", "prompt_id", "attempt", "family", "prompt", "looking_for",
     "outcome", "success",
     # The human's answer, kept beside the predicate's rather than folded into it. `success` is what
-    # overhaul/orchestrator/subtask_completion.py decided - and several of its predicates grant on
+    # agent/orchestrator/subtask_completion.py decided - and several of its predicates grant on
     # state they cannot ground. `verified_success` is a reviewer's call after watching the replay.
     # `verdict_agrees` is the column this whole path exists to produce; `success_final` is the one to
     # group by, preferring the human where there is one.
@@ -46,8 +46,11 @@ ATTEMPT_COLUMNS = [
     "first_pass",
     "verified_by", "verified_at", "verified_note",
     "end_reason", "exit_code", "wall_seconds", "wall_minutes",
-    "tokens_in", "tokens_out", "tokens_total", "llm_calls",
-    "legs_planned", "legs_completed", "requeues", "sandbox_id", "commands_uri",
+    "tokens_in", "tokens_out", "tokens_total", "llm_calls", "api_calls",
+    # `legs_unverified` counts the legs the run continued past on the refusal cap
+    # (refusal_cap_action='continue'). Those attempts reach a final answer with `success` False, so
+    # this is the column that says "the guard, not the agent, decided this one" - review them first.
+    "legs_planned", "legs_completed", "legs_unverified", "requeues", "sandbox_id", "commands_uri",
     "arm", "context_policy", "killed_by", "stop_reason", "stop_requested_at",
     "stop_requested_by",
     "winning_attempt_key", "collapse_score", "collapse_signals", "run_dir", "error",
@@ -55,7 +58,7 @@ ATTEMPT_COLUMNS = [
 
 LEG_COLUMNS = [
     "battery_id", "prompt_id", "attempt", "leg_index", "type", "text", "success",
-    "end_reason", "timesteps", "llm_calls", "tokens_in", "tokens_out", "errors",
+    "end_reason", "timesteps", "llm_calls", "api_calls", "tokens_in", "tokens_out", "errors",
     "halts_refused", "halt_forced",
     "corrective_release", "t_manip", "t_grip", "t_checkout", "wall_s", "run_dir",
 ]
@@ -67,7 +70,8 @@ LEG_COLUMNS = [
 ROLE_COLUMNS = [
     "battery_id", "prompt_id", "attempt", "arm", "context_policy", "family", "outcome",
     "success_final",
-    "role", "tokens_in", "tokens_out", "tokens_total", "calls", "share_in", "share_out",
+    "role", "tokens_in", "tokens_out", "tokens_total", "calls", "api_calls",
+    "share_in", "share_out",
     "run_dir",
 ]
 
@@ -101,6 +105,20 @@ def _tokens_of(run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any])
         if isinstance(source, dict) and ("tokens_in" in source or "tokens_out" in source):
             return int(source.get("tokens_in") or 0), int(source.get("tokens_out") or 0)
     return 0, 0
+
+
+def _api_calls_of(
+    run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]
+) -> int | None:
+    """Actual request attempts, preserving unknown for data written before this meter existed."""
+    nested = summary.get("tokens") if isinstance(summary.get("tokens"), dict) else {}
+    for source in (recorded, nested, summary, scan._read_json(run_dir / "tokens.json")):
+        if isinstance(source, dict) and source.get("api_calls") is not None:
+            try:
+                return int(source["api_calls"])
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def _roles_of(run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]
@@ -153,6 +171,8 @@ def role_rows(attempt_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "tokens_out": row["tokens_out"],
                 "tokens_total": row["tokens_in"] + row["tokens_out"],
                 "calls": row["calls"],
+                # Blank for a role block written before request-attempt metering; zero is retained.
+                "api_calls": row.get("api_calls", ""),
                 "share_in": round(row["tokens_in"] / total_in, 4) if total_in else "",
                 "share_out": round(row["tokens_out"] / total_out, 4) if total_out else "",
                 "run_dir": attempt["run_dir"],
@@ -192,6 +212,7 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         view = scan.scan_attempt(run_dir, battery, now=0.0)
         legs = recorded.get("legs") or {}
         tokens_in, tokens_out = _tokens_of(run_dir, recorded, summary)
+        api_calls = _api_calls_of(run_dir, recorded, summary)
 
         # Same fallback chain as every other field in this row - and, now that `verdict_agrees`
         # compares against it, the same answer the dashboard shows. The manifest belongs in the chain
@@ -241,8 +262,10 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             "tokens_out": tokens_out,
             "tokens_total": tokens_in + tokens_out,
             "llm_calls": recorded.get("llm_calls") or summary.get("llm_calls") or 0,
+            "api_calls": api_calls,
             "legs_planned": legs.get("planned", summary.get("legs_planned")),
             "legs_completed": legs.get("completed", summary.get("legs_completed")),
+            "legs_unverified": summary.get("legs_unverified", ""),
             "requeues": recorded.get("requeues", 0),
             "sandbox_id": recorded.get("sandbox_id") or manifest.get("sandbox_id", ""),
             "commands_uri": recorded.get("commands_uri") or manifest.get("commands_uri", ""),
@@ -285,6 +308,7 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                 "end_reason": leg.get("end_reason", ""),
                 "timesteps": leg.get("timesteps"),
                 "llm_calls": leg.get("llm_calls"),
+                "api_calls": leg.get("api_calls"),
                 "tokens_in": leg.get("tokens_in"),
                 "tokens_out": leg.get("tokens_out"),
                 "errors": leg.get("errors"),
