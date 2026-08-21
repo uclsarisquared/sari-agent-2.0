@@ -80,5 +80,12 @@ Lease requests time out and reconnect after `[bench].lease_acquire_timeout` seco
 with capped exponential backoff. Logical retries also refresh fleet health before each acquisition;
 the dashboard shows that recovery state and its latest fleet diagnosis.
 
+Once leased, each ordinary sandbox websocket round trip is bounded by
+`[bench].sandbox_command_timeout` seconds (default 10). Exceeding that positive, finite deadline
+marks the player as wedged, quarantines it, and requeues the logical attempt on another sandbox.
+The effective value is stored with the battery and preserved by resumes and dashboard retries.
+`WaitUntilReady` retains its separate startup deadline because the simulator intentionally holds
+that request open while a reset settles.
+
 The dashboard can grade, kill, and retry attempts. It has no authentication, so keep its default
 localhost binding unless the network is trusted.

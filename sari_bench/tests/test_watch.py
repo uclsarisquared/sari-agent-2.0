@@ -1345,6 +1345,7 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
                 "context_policy": "a5",
                 "api_max_attempts": 7,
                 "max_api_requeues": 0,
+                "sandbox_command_timeout_seconds": 23.0,
             }),
         )
         state = WatchState(
@@ -1353,11 +1354,17 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
             discord=Discord(enabled=False),
             min_interval=0.0,
         )
-        config = state._retry_config(battery, {"command": []})
+        config = state._retry_config(
+            battery, {"command": [], "sandbox_command_timeout": 31.0}
+        )
         assert config["completion_guard"] == "vlm", config
         assert config["context_policy"] == "a5", config
         assert config["api_max_attempts"] == 7, config
         assert config["max_api_requeues"] == 0, config
+        assert config["sandbox_command_timeout"] == 31.0, config
+
+        config = state._retry_config(battery, {"command": []})
+        assert config["sandbox_command_timeout"] == 23.0, config
     print("ok  watcher retry preserves completion guard and context policy")
 
 

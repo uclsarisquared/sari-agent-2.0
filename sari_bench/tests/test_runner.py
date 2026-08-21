@@ -220,6 +220,7 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
             context_policy="a5",
             api_max_attempts=6,
             max_api_requeues=2,
+            sandbox_command_timeout=17.0,
         )
         lease = type("LeaseStub", (), {"commands_uri": "ws://127.0.0.1:51001/commands"})()
         command = runner._agent_command(
@@ -237,6 +238,7 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         ocr_index = command.index("--ocr-url")
         assert command[ocr_index + 1] == "http://127.0.0.1:9100"
         assert runner._semantic_config()["ocr_url"] == "http://127.0.0.1:9100"
+        assert runner._semantic_config()["sandbox_command_timeout_seconds"] == 17.0
         runner.output_dir.mkdir(parents=True)
         runner._write_battery_manifest(1)
         battery = json.loads((runner.output_dir / "battery.json").read_text())
@@ -245,6 +247,16 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         assert battery["api_max_attempts"] == 6
         assert battery["max_api_requeues"] == 2
         assert battery["ocr_url"] == "http://127.0.0.1:9100"
+        assert battery["sandbox_command_timeout_seconds"] == 17.0
+
+        changed_timeout = runner._semantic_config()
+        changed_timeout["sandbox_command_timeout_seconds"] = 18.0
+        try:
+            runner._validate_resume_config(changed_timeout)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("a battery resumed with a different sandbox command timeout")
 
         disabled = _runner(
             "ws://127.0.0.1:1",
@@ -279,6 +291,7 @@ def test_completion_guard_is_threaded_into_agent_command_and_battery_config() ->
         legacy = deterministic._semantic_config()
         legacy.pop("completion_guard")
         legacy.pop("context_policy")
+        legacy.pop("sandbox_command_timeout_seconds")
         deterministic._validate_resume_config(legacy)
     print("ok  completion guard reaches the agent command and durable battery config")
 

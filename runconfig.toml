@@ -69,6 +69,10 @@ restart_env = true
 # ws_uri = "ws://localhost:8080/commands"
 # ocr_url = "http://127.0.0.1:9100"
 
+# Deadline for an ordinary sandbox websocket command. WaitUntilReady keeps its separate startup
+# deadline because the simulator intentionally holds that request until reset has settled.
+sandbox_command_timeout = 10.0
+
 [output]
 # Optional standalone output locations. If omitted, the agent creates its normal timestamped run.
 # run_dir = "agent/runs/debug"
@@ -92,6 +96,10 @@ per_leg_minutes = 40.0
 coordinator = "ws://127.0.0.1:9000"
 sandbox_startup_timeout = 30.0
 lease_acquire_timeout = 30.0
+
+# Per-command sandbox deadline passed to every agent process in this battery. A timeout signals a
+# wedged player to the harness, which quarantines it and requeues the logical attempt.
+sandbox_command_timeout = 10.0
 
 # Optional battery destination. Without it, results use bench_runs/<timestamp>[_<name>].
 # Required when resuming a run (see `resume`)

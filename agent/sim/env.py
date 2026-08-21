@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import math
 import time
 import websockets
 import json
@@ -15,6 +16,8 @@ from typing import (
 )
 
 from loguru import logger
+
+from sim.sandbox_fault import signal_fault
 
 
 RUN_DIR_ENV = "SARI_RUN_DIR"
@@ -78,7 +81,7 @@ def init_logger(run_name: str, directory: str = "logs"):
 # normalised 0-1000 (resolution-independent) and the annotator's vision encoder downscales past
 # ~1080p anyway, so a 4K render's extra pixels never reach any model - they only cost storage.
 # Depth maps are NOT routed through here: their pixel values are distance measurements, so resizing
-# them would corrupt estimate_steps_from_depth.
+# them would corrupt the distances they encode.
 MAX_SAVE_W, MAX_SAVE_H = 1920, 1080
 
 
@@ -130,51 +133,130 @@ def default_uri() -> str:
     return os.environ.get("SARI_WS_URI") or FALLBACK_WS_URI
 
 
-async def SendCommand(command: Dict[str, Any], uri: str = None):
-    uri = uri or default_uri()
-    async with websockets.connect(uri, max_size=None) as websocket:
+# How long an ordinary command may go unanswered before the sandbox is presumed wedged rather
+# than merely slow. MEASURED 2026-08-21: a Unity instance that stops answering mid-attempt left
+# two benchmark processes parked in `await websocket.recv()` for over an hour (no timeout existed
+# anywhere below this point) - CPU-idle, no log output, no crash, invisible to every retry/requeue
+# path sari_bench already has, because none of them ever got a chance to run. Sandboxes and the
+# agent run on the same local network, so 10s is already generous for a live one; past that,
+# something is wrong, not just slow. Configurable (run config `environment.sandbox_command_timeout`
+# / `bench.sandbox_command_timeout`, or $SARI_SANDBOX_COMMAND_TIMEOUT directly) for a host under
+# unusual load.
+SANDBOX_COMMAND_TIMEOUT_ENV = "SARI_SANDBOX_COMMAND_TIMEOUT"
+DEFAULT_SANDBOX_COMMAND_TIMEOUT = 10.0
+
+
+def sandbox_command_timeout() -> float:
+    raw = os.environ.get(SANDBOX_COMMAND_TIMEOUT_ENV)
+    if not raw:
+        return DEFAULT_SANDBOX_COMMAND_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"${SANDBOX_COMMAND_TIMEOUT_ENV} must be a positive finite number, got {raw!r}"
+        ) from error
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"${SANDBOX_COMMAND_TIMEOUT_ENV} must be a positive finite number, got {raw!r}"
+        )
+    return value
+
+
+class SandboxCommandTimeout(TimeoutError):
+    """A sandbox websocket round trip exceeded its budget; the sim is presumed wedged."""
+
+
+async def _send_command_once(command: Dict[str, Any], uri: str):
+    """One websocket command/reply round trip, unbounded.
+
+    Callers that own a wider deadline of their own (`wait_for_ready`'s `WaitUntilReady` poll, which
+    the sim intentionally holds open until it is actually ready) call this directly; everything
+    else goes through `SendCommand`, which adds the timeout above. The websocket library's separate
+    handshake deadline is disabled so the caller-owned deadline is the single authoritative budget.
+    """
+    async with websockets.connect(uri, max_size=None, open_timeout=None) as websocket:
         await websocket.send(json.dumps(command))
-        if command["command"] == "RequestScreenshot" or command["command"] == "RequestAnnotation":
-            image_bytes = await websocket.recv()
-            save_image = command["save_image"]
+        return await websocket.recv()
 
-            if save_image:
-                folder_name = os.path.join(command["folder_name"])
-                prefix = str(command["prefix"]) + "-" if str(command["prefix"]) else ""
-                suffix = "-" + str(command["suffix"]) if str(command["suffix"]) else ""
-                file_name = f"{prefix}ClientScreenshot{suffix}.png"
 
-                if folder_name:
-                    os.makedirs(folder_name, exist_ok=True)  # Creates the folder if it doesn't exist
+def _process_command_response(command: Dict[str, Any], response: Any):
+    """Apply local response handling after the sandbox has answered.
 
-                # Save the image file in the specified folder
-                file_path = os.path.join(folder_name, file_name) if folder_name else file_name
+    In particular, screenshot downscaling and filesystem publication are not sandbox liveness:
+    charging them to the command deadline could quarantine a healthy player because its agent host
+    had a slow disk.
+    """
+    if command["command"] == "RequestScreenshot" or command["command"] == "RequestAnnotation":
+        image_bytes = response
+        save_image = command.get("save_image", False)
 
-                # Several benchmark workers may share this checkout and therefore this legacy
-                # filename.  Writing it in place exposes a zero-length/partial PNG to readers in
-                # another process (Pillow then reports "image file is truncated").  Publish a
-                # complete file atomically instead.  The final image may still be whichever
-                # worker wrote most recently, but it can never be a half-written PNG.
-                fd, temp_path = tempfile.mkstemp(
-                    prefix=f".{file_name}.", suffix=".tmp", dir=folder_name or "."
-                )
+        if save_image:
+            folder_name = os.path.join(command["folder_name"])
+            prefix = str(command["prefix"]) + "-" if str(command["prefix"]) else ""
+            suffix = "-" + str(command["suffix"]) if str(command["suffix"]) else ""
+            file_name = f"{prefix}ClientScreenshot{suffix}.png"
+
+            if folder_name:
+                os.makedirs(folder_name, exist_ok=True)  # Creates the folder if it doesn't exist
+
+            # Save the image file in the specified folder
+            file_path = os.path.join(folder_name, file_name) if folder_name else file_name
+
+            # Several benchmark workers may share this checkout and therefore this legacy
+            # filename.  Writing it in place exposes a zero-length/partial PNG to readers in
+            # another process (Pillow then reports "image file is truncated").  Publish a
+            # complete file atomically instead.  The final image may still be whichever
+            # worker wrote most recently, but it can never be a half-written PNG.
+            fd, temp_path = tempfile.mkstemp(
+                prefix=f".{file_name}.", suffix=".tmp", dir=folder_name or "."
+            )
+            try:
+                with os.fdopen(fd, "wb") as file:
+                    file.write(downscale_for_storage(image_bytes))
+                os.replace(temp_path, file_path)
+            except BaseException:
                 try:
-                    with os.fdopen(fd, "wb") as file:
-                        file.write(downscale_for_storage(image_bytes))
-                    os.replace(temp_path, file_path)
-                except BaseException:
-                    try:
-                        os.unlink(temp_path)
-                    except FileNotFoundError:
-                        pass
-                    raise
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                raise
 
-            # The RETURN is left full-resolution: only the on-disk copy is capped. Live consumers
-            # (e.g. a VLM call on the returned bytes) get the raw frame; storage is what we shrink.
-            return {'image': image_bytes}
-        else:
-            response = await websocket.recv()
-            return response
+        # The RETURN is left full-resolution: only the on-disk copy is capped. Live consumers
+        # (e.g. a VLM call on the returned bytes) get the raw frame; storage is what we shrink.
+        return {'image': image_bytes}
+    return response
+
+
+async def SendCommand(command: Dict[str, Any], uri: str = None, timeout: float = None):
+    """`_send_command_once`, bounded. Not safe to retry-and-resend on timeout here: most
+    commands are non-idempotent state changes (a relative move, a grip toggle) that would corrupt
+    the episode if silently sent twice, so a timeout is reported once via `SandboxCommandTimeout`
+    and left for the caller's own retry story (sari_bench's sandbox-fault requeue, or a leg
+    retry) - never retried transparently inside this call."""
+    uri = uri or default_uri()
+    budget = sandbox_command_timeout() if timeout is None else timeout
+    try:
+        budget = float(budget)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"timeout must be a positive finite number, got {budget!r}") from error
+    if not math.isfinite(budget) or budget <= 0:
+        raise ValueError(f"timeout must be a positive finite number, got {budget!r}")
+    try:
+        response = await asyncio.wait_for(_send_command_once(command, uri), timeout=budget)
+    except asyncio.TimeoutError as error:
+        message = (
+            f"{command.get('command')}: websocket round trip to {uri} did not complete within "
+            f"{budget}s - "
+            "the sandbox is presumed wedged"
+        )
+        signal_fault(
+            "sandbox_command_timeout", message,
+            command=command.get("command"), uri=uri, timeout=budget,
+        )
+        raise SandboxCommandTimeout(message) from error
+    return _process_command_response(command, response)
+
 
 def _v1_or_raise(result, cmd, n_tuples, n_lines):
     """env.py speaks the sim's V1 TEXT protocol: it parses `cmd` replies POSITIONALLY (n_tuples
@@ -405,7 +487,7 @@ def wait_for_ready(uri: str = None, timeout: float = 180.0, poll_seconds: float 
         remaining = max(1.0, deadline - time.monotonic())
         try:
             result = asyncio.get_event_loop().run_until_complete(
-                asyncio.wait_for(SendCommand({"command": "WaitUntilReady"}, uri), timeout=remaining))
+                asyncio.wait_for(_send_command_once({"command": "WaitUntilReady"}, uri), timeout=remaining))
         except (OSError, asyncio.TimeoutError, websockets.exceptions.WebSocketException) as e:
             logger.info(f"Sandbox at {uri} not reachable yet ({type(e).__name__}); retrying.")
             time.sleep(poll_seconds)

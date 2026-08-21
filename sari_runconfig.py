@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "restart_env": bool,
         "ws_uri": str,
         "ocr_url": str,
+        "sandbox_command_timeout": (int, float),
     },
     "output": {
         "run_dir": str,
@@ -70,6 +72,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "completion_guard": {"deterministic", "vlm", "none"},
         "refusal_cap_action": {"continue", "halt"},
         "max_api_requeues": int,
+        "sandbox_command_timeout": (int, float),
     },
 }
 
@@ -146,8 +149,10 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
 
     if key in {"max_steps", "tries", "concurrency", "max_attempts"} and value < 1:
         raise RunConfigError(f"{path}: {label} must be at least 1")
-    if key == "lease_acquire_timeout" and value <= 0:
-        raise RunConfigError(f"{path}: {label} must be positive")
+    if key in {"lease_acquire_timeout", "sandbox_command_timeout"} and (
+        not math.isfinite(value) or value <= 0
+    ):
+        raise RunConfigError(f"{path}: {label} must be a positive finite number")
     if key in {"leg_retries", "max_api_requeues"} and value < 0:
         raise RunConfigError(f"{path}: {label} cannot be negative")
     if key in {

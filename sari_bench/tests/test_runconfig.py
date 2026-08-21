@@ -154,7 +154,14 @@ def test_deprecated_agent_arm_key_loads_and_warns(tmp_path: Path, capsys) -> Non
         ("[bench]\ntries = 0\n", "bench.tries must be at least 1"),
         ("[api_retry]\nmax_attempts = 0\n", "api_retry.max_attempts must be at least 1"),
         ("[bench]\nmax_api_requeues = -1\n", "bench.max_api_requeues cannot be negative"),
-        ("[bench]\nlease_acquire_timeout = 0\n", "bench.lease_acquire_timeout must be positive"),
+        ("[bench]\nlease_acquire_timeout = 0\n",
+         "bench.lease_acquire_timeout must be a positive finite number"),
+        ("[bench]\nsandbox_command_timeout = 0\n",
+         "bench.sandbox_command_timeout must be a positive finite number"),
+        ("[bench]\nsandbox_command_timeout = inf\n",
+         "bench.sandbox_command_timeout must be a positive finite number"),
+        ("[environment]\nsandbox_command_timeout = nan\n",
+         "environment.sandbox_command_timeout must be a positive finite number"),
         ("[mystery]\nvalue = 1\n", r"unknown section\(s\)"),
     ],
 )
@@ -183,6 +190,7 @@ completion_guard = "vlm"
 name = "from-config"
 max_api_requeues = 1
 lease_acquire_timeout = 11.0
+sandbox_command_timeout = 18.0
 
 [api_retry]
 max_attempts = 7
@@ -204,6 +212,7 @@ max_attempts = 7
             api_max_attempts=runner.api_max_attempts,
             max_api_requeues=runner.max_api_requeues,
             lease_acquire_timeout=runner.lease_acquire_timeout,
+            sandbox_command_timeout=runner.sandbox_command_timeout,
         )
         return {}
 
@@ -225,6 +234,8 @@ max_attempts = 7
                     "2",
                     "--lease-acquire-timeout",
                     "4.5",
+                    "--sandbox-command-timeout",
+                    "7.5",
                 ]
             )
         )
@@ -241,6 +252,7 @@ max_attempts = 7
         "api_max_attempts": 5,
         "max_api_requeues": 2,
         "lease_acquire_timeout": 4.5,
+        "sandbox_command_timeout": 7.5,
     }
 
 
@@ -271,6 +283,7 @@ max_minutes = 6.5
 [environment]
 map_dir = "map"
 reset_start = true
+sandbox_command_timeout = 19.0
 
 [output]
 run_dir = "runs/one"
@@ -283,8 +296,12 @@ summary = "runs/one/result.json"
 
     def fake_orchestrate(config):
         seen.update(vars(config))
+        seen["sandbox_command_timeout"] = os.environ.get("SARI_SANDBOX_COMMAND_TIMEOUT")
 
-    with patch.object(orchestrator_cli, "orchestrate", fake_orchestrate):
+    with (
+        patch.object(orchestrator_cli, "orchestrate", fake_orchestrate),
+        patch.dict(os.environ, {}, clear=False),
+    ):
         subtask_agents.main(
             [
                 "--config",
@@ -314,3 +331,4 @@ summary = "runs/one/result.json"
     assert seen["run_dir"] == str(tmp_path / "runs" / "one")
     assert seen["out"] == str(tmp_path / "runs" / "one" / "result.json")
     assert seen["reset_start"] is False
+    assert seen["sandbox_command_timeout"] == "19.0"

@@ -954,6 +954,7 @@ class WatchState:
                 timeout_grace=config["timeout_grace"],
                 sandbox_startup_timeout=config["sandbox_startup_timeout"],
                 lease_acquire_timeout=config["lease_acquire_timeout"],
+                sandbox_command_timeout=config["sandbox_command_timeout"],
                 capture_interval=config["capture_interval"],
                 python_executable=sys.executable,
                 agent_entry=self.retry_agent_entry or ORCHESTRATOR_ENTRY,
@@ -1059,6 +1060,11 @@ class WatchState:
             ),
             "lease_acquire_timeout": max(
                 0.001, float(plan.get("lease_acquire_timeout_seconds") or 30.0)
+            ),
+            "sandbox_command_timeout": float(
+                source_manifest.get("sandbox_command_timeout")
+                if source_manifest.get("sandbox_command_timeout") is not None
+                else plan.get("sandbox_command_timeout_seconds", 10.0)
             ),
             "capture_interval": float(
                 source_manifest.get("capture_interval_seconds")

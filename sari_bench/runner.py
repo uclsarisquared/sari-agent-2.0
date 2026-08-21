@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -74,6 +75,8 @@ SANDBOX_FAULT_PATH_ENV = "SARI_SANDBOX_FAULT_PATH"
 ALREADY_SUCCESSFUL = "already_successful"
 DEFAULT_CAPACITY_POLL_SECONDS = 1.0
 DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
+DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS = 10.0
+SANDBOX_COMMAND_TIMEOUT_ENV = "SARI_SANDBOX_COMMAND_TIMEOUT"
 MAX_LEASE_ACQUIRE_BACKOFF_SECONDS = 30.0
 
 
@@ -337,6 +340,7 @@ class BenchmarkRunner:
         timeout_grace: float = DEFAULT_TIMEOUT_GRACE_SECONDS,
         sandbox_startup_timeout: float = 0.0,
         lease_acquire_timeout: float = DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS,
+        sandbox_command_timeout: float | None = None,
         capture_interval: float = capture.DEFAULT_INTERVAL_SECONDS,
         capacity_poll_interval: float = DEFAULT_CAPACITY_POLL_SECONDS,
         python_executable: str | None = None,
@@ -387,6 +391,22 @@ class BenchmarkRunner:
         if lease_acquire_timeout <= 0:
             raise ValueError("lease_acquire_timeout must be positive")
         self.lease_acquire_timeout = lease_acquire_timeout
+        if sandbox_command_timeout is None:
+            inherited_timeout = os.environ.get(SANDBOX_COMMAND_TIMEOUT_ENV, "").strip()
+            if inherited_timeout:
+                try:
+                    sandbox_command_timeout = float(inherited_timeout)
+                except ValueError as error:
+                    raise ValueError(
+                        f"{SANDBOX_COMMAND_TIMEOUT_ENV} must be a positive finite number"
+                    ) from error
+            else:
+                sandbox_command_timeout = DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS
+        if not math.isfinite(sandbox_command_timeout) or sandbox_command_timeout <= 0:
+            raise ValueError("sandbox_command_timeout must be a positive finite number")
+        # Store the effective value rather than None so manifests, resumes, and watcher retries do
+        # not change behaviour if their parent process has a different environment.
+        self.sandbox_command_timeout = float(sandbox_command_timeout)
         self.capture_interval = capture_interval
         self.capacity_poll_interval = capacity_poll_interval
         self.python_executable = python_executable or sys.executable
@@ -624,7 +644,9 @@ class BenchmarkRunner:
         _log(
             f"resuming {self.output_dir}: {len(completed)} finished, {len(pending)} pending"
         )
-        return sorted(pending)
+        prompt_order = {prompt_id: index for index, prompt_id in enumerate(self.prompts)}
+        pending.sort(key=lambda key: (prompt_order[key[0]], key[1]))
+        return pending
 
     def _semantic_config(self) -> dict[str, Any]:
         return {
@@ -643,6 +665,7 @@ class BenchmarkRunner:
             "max_api_requeues": self.max_api_requeues,
             "ocr_url": self.ocr_url,
             "timeout_grace_seconds": self.timeout_grace,
+            "sandbox_command_timeout_seconds": self.sandbox_command_timeout,
             "agent_entry": self.agent_entry,
             "agent_cwd": str(Path(self.agent_cwd).resolve()),
             "planned_attempts": len(self.prompts) * self.tries,
@@ -667,6 +690,8 @@ class BenchmarkRunner:
                 return DEFAULT_API_MAX_ATTEMPTS
             if key == "max_api_requeues" and key not in battery:
                 return DEFAULT_MAX_API_REQUEUES
+            if key == "sandbox_command_timeout_seconds" and key not in battery:
+                return DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS
             return battery.get(key)
 
         mismatches = [
@@ -1193,6 +1218,7 @@ class BenchmarkRunner:
                 "timeout_grace_seconds": self.timeout_grace,
                 "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
                 "lease_acquire_timeout_seconds": self.lease_acquire_timeout,
+                "sandbox_command_timeout_seconds": self.sandbox_command_timeout,
                 "agent_entry": self.agent_entry,
                 "agent_cwd": str(Path(self.agent_cwd).resolve()),
                 "planned_attempts": planned_attempts,
@@ -1217,11 +1243,23 @@ class BenchmarkRunner:
             index += 1
         run_dir.rename(aside)
         # The manifest inside still says "running"; correct it so the watcher shows an abandoned
-        # attempt rather than a live one that will never advance.
-        _patch_json(
-            aside / ATTEMPT_MANIFEST,
-            {"state": "requeued", "outcome": "requeued", "pending_retry": False},
-        )
+        # attempt rather than a live one that will never advance. That includes closing its clock:
+        # without a `wall_seconds` the dashboard has only a start to work from, and an elapsed
+        # measured against `now` climbs forever on a directory nothing will ever write to again.
+        ended = time.time()
+        manifest_path = aside / ATTEMPT_MANIFEST
+        started = _manifest_field(manifest_path, "started_epoch")
+        patch: dict[str, Any] = {
+            "state": "requeued",
+            "outcome": "requeued",
+            "pending_retry": False,
+            "ended_at": datetime.fromtimestamp(ended).isoformat(timespec="seconds"),
+        }
+        if _manifest_field(manifest_path, "wall_seconds") is None and isinstance(
+            started, (int, float)
+        ):
+            patch["wall_seconds"] = round(max(0.0, ended - float(started)), 1)
+        _patch_json(manifest_path, patch)
         _log(f"rotated a previous run dir aside: {aside.name}")
 
     def _schedule_requeue(
@@ -1481,6 +1519,7 @@ class BenchmarkRunner:
         env["SARI_WS_URI"] = lease.commands_uri
         env["SARI_OCR_URL"] = self.ocr_url
         env["SARI_MAX_API_REQUEUES"] = str(self.max_api_requeues)
+        env[SANDBOX_COMMAND_TIMEOUT_ENV] = str(self.sandbox_command_timeout)
         api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
         env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)
         sandbox_fault_signal = run_dir / SANDBOX_FAULT_SIGNAL
@@ -1514,6 +1553,7 @@ class BenchmarkRunner:
                 "api_requeues": api_requeues,
                 "sandbox_requeues": sandbox_requeues,
                 "ocr_url": self.ocr_url,
+                "sandbox_command_timeout": self.sandbox_command_timeout,
                 "sandbox_id": lease.sandbox_id,
                 "sandbox_alias": lease.sandbox_alias,
                 "commands_uri": lease.commands_uri,
@@ -2187,6 +2227,15 @@ async def async_main(argv: list[str] | None = None) -> int:
         ),
         help="Seconds before a parked sandbox lease request reconnects and retries.",
     )
+    parser.add_argument(
+        "--sandbox-command-timeout",
+        type=float,
+        default=configured("sandbox_command_timeout"),
+        help="Seconds an ordinary sandbox command may go unanswered before the agent treats the "
+             "sandbox as wedged, quarantines it, and requeues the attempt (default: sim.env's "
+             "own default, currently 10s - sandboxes run on the same local network as the agent, "
+             "so a live one answers in well under that).",
+    )
     parser.add_argument("--output-dir", type=Path,
                         default=Path(configured("output_dir"))
                         if configured("output_dir") else None,
@@ -2284,6 +2333,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         parser.error("--sandbox-startup-timeout cannot be negative")
     if args.lease_acquire_timeout <= 0:
         parser.error("--lease-acquire-timeout must be positive")
+    if args.sandbox_command_timeout is not None and (
+        not math.isfinite(args.sandbox_command_timeout) or args.sandbox_command_timeout <= 0
+    ):
+        parser.error("--sandbox-command-timeout must be a positive finite number")
     if args.capture_interval < 0:
         parser.error("--capture-interval cannot be negative")
     if args.api_max_attempts < 1:
@@ -2335,6 +2388,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         ocr_url=args.ocr_url,
         sandbox_startup_timeout=args.sandbox_startup_timeout,
         lease_acquire_timeout=args.lease_acquire_timeout,
+        sandbox_command_timeout=args.sandbox_command_timeout,
         capture_interval=args.capture_interval,
         resume=args.resume,
     )

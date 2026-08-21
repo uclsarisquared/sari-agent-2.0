@@ -1,6 +1,7 @@
 """Command-line interface for the long-horizon orchestrator."""
 
 import argparse
+import math
 import os
 import sys
 
@@ -116,14 +117,27 @@ def main(argv=None):
         help="OCR service base URL. Resolution: this flag, $SARI_OCR_URL, then "
              "http://127.0.0.1:9100.",
     )
+    ap.add_argument(
+        "--sandbox-command-timeout", type=float,
+        default=configured("environment", "sandbox_command_timeout"),
+        help="seconds an ordinary sandbox command may go unanswered before it is presumed "
+             "wedged (default: sim.env's own default, currently 10s - sandboxes run on the same "
+             "local network, so a live one answers in well under that).",
+    )
     args = ap.parse_args(argv)
     if args.api_max_attempts < 1:
         ap.error("--api-max-attempts must be at least 1")
+    if args.sandbox_command_timeout is not None and (
+        not math.isfinite(args.sandbox_command_timeout) or args.sandbox_command_timeout <= 0
+    ):
+        ap.error("--sandbox-command-timeout must be a positive finite number")
 
     # Must be set before anything reads it. sim.env resolves the default per call, not at import,
     # so setting it here still takes effect in the already-imported module.
     if args.ws_uri:
         os.environ["SARI_WS_URI"] = args.ws_uri
+    if args.sandbox_command_timeout is not None:
+        os.environ["SARI_SANDBOX_COMMAND_TIMEOUT"] = str(args.sandbox_command_timeout)
 
     task = args.task_opt or args.task or configured("agent", "task") or input("Task: ")
     orchestrate(OrchestrationConfig(
