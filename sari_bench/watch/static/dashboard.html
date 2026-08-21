@@ -41,8 +41,10 @@
              font-size: 12.5px; cursor: pointer; white-space: nowrap; }
   .menu li:hover { background: #262b33; }
   .menu li[aria-selected="true"] { color: var(--ink); background: rgba(79,143,208,.12); }
-  .menu .m-id { flex: 1; font-variant-numeric: tabular-nums; }
-  .menu .m-note { color: var(--dim); font-size: 11.5px; }
+  /* Not flex: 1 any more - every name gets the same fixed clip box as the pill that opens this list,
+     so the column is one width and the date is what the row's spare space goes to. */
+  .menu .m-id { font-variant-numeric: tabular-nums; }
+  .menu .m-note { margin-left: auto; color: var(--dim); font-size: 11.5px; }
   .menu .m-empty { color: var(--dim); cursor: default; }
   .menu .m-empty:hover { background: none; }
   /* Renaming and copying are deliberate acts on a row whose whole surface already means "switch to
@@ -180,6 +182,9 @@
   /* The review state belongs to the group it is about, at the end of the row it will be answered on
      - not out beside it where it reads as one more thing the tile is telling you. */
   .grades .state { color: var(--dim); font-size: 11.5px; padding: 0 2px; }
+  /* Sized to the review state it sits beside rather than to the buttons: it is the note at the end
+     of the row, not a fifth verdict. */
+  .grades button.link { padding: 0 2px; font-size: 11.5px; }
   button.vote.on[data-verdict="pass"] { background: #24402f; border-color: #2c4b38; color: #a8dcbb; }
   button.vote.on[data-verdict="fail"] { background: #3a221e; border-color: #57302a; color: #f0a596; }
   button.vote.on[data-verdict="invalid"] { background: #2b3038; border-color: #3a414c; color: #c3cbd6; }
@@ -288,6 +293,113 @@
   #legend-rows td.what kbd { margin-right: 6px; }
   #legend-note { padding: 8px 14px 12px; color: var(--dim); font-size: 12px;
                  border-top: 1px solid var(--line); }
+
+  /* A run id is a timestamp and then the thing you actually named. The box is a fixed width so the
+     header stops reflowing every time the page switches to a run with a longer name - and so the
+     list of runs under it reads as a column of equal boxes rather than a ragged edge. One font-size
+     for every clip box, header and menu row alike, because `ch` is a zero's width and 28 of them is
+     only the same number of pixels twice if the zero is.
+
+     28ch. These names are almost all lowercase and hyphens, which run narrower than a zero, so the
+     box holds nearer 36 characters of one: enough for the whole of a longest-observed name
+     ("context-ablation-a2c-comprehensive", 34) once its 16-character timestamp is out of frame, and
+     wide enough that a short name like "20260730_205702-hard" sits in it entire.
+
+     At rest the box holds the TAIL, because the leading timestamp is the half that says nothing.
+     Hovering starts an endless rightward crawl rather than a one-shot slide: a name is read by
+     hovering it, and a slide that finishes leaves the reader having to leave and come back to catch
+     what they missed.
+
+     A ticker, then, and the whole point of one is that the space opening up on the left is already
+     filled. So the track is [copy][·][copy] and it travels rightwards by exactly copy+separator per
+     cycle: the frame it ends on shows the FIRST copy's tail where it began showing the second's,
+     which is the same pixels, so the loop closes invisibly and the name never snaps back to its
+     start. The separator rides between them because a plain gap would drag a blank through the box
+     once a cycle, which is the same jarring beat by another name. The cycle also begins exactly at
+     the resting offset, so hovering never jumps. */
+  .pill-clip { flex: none; display: block; width: 28ch; font-size: 12px; overflow: hidden; }
+  .pill-scroll { display: flex; width: max-content; white-space: nowrap;
+                 transform: translateX(var(--clip-rest, 0px)); }
+  .pill-copy { flex: none; }
+  /* Its own element, of a width this page picked, so one copy's measured width stays the width of
+     the text alone - a margin or padding on the copy would fold the gap into the number every other
+     offset is derived from. */
+  .pill-sep { flex: none; width: var(--clip-gap, 26px); text-align: center; opacity: .4; }
+  @keyframes clip-crawl {
+    from { transform: translateX(var(--clip-rest, 0px)); }
+    to { transform: translateX(calc(var(--clip-rest, 0px) + var(--clip-period, 0px))); }
+  }
+  .clip:hover .pill-scroll.loop,
+  .clip:focus-visible .pill-scroll.loop,
+  .clip:focus-within .pill-scroll.loop { animation: clip-crawl var(--clip-dur, 8s) linear infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .clip:hover .pill-scroll.loop, .clip:focus-visible .pill-scroll.loop,
+    .clip:focus-within .pill-scroll.loop { animation: none; }
+  }
+
+  /* Settings. The two knobs that change how this page reads - which signals it shows, and how much
+     of the fleet it will lease - are preferences rather than readouts, so they leave the header row
+     and live behind the gear. Being a panel and not a badge, each one can say in a line what it
+     does, which is what the hover tooltips used to have to do. */
+  button.pill.icon { padding: 3px 6px; color: var(--dim); }
+  button.pill.icon svg { display: block; width: 14px; height: 14px; }
+  .panel { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: 296px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+           box-shadow: 0 12px 32px rgba(0,0,0,.55); text-align: left; }
+  .panel[hidden] { display: none; }
+  .panel-head { padding: 9px 12px; border-bottom: 1px solid var(--line); color: var(--dim);
+                font-size: 11px; font-weight: 650; letter-spacing: .6px; text-transform: uppercase; }
+  .set-row { padding: 11px 12px; border-bottom: 1px solid var(--line); }
+  .set-row:last-child { border-bottom: 0; }
+  .set-main { display: flex; align-items: center; gap: 10px; }
+  .set-label { flex: 1; font-size: 13px; }
+  .set-desc { margin: 5px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+  .set-desc code { padding: 0 3px; border-radius: 3px; background: #262b33; color: var(--ink);
+                   font-size: 11px; }
+  .set-input { flex: none; width: 74px; padding: 3px 7px; border: 1px solid var(--line);
+               border-radius: 6px; background: #14161a; color: var(--ink); font: inherit;
+               font-size: 12px; text-align: right; }
+  .set-input:focus { outline: none; border-color: var(--accent); }
+  .switch { position: relative; flex: none; width: 34px; height: 18px; padding: 0; border-radius: 999px;
+            border: 1px solid var(--line); background: #23272f;
+            transition: background .15s ease, border-color .15s ease; }
+  .switch:hover { background: #2c313a; }
+  .switch .knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+                  border-radius: 999px; background: var(--dim);
+                  transition: transform .15s ease, background .15s ease; }
+  .switch[aria-checked="true"], .switch[aria-checked="true"]:hover {
+            background: rgba(79,169,107,.3); border-color: var(--ok); }
+  .switch[aria-checked="true"] .knob { transform: translateX(16px); background: var(--ok); }
+
+  /* The sandbox pool in full. The header can only ever say how many there are; this is the same
+     answer `sari_bench status --json` gives, kept current while it is open, because the reason to
+     open it is always that something in the fleet is not behaving. */
+  #fleet .overlay-box { width: min(820px, 100%); }
+  #fleet-sum { padding: 4px 14px 10px; display: flex; flex-wrap: wrap; align-items: center;
+               gap: 6px 10px; }
+  #fleet-stats { color: var(--dim); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  #fleet-tags { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+  #fleet-tags .badge { font-variant-numeric: tabular-nums; }
+  #fleet-rows { flex: 1 1 auto; min-height: 0; padding: 0 14px 14px; overflow: auto;
+                scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
+  #fleet-rows table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+  #fleet-rows th { position: sticky; top: 0; z-index: 1; padding: 6px 10px 6px 0; text-align: left;
+                   background: var(--panel); border-bottom: 1px solid var(--line);
+                   color: var(--dim); font-weight: 500; white-space: nowrap; }
+  #fleet-rows td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line);
+                   vertical-align: top; }
+  #fleet-rows tr:last-child td { border-bottom: 0; }
+  #fleet-rows td.dim { color: var(--dim); }
+  #fleet-rows td.mono { font-variant-numeric: tabular-nums; }
+  /* Last column, right-hand edge, one button per row. Taking a machine out of the pool is the only
+     thing this panel does rather than reports, so it sits away from everything being read. */
+  #fleet-rows td.act { width: 1%; padding-right: 0; text-align: right; white-space: nowrap; }
+  #fleet-rows td.act button { padding: 2px 9px; font-size: 11.5px; }
+
+  #fleet-rows .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #fleet-rows .st.leased { color: #cfe0f2; }
+  #fleet-rows .st.busy { color: #e8c48d; }
+  #fleet-rows .st.bad { color: #f0a596; }
 
   table.ov tfoot td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600;
                       background: #1a1d23; }
@@ -422,6 +534,12 @@
                   background: #1d2a22; color: #c5e8d0; box-shadow: 0 10px 28px rgba(0,0,0,.45);
                   opacity: 0; transform: translateY(-6px); transition: opacity .16s ease, transform .16s ease; }
   .notification.on { opacity: 1; transform: translateY(0); }
+  /* Leaving is given longer than arriving. A banner arrives where the reader is already looking, so
+     it can afford to snap in; it leaves while they are reading something else, and a fade slow enough
+     to catch in peripheral vision is what makes it register as gone rather than as never having been
+     there. After .on, so it wins the transition when both are briefly set. */
+  .notification.out { opacity: 0; transform: translateY(-6px);
+                      transition: opacity .38s ease, transform .38s ease; }
   /* The stack ignores the mouse so it never swallows a click meant for a card beneath it. The two
      things inside one that can be clicked have to take their own clicks back. */
   .notification .n-body { flex: 1; padding: 0; border: 0; background: none; color: inherit;
@@ -429,8 +547,8 @@
   .notification.act { border-color: #2f4a66; background: #1d2532; color: #cfe0f2; }
   .notification.act .n-body { pointer-events: auto; cursor: pointer; }
   .notification.act:hover { background: #243040; }
-  /* Every banner closes by hand, including the ones that would have expired on their own: an offer
-     the reader has already decided against should not have to be waited out. */
+  /* Every banner can also be closed by hand: one the reader has already decided against should not
+     have to be waited out, short as the wait is. */
   .n-close { pointer-events: auto; flex: none; padding: 0 4px; border: 0; background: none;
              color: inherit; opacity: .55; font-size: 15px; line-height: 1.2; }
   .n-close:hover { background: none; opacity: 1; }
@@ -440,8 +558,10 @@
 <header>
   <h1>Sari Bench</h1>
   <span class="picker">
-    <button class="pill" id="battery" data-act="battery-menu" aria-haspopup="listbox" aria-expanded="false">
-      <span class="dot" id="battery-dot"></span><span id="battery-name">—</span><span class="caret">▾</span>
+    <button class="pill clip" id="battery" data-act="battery-menu" aria-haspopup="listbox" aria-expanded="false">
+      <span class="dot" id="battery-dot"></span><span class="pill-clip" id="battery-name"
+        ><span class="pill-scroll"><span class="pill-copy">—</span></span></span
+        ><span class="caret">▾</span>
     </button>
     <ul class="menu" id="battery-menu" role="listbox" hidden></ul>
   </span>
@@ -449,21 +569,52 @@
     <button class="tab on" data-act="tab" data-tab="live">live</button>
     <button class="tab" data-act="tab" data-tab="overview">overview</button>
   </span>
-  <button class="pill" id="collapse" data-act="collapse-toggle" aria-pressed="false">
-    collapse signals: off</button>
-  <!-- Beside the pool, because the two are one thought: what is dispatched, and what it is waiting
-       on. -->
+  <!-- The queue and the pool are one thought - what is dispatched, and what it is waiting on - so
+       they sit together, ahead of the tally that is only a readout. The pool count is a door rather
+       than a label: how many sandboxes there are is the least of what you want to know once one of
+       them is misbehaving. -->
   <span class="picker">
     <button class="pill" id="queue" data-act="queue-menu" aria-haspopup="listbox" aria-expanded="false">
       <span id="queue-label">queue: —</span><span class="caret">▾</span>
     </button>
     <ul class="menu" id="queue-menu" role="listbox" hidden></ul>
   </span>
+  <button class="pill" id="pool" data-act="fleet-open" aria-haspopup="dialog"
+          aria-expanded="false"></button>
   <span class="muted" id="progress"></span>
-  <span class="muted" id="pool"></span>
-  <button class="pill" id="fleet-cap" data-act="fleet-cap" title="limit new sandbox leases">
-    cap: all</button>
   <span class="muted" id="updated" style="margin-left:auto"></span>
+  <span class="picker" id="settings-wrap">
+    <button class="pill icon" id="settings-open" data-act="settings" aria-haspopup="dialog"
+            aria-expanded="false" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3.1"></circle>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.08A1.7 1.7 0 0 0 10.1 3.04V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"></path>
+      </svg>
+    </button>
+    <div class="panel" id="settings" role="dialog" aria-label="Settings" hidden>
+      <div class="panel-head">Settings</div>
+      <div class="set-row">
+        <div class="set-main">
+          <span class="set-label" id="set-collapse-label">Show VLM collapse signals</span>
+          <button class="switch" id="set-collapse" role="switch" aria-checked="false"
+                  aria-labelledby="set-collapse-label" data-act="collapse-toggle">
+            <span class="knob"></span></button>
+        </div>
+        <p class="set-desc">Marks live runs the health scorer thinks are stuck and sorts the grid
+          worst-first. Reports and Discord alerts read the full score either way.</p>
+      </div>
+      <div class="set-row">
+        <div class="set-main">
+          <label class="set-label" for="set-cap">Sandbox lease cap</label>
+          <input class="set-input" id="set-cap" type="text" inputmode="numeric" spellcheck="false"
+                 autocomplete="off" aria-describedby="set-cap-desc">
+        </div>
+        <p class="set-desc" id="set-cap-desc">Most sandboxes the coordinator will lease at once;
+          <code>all</code> for no limit. <span id="set-cap-now"></span></p>
+      </div>
+    </div>
+  </span>
 </header>
 <main id="grid"><div class="empty" id="empty">Loading…</div></main>
 
@@ -556,6 +707,21 @@
   </div>
 </div>
 
+<div id="fleet" class="overlay" role="dialog" aria-modal="true" aria-labelledby="fleet-title">
+  <div class="overlay-box">
+    <div class="overlay-head">
+      <strong id="fleet-title">sandbox pool</strong>
+      <span class="muted" id="fleet-when"></span>
+      <button data-act="fleet-close" style="margin-left:auto">close</button>
+    </div>
+    <!-- Counts on the left as plain prose, because they are only counts. The two that a reader might
+         act on - the cap they can raise, and a quarantine they may need to clear - keep the pill
+         shape, over on the right where nothing else competes with them. -->
+    <div id="fleet-sum"><span id="fleet-stats"></span><span id="fleet-tags"></span></div>
+    <div id="fleet-rows"><table><thead></thead><tbody></tbody></table></div>
+  </div>
+</div>
+
 <script>
 const POLL_MS = 2000;
 const FRAME_POLL_MS = 250;      // 4 FPS, matching the runner's default capture cadence
@@ -611,15 +777,14 @@ function healthOf(a) {
   return { level: "ok", summary: "", score: 0 };
 }
 
-const TIP_COLLAPSE =
-  "Shows warnings and sorts live runs by health. Reports and Discord alerts are unchanged.";
+// -- settings panel --------------------------------------------------------------------------
+// Both of these used to be pills in the header wearing hover tooltips, which put a preference in
+// the same row as the readouts and made you hover a badge to find out what it did. Behind the gear
+// each one gets a control that looks like what it is - a switch, a number field - and a line of
+// prose that is always on screen instead of on hover.
 
 function renderCollapseToggle() {
-  const button = document.getElementById("collapse");
-  setText(button, `collapse signals: ${showCollapse ? "on" : "off"}`);
-  button.setAttribute("aria-pressed", String(showCollapse));
-  button.dataset.tipTerm = "collapse signals";
-  button.dataset.tip = TIP_COLLAPSE;
+  document.getElementById("set-collapse").setAttribute("aria-checked", String(showCollapse));
 }
 
 function toggleCollapse() {
@@ -630,27 +795,83 @@ function toggleCollapse() {
   refresh();
 }
 
-async function setFleetCap() {
-  const current = (latestState && latestState.fleet) || {};
-  const shown = current.capacity_limit === null || current.capacity_limit === undefined
-    ? "all" : String(current.capacity_limit);
-  const raw = prompt("Active sandbox lease cap (all or a non-negative integer):", shown);
-  if (raw === null) return;
-  const value = raw.trim().toLowerCase();
+const capText = fleet => fleet.capacity_limit === null || fleet.capacity_limit === undefined
+  ? "all" : String(fleet.capacity_limit);
+
+// The field is only rewritten from the server while it is not being edited: a poll landing mid-type
+// must not eat the digits, and one landing after a submit is what confirms the coordinator took it.
+function renderFleetSettings(fleet) {
+  const input = document.getElementById("set-cap");
+  if (document.activeElement !== input) input.value = capText(fleet);
+  setText(document.getElementById("set-cap-now"),
+    latestState.pool_error
+      ? "The coordinator is unreachable."
+      : `${Number(fleet.active_leases) || 0} of ${Number(fleet.effective_capacity) || 0} in use.`);
+}
+
+// Enter blurs the field, and a blur is itself a `change`, so a submitted value has to be remembered
+// until a poll brings the coordinator's own answer back - otherwise one keypress posts twice.
+let capSubmitting = false;
+
+async function submitFleetCap() {
+  const input = document.getElementById("set-cap");
+  const fleet = (latestState && latestState.fleet) || {};
+  const value = input.value.trim().toLowerCase();
   const limit = value === "all" || value === "" ? null : Number(value);
+  if (capSubmitting) return;
   if (limit !== null && (!Number.isInteger(limit) || limit < 0)) {
-    alert("Cap must be 'all' or a non-negative integer.");
+    notify("Cap must be “all” or a non-negative whole number.");
+    input.value = capText(fleet);
     return;
   }
+  if (capText(fleet) === (limit === null ? "all" : String(limit))) return;
+  capSubmitting = true;
+  input.blur();
   const response = await fetch("/api/fleet/cap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ limit }),
   });
   const data = await response.json();
-  if (!data.ok) alert("Could not update fleet cap: " + (data.error || "unknown error"));
-  else notify(`Sandbox lease cap set to ${limit === null ? "all" : limit}.`);
+  capSubmitting = false;
+  if (!data.ok) {
+    notify("Could not update the lease cap: " + (data.error || "unknown error"));
+    input.value = capText(fleet);
+  } else {
+    notify(`Sandbox lease cap set to ${limit === null ? "all" : limit}.`);
+  }
   refresh();
+}
+
+function settingsOpen() { return !document.getElementById("settings").hidden; }
+
+function closeSettings() {
+  document.getElementById("settings").hidden = true;
+  document.getElementById("settings-open").setAttribute("aria-expanded", "false");
+}
+
+function toggleSettings() {
+  const panel = document.getElementById("settings");
+  const opening = panel.hidden;
+  closeMenu();
+  panel.hidden = !opening;
+  document.getElementById("settings-open").setAttribute("aria-expanded", String(opening));
+  if (opening) renderFleetSettings((latestState && latestState.fleet) || {});
+}
+
+{
+  const input = document.getElementById("set-cap");
+  input.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") { ev.preventDefault(); submitFleetCap(); }
+    // Escape abandons the edit rather than the panel: the field is what has focus, and closing the
+    // whole panel out from under a half-typed number is the more surprising of the two.
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
+      input.value = capText((latestState && latestState.fleet) || {});
+      input.blur();
+    }
+  });
+  input.addEventListener("change", () => submitFleetCap());
 }
 
 const fmtMin = s => (s === null || s === undefined) ? "—"
@@ -671,6 +892,11 @@ const fmtApiAggregate = value => !value.total ? "—"
   : `unknown (0/${value.total} metered)`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isLive = a => a.state === "starting" || a.state === "running";
+// Mirror of scan.py's `rank` tiers: live (0) above finished (1) above rotated-aside requeues (2).
+// A `requeued` attempt still holding `pending_retry` is work that is going to move, so it stays in
+// the live tier; one without it is the dead directory the retry replaced.
+const isArchivedRequeue = a => a.state === "requeued" && !a.pending_retry;
+const rankTier = a => isArchivedRequeue(a) ? 2 : (a.state === "finished" ? 1 : 0);
 
 // -- which battery this page is reading ------------------------------------------------------
 // The page holds one bench run and stays on it: a view that swaps itself out mid-review because the
@@ -699,6 +925,12 @@ const setHTML = (el, value) => { if (el.innerHTML !== value) el.innerHTML = valu
 
 // `onClick` turns the banner into a button and makes it wait: an offer the reader has to be able to
 // take is worth nothing if it expires while they are reading the card underneath it.
+// Every banner goes on its own after the same hold, the actionable ones included: a stack that only
+// clears when someone reaches for it ends up as a column of stale offers sitting over the grid. An
+// offer that expires unanswered costs nothing - the thing it pointed at is still on the page.
+const NOTIFY_HOLD_MS = 3000;
+const NOTIFY_FADE_MS = 420;   // must outlast the .out transition, or a banner is cut mid-fade
+
 function notify(message, onClick) {
   const el = document.createElement("div");
   el.className = "notification" + (onClick ? " act" : "");
@@ -718,14 +950,20 @@ function notify(message, onClick) {
   requestAnimationFrame(() => el.classList.add("on"));
 
   let timer = null;
+  let going = false;
   const dismiss = () => {
+    // A banner can be told to go twice - the × pressed on one that is already fading, an offer taken
+    // up as its own timer fires - and the second call must not restart the fade or double the remove.
+    if (going) return;
+    going = true;
     if (timer) clearTimeout(timer);
     el.classList.remove("on");
-    setTimeout(() => el.remove(), 180);
+    el.classList.add("out");
+    setTimeout(() => el.remove(), NOTIFY_FADE_MS);
   };
   close.addEventListener("click", dismiss);
   if (onClick) body.addEventListener("click", () => { dismiss(); onClick(); });
-  else timer = setTimeout(dismiss, 5000);
+  timer = setTimeout(dismiss, NOTIFY_HOLD_MS);
   return dismiss;
 }
 
@@ -1009,8 +1247,10 @@ const CARD_HTML = `
       <button class="vote" data-act="verdict" data-verdict="invalid">⊘ invalid</button>
       <button class="vote" data-act="verdict" data-verdict="already_successful"><b class="vkey">A</b> already successful</button>
       <span class="state" data-ref="unreviewed">unreviewed</span>
+      <!-- Inside the well, at the end of the row it undoes. Beneath it, it read as a fifth thing the
+           tile offers rather than as the way back out of the four above it. -->
+      <button class="link" data-act="verdict-clear" hidden>clear grade</button>
     </div>
-    <button class="link" data-act="verdict-clear" hidden>clear grade</button>
   </div>`;
 
 function buildCard(a) {
@@ -1857,6 +2097,73 @@ function announceNewRuns(discovered, currentId) {
   });
 }
 
+// -- clipped run names ---------------------------------------------------------------------------
+// The geometry of the endless crawl, measured here and handed to CSS as three numbers so the motion
+// itself is a keyframe animation the browser drives rather than a loop this page has to run: the
+// resting offset that puts the name's tail in the box, the period that makes the loop seamless, and
+// the duration that turns the period into a speed.
+
+const CLIP_GAP = 26;      // px the separator between the two copies occupies
+const CLIP_SPEED = 26;    // px per second - slow enough to read a name as it goes past
+
+function setClip(box, name) {
+  const track = box.firstElementChild;
+  const first = track.firstElementChild;
+  // The separator and the second copy exist only while the name overruns the box, and they are torn
+  // down whenever the name changes: a stale clone would crawl a name this box no longer shows.
+  const drop = () => {
+    track.classList.remove("loop");
+    while (track.children.length > 1) track.lastElementChild.remove();
+  };
+  if (first.textContent !== name) { setText(first, name); drop(); }
+
+  // Off one copy, which nothing decorates, so this is the text's own width whether or not the crawl
+  // is already running.
+  const width = first.getBoundingClientRect().width;
+  // Hidden boxes measure zero, so an unopened menu would look like every name overflows. Nothing to
+  // decide until it has a width.
+  if (!box.clientWidth) return;
+  const overflow = width - box.clientWidth;
+  if (overflow <= 0.5) {
+    drop();
+    box.style.setProperty("--clip-rest", "0px");
+    return;
+  }
+  if (track.children.length === 1) {
+    const separator = document.createElement("span");
+    separator.className = "pill-sep";
+    separator.setAttribute("aria-hidden", "true");
+    separator.textContent = "·";
+    const clone = first.cloneNode(true);
+    clone.setAttribute("aria-hidden", "true");
+    track.append(separator, clone);
+  }
+  track.classList.add("loop");
+
+  // The track is [copy][sep][copy], and the box rests on the LAST copy's tail - one whole
+  // copy-plus-separator further along than the tail of a single copy would be. Travelling right by
+  // exactly that much lands on the first copy's tail, which is the identical frame.
+  const period = width + CLIP_GAP;
+  box.style.setProperty("--clip-gap", CLIP_GAP + "px");
+  box.style.setProperty("--clip-rest", (-(overflow + period)).toFixed(1) + "px");
+  box.style.setProperty("--clip-period", period.toFixed(1) + "px");
+  box.style.setProperty("--clip-dur", (period / CLIP_SPEED).toFixed(2) + "s");
+}
+
+function fitBatteryName() {
+  const box = document.getElementById("battery-name");
+  setClip(box, box.firstElementChild.firstElementChild.textContent);
+}
+
+function fitBatteryMenu() {
+  for (const box of document.querySelectorAll("#battery-menu .pill-clip")) {
+    setClip(box, box.dataset.name || "");
+  }
+}
+
+// The last row markup renderPicker produced, so it can tell a real change from its own handiwork.
+let menuHTML = "";
+
 function renderPicker(state) {
   // Two cases, one line. A first load asks for `newest` and pins whatever came back, which is what
   // makes holding one run the default. And a pin can outlive the run it named - a deleted bench_run,
@@ -1872,7 +2179,7 @@ function renderPicker(state) {
 
   const dot = document.getElementById("battery-dot");
   dot.classList.toggle("live", Boolean(here && here.live));
-  setText(document.getElementById("battery-name"), state.battery_id || "no battery");
+  setClip(document.getElementById("battery-name"), state.battery_id || "no battery");
   const batteryTag = document.getElementById("battery");
   batteryTag.dataset.tipTerm = "bench run (battery)";
   batteryTag.dataset.tip = TIP_BATTERY;
@@ -1897,9 +2204,13 @@ function renderPicker(state) {
     // whose blinking dot already means "a runner is working here" only reads as a second liveness
     // tag that disagrees with the first.
     const note = fmtWhen(d.mtime);
-    return `<li role="option" data-battery="${esc(d.id)}" aria-selected="${d.id === state.battery_id}">`
+    return `<li class="clip" role="option" data-battery="${esc(d.id)}"`
+      + ` aria-selected="${d.id === state.battery_id}">`
       + `<span class="dot${d.live ? " live" : ""}"></span>`
-      + `<span class="m-id">${esc(d.id)}</span>`
+      // The name it will be measured against once the list is on screen: a clip box has no width
+      // while the menu is hidden, so nothing here can be sized until it opens.
+      + `<span class="m-id pill-clip" data-name="${esc(d.id)}">`
+      + `<span class="pill-scroll"><span class="pill-copy">${esc(d.id)}</span></span></span>`
       + `<span class="m-note">${esc(note)}</span>`
       // Copying stays available on a live run: the name is just as useful to paste while the
       // runner is still working as it is afterwards.
@@ -1911,7 +2222,19 @@ function renderPicker(state) {
       + ` title="rename this bench run" aria-label="rename ${esc(d.id)}"`
       + `${d.live ? " disabled" : ""}>✎</button></li>`;
   });
-  setHTML(menu, rows.length ? rows.join("") : '<li class="m-empty">no bench runs on disk</li>');
+  // Against the last markup this function GENERATED, not against the menu's current innerHTML: a row
+  // whose name overruns its box has had a separator and a second copy injected into it since, so the
+  // live DOM never matches the string again and every poll would rewrite the list. Which is what it
+  // did - rebuilding the rows out from under the cursor twice a second, restarting the crawl a few
+  // pixels in each time and reading exactly like an animation that snaps back before it gets going.
+  const html = rows.length ? rows.join("") : '<li class="m-empty">no bench runs on disk</li>';
+  if (html !== menuHTML) {
+    menuHTML = html;
+    setHTML(menu, html);
+    // A real rebuild while the list is up - a new run appearing, a rename landing - has to be
+    // re-measured; one while it is down is measured when it opens.
+    if (!menu.hidden) fitBatteryMenu();
+  }
 }
 
 // The name is what every CLI flag and every share of a run is phrased in terms of, so it is worth
@@ -2084,8 +2407,11 @@ async function refresh() {
   // this page is set to read (scan.py's key otherwise, exactly) so that with the repetition signals
   // hidden the grid also stops moving to them - hiding a banner while its attempt still jumps to
   // the top of the grid would be the same interruption in a quieter coat.
+  //
+  // Tiers first, matching scan.py's `rank`: a rotated-aside requeue is an archive of a run that no
+  // longer exists, so it sinks below even the finished ones no matter how badly it scores.
   atts.sort((x, y) =>
-    (x.state === "finished") - (y.state === "finished")
+    rankTier(x) - rankTier(y)
     || healthOf(y).score - healthOf(x).score
     || String(x.prompt_id).localeCompare(String(y.prompt_id))
     || (x.attempt || 0) - (y.attempt || 0));
@@ -2104,16 +2430,12 @@ async function refresh() {
   document.getElementById("progress").textContent =
     (b.planned_attempts ? `${done}/${b.planned_attempts} done · ${live} live` : `${atts.length} attempt(s)`)
     + review + waiting + retryWaiting;
-  document.getElementById("pool").textContent = state.pool_error
+  setText(document.getElementById("pool"), state.pool_error
     ? "pool: coordinator unreachable"
-    : `pool: ${(state.pool || []).length} sandbox(es)`;
+    : `pool: ${(state.pool || []).length} sandbox(es)`);
   const fleet = state.fleet || {};
-  const cap = fleet.capacity_limit === null || fleet.capacity_limit === undefined
-    ? "all" : String(fleet.capacity_limit);
-  setText(document.getElementById("fleet-cap"), `cap: ${cap}`);
-  document.getElementById("fleet-cap").title =
-    `${Number(fleet.active_leases) || 0} active · ${Number(fleet.effective_capacity) || 0} effective `
-    + `· ${Number(fleet.eligible_sandboxes) || 0} eligible`;
+  renderFleetSettings(fleet);
+  if (fleetOpen()) renderFleet();
   document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
 
   const grid = document.getElementById("grid");
@@ -2216,6 +2538,173 @@ function closeLegend() {
   document.getElementById("legend-open").setAttribute("aria-expanded", "false");
 }
 const legendOpen = () => document.getElementById("legend").classList.contains("open");
+
+// -- sandbox pool ----------------------------------------------------------------------------
+// The header can only ever say how many sandboxes there are, and that is never the question: the
+// question is which one is quarantined, which one is stuck in a reset, and who holds the leases. So
+// the count opens the whole fleet - the same object `sari_bench status --json` prints - and keeps it
+// current on its own clock, faster than the page's poll, because this is opened to watch something
+// move.
+
+const FLEET_POLL_MS = 1500;
+const FLEET_COLS = ["sandbox", "state", "lease", "store", "note", ""];
+let fleetData = null;
+let fleetTimer = null;
+let fleetHead = false;
+
+const fleetOpen = () => document.getElementById("fleet").classList.contains("open");
+
+async function pollFleet() {
+  let next;
+  try {
+    const response = await fetch("/api/fleet/status");
+    // Checked before parsing, because the interesting failure answers plain text: a watcher process
+    // started before this route existed 404s, and letting JSON.parse choke on "not found" reported
+    // the reader a bare "the string did not match the expected pattern" - true, and no help at all
+    // in working out that the fix is to restart the watcher.
+    if (!response.ok) {
+      next = {
+        error: response.status === 404
+          ? "This watcher does not serve /api/fleet/status — it is running an older build than the "
+            + "page it just served you. Restart it."
+          : `The watcher answered ${response.status} ${response.statusText || ""}`.trim(),
+        sandboxes: [],
+      };
+    } else {
+      next = await response.json();
+    }
+  } catch (error) {
+    next = { error: "Could not read the fleet: " + ((error && error.message) || error),
+             sandboxes: [] };
+  }
+  fleetData = next;
+  if (fleetOpen()) renderFleet();
+}
+
+// Quarantine is the one thing an operator does to a sandbox from here, and it is worth saying what
+// it costs: the coordinator drops the lease outright and releases the player WITHOUT a reset, so an
+// attempt holding it loses its sandbox mid-run and gets requeued.
+//
+// The reason is asked for rather than stamped, and the asking IS the confirmation - cancelling the
+// dialog cancels the quarantine. It is the only record of why a machine was pulled: it comes back in
+// the pool table's note column, in `sari_bench status`, and in the coordinator's own log, and the
+// next person to look at a benched sandbox has nothing else to go on. A default is offered so the
+// hurried case is one keypress, and blank falls back to it rather than recording nothing.
+const QUARANTINE_REASON = "quarantined from the watch UI";
+
+async function setQuarantine(selector, clear) {
+  let reason = QUARANTINE_REASON;
+  if (!clear) {
+    const typed = prompt(
+      `Quarantine ${selector}?\n\nIt stops being leasable. If it is holding a lease right now, that `
+      + `lease is dropped and the attempt on it loses its sandbox and is requeued.\n\n`
+      + `Why — this is what the pool table and the coordinator log will show:`,
+      QUARANTINE_REASON,
+    );
+    if (typed === null) return;
+    reason = typed.trim() || QUARANTINE_REASON;
+  }
+  const response = await fetch(clear ? "/api/fleet/unquarantine" : "/api/fleet/quarantine", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sandbox: selector, reason }),
+  });
+  const data = await response.json().catch(() => ({ ok: false, error: "the watcher did not answer in JSON" }));
+  if (!data.ok) notify(`Could not ${clear ? "release" : "quarantine"} ${selector}: `
+    + (data.error || "unknown error"));
+  else notify(`${selector} ${clear ? "released back into the pool" : "quarantined"}.`);
+  pollFleet();
+  refresh();
+}
+
+function openFleet() {
+  document.getElementById("fleet").classList.add("open");
+  document.getElementById("pool").setAttribute("aria-expanded", "true");
+  renderFleet();
+  pollFleet();
+  if (fleetTimer === null) fleetTimer = setInterval(pollFleet, FLEET_POLL_MS);
+}
+
+function closeFleet() {
+  document.getElementById("fleet").classList.remove("open");
+  document.getElementById("pool").setAttribute("aria-expanded", "false");
+  // Nothing reads the fleet while the panel is shut, and the coordinator should not be asked once a
+  // second for an answer no one is looking at.
+  if (fleetTimer !== null) { clearInterval(fleetTimer); fleetTimer = null; }
+}
+
+// A sandbox's row-level condition, worst first: the thing that will stop it being leased is what a
+// reader opened this panel to find, so it wins over whatever the state field says.
+function fleetState(sandbox) {
+  if (sandbox.quarantined) return { cls: "bad", word: "quarantined" };
+  if (sandbox.reset_seconds !== null && sandbox.reset_seconds !== undefined) {
+    return { cls: "busy", word: `resetting ${sandbox.reset_seconds}s` };
+  }
+  if (!sandbox.store_loaded) return { cls: "bad", word: "store not loaded" };
+  if (sandbox.lease_id) return { cls: "leased", word: sandbox.state || "leased" };
+  return { cls: "", word: sandbox.state || "unknown" };
+}
+
+function fleetNote(sandbox) {
+  if (sandbox.quarantined) {
+    return [sandbox.quarantine_reason, sandbox.quarantine_source && `via ${sandbox.quarantine_source}`]
+      .filter(Boolean).join(" · ");
+  }
+  return sandbox.reset_reason ? `reset: ${sandbox.reset_reason}` : "";
+}
+
+function renderFleet() {
+  const data = fleetData || {};
+  const boxes = data.sandboxes || [];
+  const num = value => Number(value) || 0;
+
+  setText(document.getElementById("fleet-when"),
+    data.error ? "coordinator unreachable" : fleetData ? "live" : "");
+
+  const cap = data.capacity_limit === null || data.capacity_limit === undefined
+    ? "all" : String(data.capacity_limit);
+  const quarantined = num(data.quarantined_sandboxes);
+  const waiting = num(data.waiting);
+  setText(document.getElementById("fleet-stats"), [
+    `${num(data.registered_sandboxes) || boxes.length} registered`,
+    `${num(data.eligible_sandboxes)} eligible`,
+    `${num(data.active_leases)} leased`,
+    `${num(data.effective_capacity)} effective capacity`,
+    waiting ? `${waiting} waiting for a lease` : "",
+  ].filter(Boolean).join(" · "));
+  setHTML(document.getElementById("fleet-tags"), [
+    quarantined ? `<span class="badge alert">${quarantined} quarantined</span>` : "",
+    `<span class="badge">cap: ${esc(cap)}</span>`,
+  ].filter(Boolean).join(""));
+
+  const table = document.getElementById("fleet-rows");
+  if (!fleetHead) {
+    setHTML(table.querySelector("thead"),
+      "<tr>" + FLEET_COLS.map(label => `<th>${label}</th>`).join("") + "</tr>");
+    fleetHead = true;
+  }
+  setHTML(table.querySelector("tbody"), boxes.length
+    ? boxes.map(sandbox => {
+        const state = fleetState(sandbox);
+        const note = fleetNote(sandbox);
+        return "<tr>"
+          + `<td><div>${esc(sandbox.sandbox_alias || "—")}</div>`
+          + `<div class="dim" style="font-size:11px">${esc(sandbox.sandbox_id || "")}</div></td>`
+          + `<td><span class="st ${state.cls}">${esc(state.word)}</span></td>`
+          + `<td class="dim mono">${esc(sandbox.lease_alias || sandbox.lease_id || "free")}</td>`
+          + `<td class="dim">${esc(sandbox.store_name || "—")}</td>`
+          + `<td class="dim">${esc(note || "—")}</td>`
+          // The alias if it has one, because that is what the coordinator's own CLI takes and what
+          // shows up in its log; the id is only the fallback for a sandbox that never sent one.
+          + `<td class="act"><button data-act="${sandbox.quarantined ? "fleet-release" : "fleet-hold"}"`
+          + ` data-sandbox="${esc(sandbox.sandbox_alias || sandbox.sandbox_id || "")}"`
+          + `${sandbox.quarantined ? "" : ' class="danger"'}>`
+          + `${sandbox.quarantined ? "release" : "quarantine"}</button></td>`
+          + "</tr>";
+      }).join("")
+    : `<tr><td class="dim" colspan="${FLEET_COLS.length}">`
+      + `${esc(data.error || (fleetData ? "No sandboxes registered." : "Loading…"))}</td></tr>`);
+}
 
 // -- detail overlay ------------------------------------------------------------------------
 // The attempt in full: the run itself (live frames while it is going, the replay once it is not),
@@ -2496,6 +2985,10 @@ async function recordVerdict(key, verdict) {
 document.addEventListener("click", async ev => {
   if (ev.target.id === "modal") { closeModal(); return; }
   if (ev.target.id === "legend") { closeLegend(); return; }
+  if (ev.target.id === "fleet") { closeFleet(); return; }
+  // The settings panel holds a text field, so it cannot ride the button-only dispatch below: a click
+  // on the input would fall through to "anywhere else" and shut the panel mid-edit.
+  if (settingsOpen() && !ev.target.closest("#settings-wrap")) closeSettings();
   // Ahead of the option itself: the pencil sits inside a row whose entire surface means "switch to
   // this run", and renaming a battery must not also drag the page onto it.
   const rename = ev.target.closest("#battery-menu button[data-act='battery-rename']");
@@ -2520,16 +3013,26 @@ document.addEventListener("click", async ev => {
     closeMenu();
     menu.hidden = !opening;
     button.setAttribute("aria-expanded", String(opening));
+    // Now that the rows have a width, and not before: a clip box measures zero while its menu is
+    // hidden, which would read as "every name overflows" and start all of them crawling.
+    if (opening && act === "battery-menu") fitBatteryMenu();
     // The cursor is still on the pill either way, and no mousemove is coming to re-ask.
     if (menu.hidden) showHelp(button); else hideHelp();
     return;
   }
   if (act === "tab") { setTab(button.dataset.tab); return; }
   if (act === "collapse-toggle") { toggleCollapse(); return; }
-  if (act === "fleet-cap") { setFleetCap(); return; }
+  if (act === "settings") { toggleSettings(); return; }
   if (act === "modal-close") { closeModal(); return; }
   if (act === "legend-open") { openLegend(); return; }
   if (act === "legend-close") { closeLegend(); return; }
+  if (act === "fleet-open") { openFleet(); return; }
+  if (act === "fleet-close") { closeFleet(); return; }
+  if (act === "fleet-hold" || act === "fleet-release") {
+    button.disabled = true;
+    await setQuarantine(button.dataset.sandbox, act === "fleet-release");
+    return;
+  }
   // Both entry points - a tile's ⛶ and an overview cell - open the same overlay the same way: on
   // the run itself, and without starting an encode nobody asked for.
   if (act === "detail") { if (key) openModal(key); return; }
@@ -2632,7 +3135,9 @@ document.addEventListener("keydown", async ev => {
   if (ev.key === "Escape") {
     hideHelp();
     closeMenu();
+    closeSettings();
     if (legendOpen()) closeLegend();
+    if (fleetOpen()) closeFleet();
     if (modalKey) closeModal();
     return;
   }
@@ -2662,6 +3167,12 @@ document.addEventListener("keydown", async ev => {
 
 tipVotes(document.getElementById("modal-foot"));
 renderCollapseToggle();
+// The crawl is measured in pixels, so it has to be re-measured when the box changes width - which a
+// `ch`-sized box does whenever the window's font metrics do.
+window.addEventListener("resize", () => {
+  fitBatteryName();
+  if (!document.getElementById("battery-menu").hidden) fitBatteryMenu();
+});
 refresh();
 setInterval(refresh, POLL_MS);
 setInterval(refreshLiveFrames, FRAME_POLL_MS);

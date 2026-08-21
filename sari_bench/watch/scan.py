@@ -257,6 +257,18 @@ def agent_is_alive(manifest: dict[str, Any], pid: int | None) -> bool:
     return not recorded_start or recorded_start == _process_start_ticks(int(pid))
 
 
+def is_archived_requeue(state: str, pending_retry: bool) -> bool:
+    """Whether this run dir is a rotated-aside requeue rather than work still to come.
+
+    `_rotate_run_dir` keeps the dead attempt's directory as `tryNN.requeueNN` and stamps its manifest
+    `requeued`, so a requeue that has been superseded and one that is still queued to run share a
+    state. The difference is `pending_retry`: the queued one is going to move, and this one never
+    will. It is an archive, and treating it as live is what put a frozen tile at the top of the grid
+    with an elapsed clock still climbing.
+    """
+    return state == "requeued" and not pending_retry
+
+
 def is_verifiable(state: str, _end_reason: str) -> bool:
     """Whether an attempt is eligible for a human verdict.
 
@@ -357,6 +369,23 @@ def _leg_files(run_dir: Path) -> list[Path]:
     ) if run_dir.is_dir() else []
 
 
+def _last_write(run_dir: Path) -> float:
+    """When the process that owned this run dir last wrote to it, or 0.0 if that cannot be told.
+
+    The stand-in for an end time that was never recorded. The three files an attempt writes as it
+    goes are its manifest, its log and its step records, so the newest of those is the last moment
+    anything was alive here - which for an attempt whose runner died is the closest thing to a time
+    of death that survives it.
+    """
+    newest = 0.0
+    for path in (run_dir / ATTEMPT_MANIFEST, run_dir / "agent.log", *_leg_files(run_dir)):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
 def _latest_frame(run_dir: Path) -> Path | None:
     """Newest live observation.
 
@@ -448,21 +477,40 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
     view.api_calls = int(raw_api_calls) if raw_api_calls is not None else None
     view.tokens_by_role = normalize_by_role(tokens.get("by_role") or manifest.get("tokens_by_role"))
 
-    started = manifest.get("started_epoch")
-    deadline = manifest.get("deadline_epoch")
-    if view.state == "finished" or view.pending_retry:
-        view.elapsed_seconds = float(manifest.get("wall_seconds") or 0.0)
-    elif isinstance(started, (int, float)):
-        view.elapsed_seconds = round(now - float(started), 1)
-    if view.state != "finished" and not view.pending_retry and isinstance(deadline, (int, float)):
-        view.remaining_seconds = round(float(deadline) - now, 1)
-
+    # Ahead of the clocks below, because an orphan is a stopped attempt and they have to know that.
     if view.state in {"starting", "running"}:
         view.alive = agent_is_alive(manifest, view.pid)
         if not view.alive and view.pid:
             # The manifest says live but the process is gone: the runner died before it could close
             # the attempt out. Say so rather than showing a tile frozen forever at its last step.
             view.state = "orphaned"
+
+    started = manifest.get("started_epoch")
+    deadline = manifest.get("deadline_epoch")
+    archived = is_archived_requeue(view.state, view.pending_retry)
+    # An attempt that has stopped keeps the wall clock it stopped at, and has no deadline left to
+    # count down to. Three of the four ways to stop are not the tidy one:
+    #
+    #   - a rotated-aside requeue, whose directory nothing will ever write into again;
+    #   - an orphan, whose runner died without closing the attempt out;
+    #   - and, for either, a manifest written before this code learned to stamp a wall time.
+    #
+    # None of those leave a `wall_seconds` behind, and a clock still climbing on one of them says the
+    # opposite of what the tile's own badge says: that something is still running.
+    stopped = view.state in {"finished", "orphaned"} or view.pending_retry or archived
+    if stopped:
+        wall = manifest.get("wall_seconds")
+        if wall is None and isinstance(started, (int, float)):
+            # The last time anything in the run dir was touched. For an orphan that is the last thing
+            # the agent managed to write before it went; for a requeue it is the moment the directory
+            # was set aside. Either way it is the honest end, and it is all there is.
+            ended = _last_write(run_dir) or float(started)
+            wall = round(max(0.0, ended - float(started)), 1)
+        view.elapsed_seconds = float(wall or 0.0)
+    elif isinstance(started, (int, float)):
+        view.elapsed_seconds = round(now - float(started), 1)
+    if not stopped and isinstance(deadline, (int, float)):
+        view.remaining_seconds = round(float(deadline) - now, 1)
 
     view.response = read_response(run_dir)
 
@@ -624,14 +672,16 @@ def scan_battery(battery: Path, now: float, *, discovered: list[Path] | None = N
     attempts = [scan_attempt(run_dir, battery, now) for run_dir in run_dirs_of(battery)]
     # Worst-first. With eight concurrent attempts you want to look at one tile, not scan eight, so
     # the ranking is the feature: live attempts sort by collapse score, finished ones sink.
-    attempts.sort(
-        key=lambda a: (
-            a.state == "finished",
-            -float(a.health.get("score") or 0.0),
-            a.prompt_id,
-            a.attempt,
-        )
-    )
+    #
+    # Rotated-aside requeues sink furthest, below even the finished ones. They used to lead the grid,
+    # because an attempt abandoned mid-step scores terribly on every collapse signal there is - and
+    # that score is about a run that no longer exists. Nothing can be done with one and nothing will
+    # happen to one; the retry that replaced it is the tile worth looking at.
+    def rank(a: AttemptView) -> tuple[int, float, str, int]:
+        tier = 2 if is_archived_requeue(a.state, a.pending_retry) else int(a.state == "finished")
+        return (tier, -float(a.health.get("score") or 0.0), a.prompt_id, a.attempt)
+
+    attempts.sort(key=rank)
 
     counts: dict[str, int] = {}
     for attempt in attempts:
