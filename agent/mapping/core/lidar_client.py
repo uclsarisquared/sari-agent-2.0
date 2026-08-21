@@ -1,49 +1,24 @@
 import asyncio
-from datetime import datetime, timezone
 import json
-import os
-from pathlib import Path
 import struct
-import tempfile
 
 import websockets
+
+from sim.sandbox_fault import signal_fault
 
 MAGIC = b"LDR1"
 HEADER_FORMAT = "<4sHHffffId"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-SANDBOX_FAULT_PATH_ENV = "SARI_SANDBOX_FAULT_PATH"
 
 
 def _signal_protocol_fault(payload) -> None:
-    path_text = os.environ.get(SANDBOX_FAULT_PATH_ENV, "").strip()
-    if not path_text:
-        return
-    path = Path(path_text)
     preview = payload[:500] if isinstance(payload, str) else repr(payload)[:500]
-    body = {
-        "code": "lidar_protocol_nonbinary",
-        "message": "RequestLidarScan returned a text frame; expected binary LiDAR data",
-        "payload_type": type(payload).__name__,
-        "response_preview": preview,
-        "detected_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(body, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(temp_name, path)
-        except BaseException:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
-            raise
-    except OSError:
-        # Reporting must never hide the original protocol violation.
-        return
+    signal_fault(
+        "lidar_protocol_nonbinary",
+        "RequestLidarScan returned a text frame; expected binary LiDAR data",
+        payload_type=type(payload).__name__,
+        response_preview=preview,
+    )
 
 
 async def _request_scan_async(uri):
