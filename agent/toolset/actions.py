@@ -30,7 +30,6 @@ def grip_right(units=1): _GRIP_RIGHT_()
 
 from vision.perception import (
     center_object_on_screen,
-    retrieve_item
 )
 
 # grab_item_in_view_* (md_tools) drove the sim's ReachAtPixel command, which is NOT implemented in
@@ -71,8 +70,6 @@ NAVIGATION_ACTIONS_REF = {
 
 PERCEPTION_ACTIONS_REF = {
     'center_object_on_screen': center_object_on_screen,
-    # 'retrieve_item': retrieve_item,
-    # 'approach_object': retrieve_item,
 }
 
 MANIPULATION_ACTIONS_REF = {

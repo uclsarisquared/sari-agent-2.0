@@ -284,8 +284,6 @@ def dispatch_action(action: str, time_units: int, notes: dict, inline_arg: str =
         # debug_dir (when a runner passes one) makes center_object_on_screen drop its per-look
         # candidate/locked/aim frames there - see the runners' per-step screenshot logging.
         return action_ref(target_info, debug_dir=debug_dir) or {}
-    elif action in ("retrieve_item", "approach_object"):
-        return action_ref(main_goal) or {}
     elif action in _GRAB_ACTIONS:
         # Phase D: MEASURE before the blind reach. RequestLidarCenter reads depth along the pitched
         # gaze (hands are LiDAR self-culled, so an active hand does not occlude it); plan_reach turns

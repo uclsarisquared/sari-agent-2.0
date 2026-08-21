@@ -30,7 +30,6 @@ PERCEPTION_ACTIONS = (
     "tilt_up: Tilt up 2.5 degrees. Maximum 10 steps per action.\n"
     "tilt_down: Tilt down 2.5 degrees. Maximum 10 steps per action.\n"
     "center_object_on_screen: Rotate the camera in a closed loop until the target object is centred in the frame (it detects the target and verifies the result). Use this to centre the target before grabbing - do not rely on eyeballed pan_left/pan_right for the final centring.\n"
-    # "retrieve_item: Approach the target object, grab it with the agent's hand, and read it.\n"
 )
 
 MANIPULATION_ACTIONS = (
