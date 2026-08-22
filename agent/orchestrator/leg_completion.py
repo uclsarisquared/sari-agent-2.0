@@ -346,6 +346,10 @@ class CompletionController:
         self.halt_refusals += 1
         self.metrics["halts_refused"] = self.halt_refusals
         state["last_halt_refused"] = reason
+        # Keep the agent's own claimed answer even though the guard refused it, so a
+        # forced end can still show "here's what I believe, unverified" instead of only
+        # the guard's rejection text as if the agent never reasoned to an answer.
+        self.metrics["refused_reported_answer"] = reported_answer or None
         self._clear_progress(state)
         print(
             f"[GUARD] STOP refused ({self.halt_refusals}/{HALT_REFUSAL_CAP}): {reason}"

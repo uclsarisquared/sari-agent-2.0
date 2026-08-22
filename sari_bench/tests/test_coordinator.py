@@ -30,7 +30,14 @@ import websockets
 
 from sari_bench.client import CoordinatorClient
 from sari_bench.coordinator import Coordinator
-from sari_bench.protocol import SANDBOX_ROUTE, STATE_LEASED, STATE_READY, decode, encode
+from sari_bench.protocol import (
+    SANDBOX_ROUTE,
+    STATE_LEASED,
+    STATE_READY,
+    STATE_RESETTING,
+    decode,
+    encode,
+)
 
 
 class FakeSandbox:
@@ -333,6 +340,40 @@ async def test_aliases_and_operator_quarantine_round_trip() -> None:
     print("ok  human aliases and quarantine/unquarantine round-trip")
 
 
+async def test_unquarantine_reset_outlives_heartbeat_timeout() -> None:
+    """A recovering sandbox gets the reset deadline, even if Unity's main thread goes quiet."""
+    coordinator, url = await _start_coordinator(heartbeat_timeout=0.05, reset_timeout=1.0)
+    sandbox = FakeSandbox("sandbox-recovering", 51926, auto_ready=False)
+    try:
+        # Effectively disable heartbeats to model a long Unity frame during the recovery reset.
+        await sandbox.connect(url, heartbeat_interval=10.0)
+        async with CoordinatorClient(url) as client:
+            await client.quarantine_sandbox(
+                "sandbox-01", reason="wedged", source="test"
+            )
+            await client.unquarantine("sandbox-01")
+            await asyncio.wait_for(sandbox.reset_requested.wait(), timeout=1)
+
+            await asyncio.sleep(0.1)
+            await coordinator._reap_once()
+
+            row = coordinator.pool_snapshot()[0]
+            assert row["state"] == STATE_RESETTING
+            assert row["reset_reason"] == "unquarantined"
+            assert sandbox.sandbox_id in coordinator._active_resets
+            assert not sandbox.hung_up_on.is_set(), "an active reset was evicted as heartbeat-stale"
+            assert sandbox.reset_count == 1, "the recovery reset was sent more than once"
+
+            await sandbox.report_ready()
+            replacement = await asyncio.wait_for(client.acquire(), timeout=1)
+            assert replacement.sandbox_id == sandbox.sandbox_id
+            assert sandbox.reset_count == 1
+    finally:
+        await sandbox.close()
+        await coordinator.stop()
+    print("ok  an unquarantine reset outlives the ordinary heartbeat timeout")
+
+
 async def test_alias_and_quarantine_survive_coordinator_restart() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         state_path = Path(tmp) / "coordinator.json"
@@ -503,6 +544,7 @@ async def main() -> int:
         test_fleet_resets_are_serialized,
         test_stuck_reset_is_quarantined,
         test_aliases_and_operator_quarantine_round_trip,
+        test_unquarantine_reset_outlives_heartbeat_timeout,
         test_alias_and_quarantine_survive_coordinator_restart,
         test_dead_sandbox_notifies_its_lease_holder,
         test_evicted_sandbox_rejoins_the_pool,

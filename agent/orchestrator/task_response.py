@@ -134,6 +134,7 @@ def record_attempt(
         "end_reason": str(metrics.get("end_reason") or ""),
         "completion_evidence": str(metrics.get("completion_evidence") or ""),
         "verified_reported_answer": str(metrics.get("reported_answer") or ""),
+        "refused_reported_answer": str(metrics.get("refused_reported_answer") or ""),
         "failure_reason": _failure_reason(metrics),
         "final_state": concise_final_state(metrics.get("final_state")),
         "findings": "",
@@ -318,7 +319,13 @@ def deterministic_fallback(memory: dict[str, Any]) -> str:
         prefix = f"I completed {', '.join(completed)}, but could not complete {failed_task}"
     else:
         prefix = f"I could not complete {failed_task}"
-    return f"{prefix}: {reason}." if reason else f"{prefix}."
+    tail = f": {reason}." if reason else "."
+
+    failed_entry = next((e for e in reversed(attempts) if not e.get("success")), None)
+    candidate = str((failed_entry or {}).get("refused_reported_answer") or "").strip()
+    if candidate:
+        tail += f" My best answer, not independently verified: {candidate}"
+    return f"{prefix}{tail}"
 
 
 def synthesize_response(

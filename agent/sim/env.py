@@ -164,7 +164,23 @@ def sandbox_command_timeout() -> float:
 
 
 class SandboxCommandTimeout(TimeoutError):
-    """A sandbox websocket round trip exceeded its budget; the sim is presumed wedged."""
+    """A sandbox command exceeded a deadline or its serialized execution lane rejected it."""
+
+
+def sandbox_infrastructure_error(response: Any) -> str | None:
+    """Return a server-side queue/deadline error, excluding ordinary command validation errors.
+
+    Current sandbox builds answer their own coroutine watchdog before the client-side websocket
+    deadline. Treating that text as an ordinary payload would hide the infrastructure fault (and,
+    for screenshots, pass a string to image consumers). Queue saturation is equivalent for episode
+    integrity: a mutating command may already have run even though its deferred reply was rejected.
+    """
+    if not isinstance(response, str) or not response.startswith("Error:"):
+        return None
+    lowered = response.lower()
+    if "timed out" in lowered or "coroutine queue is full" in lowered:
+        return response
+    return None
 
 
 async def _send_command_once(command: Dict[str, Any], uri: str):
@@ -255,6 +271,22 @@ async def SendCommand(command: Dict[str, Any], uri: str = None, timeout: float =
             command=command.get("command"), uri=uri, timeout=budget,
         )
         raise SandboxCommandTimeout(message) from error
+
+    server_error = sandbox_infrastructure_error(response)
+    if server_error is not None:
+        message = (
+            f"{command.get('command')}: sandbox at {uri} reported an infrastructure failure: "
+            f"{server_error}"
+        )
+        signal_fault(
+            "sandbox_command_timeout",
+            message,
+            command=command.get("command"),
+            uri=uri,
+            timeout=budget,
+            server_response=server_error,
+        )
+        raise SandboxCommandTimeout(message)
     return _process_command_response(command, response)
 
 
@@ -453,9 +485,9 @@ def Reset(degrees: float | None = None, uri: str = None):
 def GetStatus(uri: str = None) -> Dict[str, Any]:
     """The sandbox's readiness, answered whatever state it is in.
 
-    Returns {state, sandbox_id, port, benchmark_build, v1_compatibility}. `state` is one of
-    Booting / Resetting / Ready / Leased. A sim too old to know this command replies
-    "Unknown command: GetStatus", which is reported back as state "unknown".
+    Returns lifecycle/build fields plus active_queued_command, its age, and queued_command_count on
+    current builds. `state` is one of Booting / Resetting / Ready / Leased. A sim too old to know
+    this command replies "Unknown command: GetStatus", reported back as state "unknown".
     """
     result = asyncio.get_event_loop().run_until_complete(SendCommand({
         "command": "GetStatus"

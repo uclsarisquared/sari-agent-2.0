@@ -5,6 +5,7 @@ import time
 import pytest
 
 from sim import env
+from mapping.core import lidar_client
 
 
 def test_send_command_times_out_when_sandbox_never_replies(monkeypatch):
@@ -50,6 +51,39 @@ def test_send_command_returns_normally_within_budget(monkeypatch):
         env.SendCommand({"command": "SetCrouch"}, "ws://sandbox/commands", timeout=5.0)
     )
     assert result == "ok"
+
+
+@pytest.mark.parametrize(
+    "server_error",
+    [
+        "Error: command 'RequestScreenshot' timed out after 8.00s in the coroutine queue.",
+        "Error: command 'TransformAgent' was rejected because the coroutine queue is full "
+        "(64 items).",
+        "Error: LiDAR center GPU readback timed out after 6s",
+    ],
+)
+def test_server_watchdog_errors_signal_infrastructure_fault(
+    monkeypatch, tmp_path, server_error
+):
+    async def replies(_command, _uri):
+        return server_error
+
+    monkeypatch.setattr(env, "_send_command_once", replies)
+    fault_path = tmp_path / "sandbox_fault.json"
+    monkeypatch.setenv("SARI_SANDBOX_FAULT_PATH", str(fault_path))
+
+    with pytest.raises(env.SandboxCommandTimeout, match="infrastructure failure"):
+        asyncio.get_event_loop().run_until_complete(
+            env.SendCommand(
+                {"command": "RequestScreenshot"},
+                "ws://sandbox/commands",
+                timeout=10.0,
+            )
+        )
+
+    payload = json.loads(fault_path.read_text())
+    assert payload["code"] == "sandbox_command_timeout"
+    assert payload["server_response"] == server_error
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
@@ -99,3 +133,37 @@ def test_wait_for_ready_is_not_bounded_by_the_per_command_timeout(monkeypatch):
     monkeypatch.setattr(env, "DEFAULT_SANDBOX_COMMAND_TIMEOUT", 0.01)
 
     assert env.wait_for_ready("ws://sandbox/commands", timeout=1.0) is True
+
+
+def test_lidar_scan_uses_the_same_timeout_fault_path(monkeypatch, tmp_path):
+    async def hangs_forever(_uri):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(lidar_client, "_request_scan_async", hangs_forever)
+    fault_path = tmp_path / "sandbox_fault.json"
+    monkeypatch.setenv("SARI_SANDBOX_FAULT_PATH", str(fault_path))
+
+    with pytest.raises(env.SandboxCommandTimeout):
+        lidar_client.RequestLidarScan("ws://sandbox/commands", timeout=0.01)
+
+    payload = json.loads(fault_path.read_text())
+    assert payload["code"] == "sandbox_command_timeout"
+    assert payload["command"] == "RequestLidarScan"
+
+
+def test_lidar_scan_promotes_server_watchdog_error(monkeypatch, tmp_path):
+    server_error = "Error: LiDAR GPU readback timed out after 6s"
+
+    async def replies(_uri):
+        return server_error
+
+    monkeypatch.setattr(lidar_client, "_request_scan_async", replies)
+    fault_path = tmp_path / "sandbox_fault.json"
+    monkeypatch.setenv("SARI_SANDBOX_FAULT_PATH", str(fault_path))
+
+    with pytest.raises(env.SandboxCommandTimeout, match="infrastructure failure"):
+        lidar_client.RequestLidarScan("ws://sandbox/commands", timeout=10.0)
+
+    payload = json.loads(fault_path.read_text())
+    assert payload["code"] == "sandbox_command_timeout"
+    assert payload["server_response"] == server_error

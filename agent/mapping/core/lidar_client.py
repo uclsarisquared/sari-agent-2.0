@@ -1,10 +1,16 @@
 import asyncio
 import json
+import math
 import struct
 
 import websockets
 
 from sim.sandbox_fault import signal_fault
+from sim.env import (
+    SandboxCommandTimeout,
+    sandbox_command_timeout,
+    sandbox_infrastructure_error,
+)
 
 MAGIC = b"LDR1"
 HEADER_FORMAT = "<4sHHffffId"
@@ -72,6 +78,46 @@ def parse_scan(payload: bytes) -> dict:
     }
 
 
-def RequestLidarScan(uri: str = "ws://localhost:8080/commands") -> dict:
-    payload = asyncio.get_event_loop().run_until_complete(_request_scan_async(uri))
+def RequestLidarScan(uri: str = "ws://localhost:8080/commands", timeout: float = None) -> dict:
+    budget = sandbox_command_timeout() if timeout is None else timeout
+    try:
+        budget = float(budget)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"timeout must be a positive finite number, got {budget!r}") from error
+    if not math.isfinite(budget) or budget <= 0:
+        raise ValueError(f"timeout must be a positive finite number, got {budget!r}")
+    try:
+        payload = asyncio.get_event_loop().run_until_complete(
+            asyncio.wait_for(_request_scan_async(uri), timeout=budget)
+        )
+    except asyncio.TimeoutError as error:
+        message = (
+            f"RequestLidarScan: websocket round trip to {uri} did not complete within "
+            f"{budget}s - the sandbox is presumed wedged"
+        )
+        signal_fault(
+            "sandbox_command_timeout",
+            message,
+            command="RequestLidarScan",
+            uri=uri,
+            timeout=budget,
+        )
+        raise SandboxCommandTimeout(message) from error
+
+    server_error = sandbox_infrastructure_error(payload)
+    if server_error is not None:
+        message = (
+            f"RequestLidarScan: sandbox at {uri} reported an infrastructure failure: "
+            f"{server_error}"
+        )
+        signal_fault(
+            "sandbox_command_timeout",
+            message,
+            command="RequestLidarScan",
+            uri=uri,
+            timeout=budget,
+            server_response=server_error,
+        )
+        raise SandboxCommandTimeout(message)
+
     return parse_scan(payload)

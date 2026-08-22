@@ -31,6 +31,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from sari_bench.coordinator import Coordinator
+from sari_bench.client import CoordinatorClient
 from sari_bench import capture
 from sari_bench.runner import (
     BenchmarkRunner,
@@ -697,6 +698,108 @@ async def test_sandbox_protocol_fault_quarantines_and_requeues() -> None:
             await replacement.close()
             await coordinator.stop()
     print("ok  a sandbox protocol fault quarantines the player and requeues on a healthy one")
+
+
+async def test_command_timeout_recovery_resets_and_probes_the_failed_lane() -> None:
+    seen: list[str] = []
+
+    async def round_trip(_uri: str, payload: dict, _timeout: float):
+        command = str(payload.get("command") or "")
+        seen.append(command)
+        if command == "ResetEnvironment":
+            return "Environment reset"
+        if command == "RequestScreenshot":
+            return b"\x89PNG\r\n\x1a\nvalid-test-png"
+        return f"Error: unexpected command {command}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p1", prompt="recover")],
+            Path(tmp),
+        )
+        runner._sandbox_round_trip = round_trip
+        recovered, detail = await runner._recover_timed_out_sandbox(
+            "ws://sandbox/commands",
+            "RequestScreenshot",
+        )
+        assert recovered is True, detail
+        assert seen == ["ResetEnvironment", "RequestScreenshot"]
+    print("ok  command timeout recovery resets before probing the failed serialized lane")
+
+
+async def test_command_timeout_recovery_rejects_a_failed_probe() -> None:
+    async def round_trip(_uri: str, payload: dict, _timeout: float):
+        if payload.get("command") == "ResetEnvironment":
+            return "Environment reset"
+        return "Error: probe still wedged"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _runner(
+            "ws://127.0.0.1:1",
+            [Prompt(id="p1", prompt="quarantine")],
+            Path(tmp),
+        )
+        runner._sandbox_round_trip = round_trip
+        recovered, detail = await runner._recover_timed_out_sandbox(
+            "ws://sandbox/commands",
+            "TransformAgent",
+        )
+        assert recovered is False
+        assert "probe still wedged" in detail
+    print("ok  a failed post-reset lane probe falls back to quarantine")
+
+
+async def test_operator_release_clears_battery_local_quarantine() -> None:
+    """A coordinator release must override the compatibility denylist without a lease loop."""
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-recovered", 51003)
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            url,
+            [Prompt(id="p1", prompt="use the recovered sandbox")],
+            workspace,
+            concurrency=1,
+        )
+        runner.output_dir.mkdir(parents=True)
+        runner._write_battery_manifest(1)
+        acquired_client = None
+        acquired_lease = None
+        try:
+            await sandbox.connect(url)
+            async with CoordinatorClient(url) as operator:
+                original = await asyncio.wait_for(operator.acquire(), timeout=2)
+                runner._record_local_quarantine(
+                    original, reason="protocol_fault", source="test"
+                )
+                await operator.quarantine(
+                    original, reason="protocol_fault", source="test"
+                )
+                await operator.unquarantine(original.sandbox_alias)
+
+            acquired_client, acquired_lease = await asyncio.wait_for(
+                runner._acquire_sandbox(
+                    0,
+                    "p1",
+                    1,
+                    runner.output_dir / "p1" / "try01",
+                    is_retry=False,
+                ),
+                timeout=3,
+            )
+            assert acquired_lease.sandbox_id == sandbox.sandbox_id
+            assert sandbox.reset_count == 1, "local rejection triggered another reset"
+            assert sandbox.sandbox_id not in runner._local_quarantines
+            battery = json.loads((runner.output_dir / "battery.json").read_text())
+            assert sandbox.sandbox_id not in battery["quarantined_sandboxes"]
+        finally:
+            if acquired_client is not None and acquired_lease is not None:
+                await acquired_client.release(acquired_lease, outcome="done")
+                await acquired_client.close()
+            await sandbox.close()
+            await coordinator.stop()
+    print("ok  operator release clears the battery-local sandbox quarantine")
 
 
 async def test_api_requeue_is_pending_until_redispatch() -> None:
@@ -1622,6 +1725,9 @@ async def main() -> int:
         test_crashed_agent_still_releases_its_sandbox,
         test_api_retry_exhaustion_requeues_the_logical_attempt,
         test_sandbox_protocol_fault_quarantines_and_requeues,
+        test_command_timeout_recovery_resets_and_probes_the_failed_lane,
+        test_command_timeout_recovery_rejects_a_failed_probe,
+        test_operator_release_clears_battery_local_quarantine,
         test_api_requeue_is_pending_until_redispatch,
         test_sandbox_loss_uses_the_pending_requeue_lifecycle,
         test_zero_api_requeues_records_first_exhaustion,

@@ -876,6 +876,12 @@ class Coordinator:
         now = time.monotonic()
 
         for sandbox_id, sandbox in list(self._sandboxes.items()):
+            # Unity heartbeats on its main thread. A legitimate reset can stall that thread longer
+            # than the ordinary liveness window, so the reset deadline below is authoritative while
+            # a reset is in flight. Evicting it here first discards the reset bookkeeping and can
+            # make a reconnecting sandbox receive the same recovery reset over and over.
+            if sandbox_id in self._active_resets:
+                continue
             if now - sandbox.last_heartbeat > self.heartbeat_timeout:
                 await self._drop_sandbox(sandbox_id, reason="heartbeat_timeout")
 

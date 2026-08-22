@@ -37,7 +37,8 @@ def resolve_ocr_url(explicit: str | None = None) -> str:
 def _request_error(action: str, url: str, error: BaseException) -> OcrUnavailable:
     return OcrUnavailable(
         f"OCR service {action} failed at {url} ({type(error).__name__}: {error}). "
-        "Start it with `uv run poe ocr-server` and verify its /health endpoint."
+        "Start it with `uv run poe ocr-server` (or `ocr-server-directml`) and verify "
+        "its /health endpoint."
     )
 
 

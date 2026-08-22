@@ -78,6 +78,8 @@ DEFAULT_LEASE_ACQUIRE_TIMEOUT_SECONDS = DEFAULT_ACQUIRE_TIMEOUT_SECONDS
 DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS = 10.0
 SANDBOX_COMMAND_TIMEOUT_ENV = "SARI_SANDBOX_COMMAND_TIMEOUT"
 MAX_LEASE_ACQUIRE_BACKOFF_SECONDS = 30.0
+SANDBOX_RECOVERY_RESET_TIMEOUT_SECONDS = 60.0
+SANDBOX_RECOVERY_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 class SandboxStartupError(RuntimeError):
@@ -1068,6 +1070,45 @@ class BenchmarkRunner:
             }
             battery["quarantined_sandboxes"] = records
 
+    def _clear_local_quarantine(self, sandbox_id: str) -> None:
+        """Remove an operator-released sandbox from this process and the shared battery denylist."""
+        self._local_quarantines.discard(sandbox_id)
+        manifest_path = self.output_dir / BATTERY_MANIFEST
+        if not manifest_path.exists():
+            return
+        with edit_json_locked(manifest_path) as battery:
+            records = battery.get("quarantined_sandboxes")
+            if isinstance(records, dict):
+                records.pop(sandbox_id, None)
+                battery["quarantined_sandboxes"] = records
+            elif isinstance(records, list):
+                battery["quarantined_sandboxes"] = [
+                    record for record in records if str(record) != sandbox_id
+                ]
+
+    async def _coordinator_released_local_quarantine(
+        self, client: CoordinatorClient, lease: Lease
+    ) -> bool:
+        """Reconcile the compatibility denylist with an authoritative modern coordinator.
+
+        A coordinator that exposes per-sandbox ``quarantined`` state cannot lease a quarantined
+        sandbox. Therefore, receiving such a lease means an operator explicitly released it and
+        its reset completed. Coordinators predating quarantine omit the field; for those, retain
+        the battery-local denylist as the compatibility safety net.
+        """
+        try:
+            pool = await client.pool()
+        except Exception:  # keep the local safety net if authority cannot be confirmed
+            return False
+        sandbox = next(
+            (row for row in pool if str(row.get("sandbox_id") or "") == lease.sandbox_id),
+            None,
+        )
+        if sandbox is None or "quarantined" not in sandbox or sandbox.get("quarantined"):
+            return False
+        self._clear_local_quarantine(lease.sandbox_id)
+        return True
+
     async def _acquire_sandbox(
         self,
         index: int,
@@ -1164,16 +1205,23 @@ class BenchmarkRunner:
                     await asyncio.sleep(backoff)
                 continue
             if self._locally_quarantined(lease.sandbox_id):
+                if not await self._coordinator_released_local_quarantine(client, lease):
+                    _log(
+                        f"[w{index}] {prompt_id} try {attempt}: skipped locally quarantined "
+                        f"{lease.sandbox_alias}; releasing and reacquiring"
+                    )
+                    with contextlib.suppress(Exception):
+                        await client.release(lease, outcome="locally_quarantined")
+                    with contextlib.suppress(Exception):
+                        await client.close()
+                    await asyncio.sleep(max(0.1, self.capacity_poll_interval))
+                    continue
+                # Useful when recovering an already-running battery: this is the one transition
+                # that distinguishes an operator release from the reject/reset loop it resolves.
                 _log(
-                    f"[w{index}] {prompt_id} try {attempt}: skipped locally quarantined "
-                    f"{lease.sandbox_alias}; releasing and reacquiring"
+                    f"[w{index}] {prompt_id} try {attempt}: coordinator released local quarantine "
+                    f"for {lease.sandbox_alias}; accepting lease"
                 )
-                with contextlib.suppress(Exception):
-                    await client.release(lease, outcome="locally_quarantined")
-                with contextlib.suppress(Exception):
-                    await client.close()
-                await asyncio.sleep(max(0.1, self.capacity_poll_interval))
-                continue
             return client, lease
 
     async def _wait_for_prompt_winner(self, prompt_id: str) -> dict[str, Any]:
@@ -1420,9 +1468,14 @@ class BenchmarkRunner:
             except SandboxLost as lost:
                 # The machine went away, not the agent. Put the attempt back rather than scoring it.
                 if sandbox_requeues < MAX_SANDBOX_LOST_REQUEUES:
+                    requeue_reason = (
+                        "sandbox_recovered"
+                        if lost.reason.startswith("recovered_after_command_timeout")
+                        else "sandbox_lost"
+                    )
                     self._schedule_requeue(
                         run_dir,
-                        reason="sandbox_lost",
+                        reason=requeue_reason,
                         item=(prompt_id, attempt, api_requeues, sandbox_requeues + 1),
                         wall_seconds=time.monotonic() - started,
                     )
@@ -1662,8 +1715,34 @@ class BenchmarkRunner:
                 await self._kill(process)
                 if capture_task is not None:
                     await capture_task
+                fault = self._sandbox_fault_payload(sandbox_fault_signal)
                 reason = self._sandbox_fault_message(sandbox_fault_signal)
                 source = f"{prompt.id}/try{attempt:02d}"
+
+                if str(fault.get("code") or "") == "sandbox_command_timeout":
+                    recovered, recovery_detail = await self._recover_timed_out_sandbox(
+                        lease.commands_uri,
+                        str(fault.get("command") or ""),
+                    )
+                    _patch_json(
+                        manifest_path,
+                        {
+                            "sandbox_fault": reason,
+                            "sandbox_recovery_attempted": True,
+                            "sandbox_recovered": recovered,
+                            "sandbox_recovery_detail": recovery_detail,
+                        },
+                    )
+                    if recovered:
+                        _log(
+                            f"{source}: reset and post-reset probe recovered "
+                            f"{lease.sandbox_alias}; requeueing the interrupted attempt"
+                        )
+                        raise SandboxLost(
+                            lease.sandbox_id,
+                            f"recovered_after_command_timeout: {recovery_detail}",
+                        )
+
                 self._record_local_quarantine(lease, reason=reason, source=source)
                 coordinator_quarantined = False
                 try:
@@ -1762,14 +1841,121 @@ class BenchmarkRunner:
         )
 
     @staticmethod
-    def _sandbox_fault_message(path: Path) -> str:
+    def _sandbox_fault_payload(path: Path) -> dict[str, Any]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _sandbox_fault_message(path: Path) -> str:
+        payload = BenchmarkRunner._sandbox_fault_payload(path)
+        if not payload:
             return "sandbox protocol fault"
         code = str(payload.get("code") or "sandbox_protocol_fault")
         message = str(payload.get("message") or "sandbox protocol fault")
         return f"{code}: {message}"[:240]
+
+    @staticmethod
+    async def _sandbox_round_trip(
+        commands_uri: str,
+        command: dict[str, Any],
+        timeout: float,
+    ) -> Any:
+        """Issue one recovery command on a fresh websocket under one caller-owned deadline."""
+        import websockets
+
+        async def exchange() -> Any:
+            async with websockets.connect(
+                commands_uri,
+                max_size=None,
+                open_timeout=None,
+            ) as websocket:
+                await websocket.send(json.dumps(command))
+                return await websocket.recv()
+
+        return await asyncio.wait_for(exchange(), timeout=timeout)
+
+    async def _recover_timed_out_sandbox(
+        self,
+        commands_uri: str,
+        failed_command: str,
+    ) -> tuple[bool, str]:
+        """Reset an uncertain episode and prove the formerly serialized command lane responds.
+
+        The attempt process is killed before this runs, so no agent can race recovery commands.
+        A successful recovery still requeues the logical attempt: the timed-out command may have
+        mutated Unity before its reply was lost, and ResetEnvironment intentionally destroys the
+        episode state. Failure leaves the caller to quarantine the sandbox as before.
+        """
+        reset_timeout = max(
+            SANDBOX_RECOVERY_RESET_TIMEOUT_SECONDS,
+            self.sandbox_command_timeout,
+        )
+        probe_timeout = max(
+            SANDBOX_RECOVERY_PROBE_TIMEOUT_SECONDS,
+            self.sandbox_command_timeout,
+        )
+
+        try:
+            reset_reply = await self._sandbox_round_trip(
+                commands_uri,
+                {"command": "ResetEnvironment"},
+                reset_timeout,
+            )
+            reset_text = (
+                reset_reply.decode(errors="replace")
+                if isinstance(reset_reply, (bytes, bytearray))
+                else str(reset_reply)
+            )
+            if "Environment reset" not in reset_text:
+                raise RuntimeError(f"unexpected reset reply: {reset_text[:200]!r}")
+
+            if failed_command == "RequestLidarScan":
+                probe = {"command": "RequestLidarScan"}
+                expected = "LDR1 binary LiDAR payload"
+            elif failed_command == "RequestLidarCenter":
+                probe = {"command": "RequestLidarCenter"}
+                expected = "LiDAR center JSON"
+            elif failed_command in {"RequestScreenshot", "RequestAnnotation"}:
+                probe = {"command": "RequestScreenshot"}
+                expected = "PNG screenshot"
+            else:
+                # A zero translation is a non-mutating probe of the same post-physics response
+                # path used by movement and hand commands.
+                probe = {
+                    "command": "TransformAgent",
+                    "translation": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                }
+                expected = "post-physics agent response"
+
+            response = await self._sandbox_round_trip(commands_uri, probe, probe_timeout)
+            if isinstance(response, str) and response.startswith("Error:"):
+                raise RuntimeError(f"probe returned {response[:200]!r}")
+
+            if failed_command == "RequestLidarScan":
+                if not isinstance(response, bytes) or not response.startswith(b"LDR1"):
+                    raise RuntimeError(f"probe did not return {expected}")
+            elif failed_command == "RequestLidarCenter":
+                text = (
+                    response.decode(errors="replace")
+                    if isinstance(response, (bytes, bytearray))
+                    else str(response)
+                )
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict) or "distance" not in parsed or "hit" not in parsed:
+                    raise RuntimeError(f"probe did not return {expected}")
+            elif failed_command in {"RequestScreenshot", "RequestAnnotation"}:
+                if not isinstance(response, bytes) or not response.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise RuntimeError(f"probe did not return {expected}")
+
+            command_name = failed_command or "unknown command"
+            return True, f"ResetEnvironment and {command_name} lane probe succeeded"
+        except Exception as error:  # noqa: BLE001 - recovery failure deliberately falls back to quarantine
+            detail = " ".join(str(error).splitlines()) or "no details"
+            return False, f"{type(error).__name__}: {detail}"[:240]
 
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""

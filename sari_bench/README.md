@@ -9,7 +9,7 @@ pool.
 Configure `[bench]` in the root `runconfig.toml`, then start these processes in separate terminals:
 
 ```bash
-# 1. Shared OCR service on the runner machine
+# 1. Shared OCR service (auto-selects DirectML on the configured Windows/WSL host)
 uv run poe ocr-server
 
 # 2. Coordinator reachable by the runner and every sandbox host
@@ -82,8 +82,11 @@ the dashboard shows that recovery state and its latest fleet diagnosis.
 
 Once leased, each ordinary sandbox websocket round trip is bounded by
 `[bench].sandbox_command_timeout` seconds (default 10). Exceeding that positive, finite deadline
-marks the player as wedged, quarantines it, and requeues the logical attempt on another sandbox.
-The effective value is stored with the battery and preserved by resumes and dashboard retries.
+stops the now-uncertain agent process. The harness then resets the sandbox and probes the same
+serialized command lane: success returns the sandbox to the pool, while a failed reset/probe
+quarantines it. Either way, the logical attempt restarts from a clean episode and the discarded
+execution is treated as infrastructure rather than agent failure. The effective timeout is stored
+with the battery and preserved by resumes and dashboard retries.
 `WaitUntilReady` retains its separate startup deadline because the simulator intentionally holds
 that request open while a reset settles.
 

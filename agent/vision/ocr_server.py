@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
+import sys
 import threading
 import time
 from http import HTTPStatus
@@ -20,13 +23,103 @@ DEFAULT_PORT = 9100
 DEFAULT_MAX_REQUEST_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_IN_FLIGHT = 32
 MODEL_IDENTITY = "paddleocr:en:text-line-orientation"
+OCR_BACKEND_ENV = "SARI_OCR_BACKEND"
+OCR_BACKENDS = ("auto", "paddle", "onnx-cpu", "directml")
+DEFAULT_OCR_BACKEND = "auto"
+DEFAULT_DIRECTML_DEVICE_ID = 0
 
 
-def build_paddle_engine() -> Any:
-    """Construct the measured five-component pipeline exactly once, in the server process."""
+def resolve_ocr_backend(requested: str) -> str:
+    """Resolve ``auto`` without importing ONNX Runtime on the normal Paddle path."""
+    backend = requested.strip().lower()
+    if backend not in OCR_BACKENDS:
+        raise ValueError(f"unknown OCR backend {requested!r}; choose from {OCR_BACKENDS}")
+    if backend != "auto":
+        return backend
+    if sys.platform != "win32":
+        return "paddle"
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return "paddle"
+    return (
+        "directml"
+        if "DmlExecutionProvider" in ort.get_available_providers()
+        else "paddle"
+    )
+
+
+def _verify_onnx_provider(required_provider: str) -> list[list[str]]:
+    """Fail startup if PaddleOCR silently created CPU-only ONNX sessions."""
+    import onnxruntime as ort
+
+    sessions = [
+        candidate
+        for candidate in gc.get_objects()
+        if isinstance(candidate, ort.InferenceSession)
+    ]
+    provider_lists = [session.get_providers() for session in sessions]
+    if not sessions:
+        raise RuntimeError("PaddleOCR initialized without discoverable ONNX Runtime sessions")
+    rejected = [
+        providers
+        for providers in provider_lists
+        if not providers or providers[0] != required_provider
+    ]
+    if rejected:
+        raise RuntimeError(
+            f"provider verification failed: required {required_provider!r} first, "
+            f"got {rejected!r}"
+        )
+    return provider_lists
+
+
+def build_paddle_engine(
+    backend: str = "paddle",
+    *,
+    directml_device_id: int = DEFAULT_DIRECTML_DEVICE_ID,
+) -> Any:
+    """Construct one PaddleOCR pipeline using the selected inference backend."""
     from paddleocr import PaddleOCR
 
-    return PaddleOCR(lang="en", use_textline_orientation=True, enable_mkldnn=False)
+    if backend == "paddle":
+        return PaddleOCR(lang="en", use_textline_orientation=True, enable_mkldnn=False)
+    if backend not in {"onnx-cpu", "directml"}:
+        raise ValueError(f"build_paddle_engine requires a resolved backend, got {backend!r}")
+
+    if backend == "directml":
+        required_provider = "DmlExecutionProvider"
+        engine_config: dict[str, Any] = {
+            "providers": [required_provider],
+            "provider_options": {"device_id": directml_device_id},
+            # Required by ONNX Runtime's DirectML execution provider.
+            "execution_mode": "sequential",
+            "enable_mem_pattern": False,
+        }
+    else:
+        required_provider = "CPUExecutionProvider"
+        engine_config = {"providers": [required_provider]}
+
+    engine = PaddleOCR(
+        lang="en",
+        use_textline_orientation=True,
+        # PaddleOCR 3.7's ONNX wrapper only recognizes CUDA for device="gpu".
+        # The explicit provider above still controls the actual inference device.
+        device="cpu",
+        engine="onnxruntime",
+        engine_config=engine_config,
+    )
+    providers = _verify_onnx_provider(required_provider)
+    print(
+        f"[ocr-server] verified {len(providers)} ONNX sessions with "
+        f"{required_provider} first",
+        flush=True,
+    )
+    return engine
+
+
+def model_identity(backend: str) -> str:
+    return f"{MODEL_IDENTITY}:{backend}"
 
 
 def parse_paddle_lines(result: Any) -> list[str]:
@@ -49,6 +142,8 @@ class OcrApplication:
         engine_factory: Callable[[], Any] = build_paddle_engine,
         *,
         model: str = MODEL_IDENTITY,
+        backend: str | None = None,
+        execution_provider: str | None = None,
         max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
     ) -> None:
@@ -57,10 +152,24 @@ class OcrApplication:
         if max_request_bytes < 1:
             raise ValueError("max_request_bytes must be at least 1")
         self.model = model
+        self.backend = backend
+        self.execution_provider = execution_provider
         self.max_request_bytes = max_request_bytes
         self._engine = engine_factory()
         self._admission = threading.BoundedSemaphore(max_in_flight)
         self._inference_lock = threading.Lock()
+
+    def health_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ready": True,
+            "api_version": API_VERSION,
+            "model": self.model,
+        }
+        if self.backend is not None:
+            payload["backend"] = self.backend
+        if self.execution_provider is not None:
+            payload["execution_provider"] = self.execution_provider
+        return payload
 
     def infer_png(self, body: bytes) -> tuple[list[str], float]:
         if not body:
@@ -85,6 +194,10 @@ class OcrApplication:
         with self._inference_lock:
             predict = getattr(self._engine, "predict", None)
             result = predict(source) if callable(predict) else self._engine.ocr(source)
+            if isinstance(result, dict):
+                result = [result]
+            elif not isinstance(result, (list, tuple)):
+                result = list(result)
         return parse_paddle_lines(result), round((time.perf_counter() - started) * 1000.0, 2)
 
     def try_admit(self) -> bool:
@@ -113,10 +226,7 @@ def make_handler(application: OcrApplication) -> type[BaseHTTPRequestHandler]:
             if self.path != "/health":
                 self._error(HTTPStatus.NOT_FOUND, "not_found", "unknown endpoint")
                 return
-            self._json(
-                HTTPStatus.OK,
-                {"ready": True, "api_version": API_VERSION, "model": application.model},
-            )
+            self._json(HTTPStatus.OK, application.health_payload())
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             if self.path != "/v1/ocr":
@@ -196,12 +306,16 @@ def create_server(
     *,
     engine_factory: Callable[[], Any] = build_paddle_engine,
     model: str = MODEL_IDENTITY,
+    backend: str | None = None,
+    execution_provider: str | None = None,
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
 ) -> ThreadingHTTPServer:
     application = OcrApplication(
         engine_factory,
         model=model,
+        backend=backend,
+        execution_provider=execution_provider,
         max_in_flight=max_in_flight,
         max_request_bytes=max_request_bytes,
     )
@@ -214,21 +328,51 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the central runner-local PaddleOCR service.")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--backend",
+        choices=OCR_BACKENDS,
+        default=os.environ.get(OCR_BACKEND_ENV, DEFAULT_OCR_BACKEND),
+        help="Inference backend (auto selects DirectML on Windows when available).",
+    )
+    parser.add_argument(
+        "--directml-device-id",
+        type=int,
+        default=DEFAULT_DIRECTML_DEVICE_ID,
+        help="DirectML adapter index (default: 0).",
+    )
     parser.add_argument("--max-in-flight", type=int, default=DEFAULT_MAX_IN_FLIGHT)
     parser.add_argument("--max-request-bytes", type=int, default=DEFAULT_MAX_REQUEST_BYTES)
     args = parser.parse_args(argv)
 
-    print("[ocr-server] loading PaddleOCR pipeline...", flush=True)
+    backend = resolve_ocr_backend(args.backend)
+    provider = {
+        "paddle": "PaddlePaddle",
+        "onnx-cpu": "CPUExecutionProvider",
+        "directml": "DmlExecutionProvider",
+    }[backend]
+    identity = model_identity(backend)
+    print(
+        f"[ocr-server] loading PaddleOCR pipeline "
+        f"(backend={backend}, provider={provider})...",
+        flush=True,
+    )
     server = create_server(
         args.host,
         args.port,
+        engine_factory=lambda: build_paddle_engine(
+            backend,
+            directml_device_id=args.directml_device_id,
+        ),
+        model=identity,
+        backend=backend,
+        execution_provider=provider,
         max_in_flight=args.max_in_flight,
         max_request_bytes=args.max_request_bytes,
     )
     host, port = server.server_address[:2]
     print(
         f"[ocr-server] ready on http://{host}:{port} "
-        f"(model={MODEL_IDENTITY}, max_in_flight={args.max_in_flight})",
+        f"(model={identity}, provider={provider}, max_in_flight={args.max_in_flight})",
         flush=True,
     )
     try:

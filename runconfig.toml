@@ -97,8 +97,9 @@ coordinator = "ws://127.0.0.1:9000"
 sandbox_startup_timeout = 30.0
 lease_acquire_timeout = 30.0
 
-# Per-command sandbox deadline passed to every agent process in this battery. A timeout signals a
-# wedged player to the harness, which quarantines it and requeues the logical attempt.
+# Per-command sandbox deadline passed to every agent process in this battery. A timeout stops and
+# requeues the uncertain attempt; the harness resets and probes the command lane, quarantining the
+# sandbox only if that recovery check fails.
 sandbox_command_timeout = 10.0
 
 # Optional battery destination. Without it, results use bench_runs/<timestamp>[_<name>].

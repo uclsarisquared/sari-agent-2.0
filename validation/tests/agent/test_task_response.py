@@ -244,6 +244,32 @@ def test_partial_failure_fallback_never_claims_full_success():
     assert "completed the requested task" not in response
 
 
+def test_refused_stop_answer_survives_into_fallback_instead_of_being_silently_dropped():
+    memory = new_response_memory("Compare the two snacks and tell me which to remove.")
+    plan = [{"type": "compare", "text": "which item to remove to stay under budget"}]
+    set_planned_subtasks(memory, plan)
+    record_attempt(
+        memory,
+        leg_number=1,
+        attempt_number=1,
+        subtask=plan[0],
+        metrics={
+            "success": False,
+            "end_reason": "halt_forced",
+            "reported_answer": "",
+            "refused_reported_answer": "Remove one Nestle Honey Stars to stay under budget.",
+            "final_state": _state(
+                last_halt_refused="compare not complete: VLM rejected the choice",
+            ),
+        },
+    )
+    finalize_response_memory(memory, success=False)
+
+    response = deterministic_fallback(memory)
+    assert "could not complete" in response
+    assert "Remove one Nestle Honey Stars to stay under budget." in response
+
+
 def test_orchestrate_returns_and_persists_the_same_final_response(tmp_path, monkeypatch, capsys):
     """A simulator-free integration pin for the summary/artifact/CLI contract."""
     from orchestrator import orchestration as orchestrator

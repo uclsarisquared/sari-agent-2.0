@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -14,7 +15,14 @@ _ROOT = os.path.dirname(os.path.join(os.path.dirname(os.path.dirname(os.path.dir
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from agent.vision.ocr_server import OcrApplication, create_server, parse_paddle_lines
+from agent.vision import ocr_server
+from agent.vision.ocr_server import (
+    OcrApplication,
+    build_paddle_engine,
+    create_server,
+    parse_paddle_lines,
+    resolve_ocr_backend,
+)
 
 
 def png_bytes(size=(8, 6)) -> bytes:
@@ -36,6 +44,65 @@ def test_invalid_images_and_request_limit():
         app.infer_png(b"not an image")
     with pytest.raises(OverflowError):
         app.infer_png(b"x" * 65)
+
+
+def test_directml_backend_builds_onnx_engine_with_required_session_options(monkeypatch):
+    captured = {}
+    engine = object()
+
+    def fake_paddle_ocr(**kwargs):
+        captured.update(kwargs)
+        return engine
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        SimpleNamespace(PaddleOCR=fake_paddle_ocr),
+    )
+    monkeypatch.setattr(
+        ocr_server,
+        "_verify_onnx_provider",
+        lambda required: [[required, "CPUExecutionProvider"]],
+    )
+
+    assert build_paddle_engine("directml", directml_device_id=2) is engine
+    assert captured["engine"] == "onnxruntime"
+    assert captured["device"] == "cpu"
+    assert captured["engine_config"] == {
+        "providers": ["DmlExecutionProvider"],
+        "provider_options": {"device_id": 2},
+        "execution_mode": "sequential",
+        "enable_mem_pattern": False,
+    }
+
+
+def test_auto_backend_selects_directml_only_on_windows_when_available(monkeypatch):
+    monkeypatch.setattr(ocr_server.sys, "platform", "win32")
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider"]),
+    )
+    assert resolve_ocr_backend("auto") == "directml"
+
+    monkeypatch.setattr(ocr_server.sys, "platform", "linux")
+    assert resolve_ocr_backend("auto") == "paddle"
+
+
+def test_health_reports_accelerator_identity_when_configured():
+    app = OcrApplication(
+        lambda: object(),
+        model="paddleocr:test:directml",
+        backend="directml",
+        execution_provider="DmlExecutionProvider",
+    )
+    assert app.health_payload() == {
+        "ready": True,
+        "api_version": "v1",
+        "model": "paddleocr:test:directml",
+        "backend": "directml",
+        "execution_provider": "DmlExecutionProvider",
+    }
 
 
 def test_slow_engine_is_constructed_once_and_inference_is_serialized():

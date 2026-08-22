@@ -74,7 +74,8 @@ dev = [
 
 [tool.poe.tasks]
 test = { cmd = "pytest", help = "Run the maintained offline test suite" }
-ocr-server = { cmd = "python -m sari_bench ocr-server", help = "Run the shared runner-local PaddleOCR service on 127.0.0.1:9100" }
+ocr-server = { cmd = "bash tools/start_ocr_server_auto.sh", help = "Run OCR on 127.0.0.1:9100, selecting native DirectML on the configured Windows/WSL host" }
+ocr-server-directml = { cmd = "bash tools/start_ocr_server_directml.sh", help = "Run the shared OCR service natively on Windows with DirectML" }
 dbench-watch = { cmd = "python -m sari_bench watch --host 0.0.0.0", help = "Live dashboard for a running battery (run beside the runner)" }
 dbench-coordinator = { cmd = "python -m sari_bench coordinator --port 9000", help = "Run the sandbox registry" }
 dbench-status = { cmd = "python -m sari_bench status --coordinator ws://127.0.0.1:9000", help = "Print the current sandbox pool" }

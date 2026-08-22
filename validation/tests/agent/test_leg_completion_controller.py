@@ -58,3 +58,29 @@ def test_granted_stop_updates_the_public_result_contract(monkeypatch):
     assert metrics["completion_evidence"] == "verified"
     assert metrics["reported_answer"] == "verified answer"
 
+
+def test_refused_stop_keeps_the_claimed_answer_separately(monkeypatch):
+    monkeypatch.setattr(
+        leg_completion, "reported_completion_answer", lambda _response: "claimed answer"
+    )
+    monkeypatch.setattr(
+        leg_completion, "completion_predicate", lambda *_args, **_kwargs: (False, "rejected")
+    )
+    metrics = _metrics()
+    controller = leg_completion.CompletionController(
+        SimpleNamespace(), {"type": "compare"}, "deterministic", metrics,
+        lambda _row: None, 2,
+    )
+    tracker = GripTracker(names={"left": None, "right": None}, start_grips=set())
+    state = {}
+
+    status = controller.handle_stop(
+        {"halt": True}, state, "", leg_completion.StepGuards(), 3, tracker
+    )
+
+    assert status == "refused"
+    assert metrics["success"] is False
+    assert metrics.get("reported_answer") is None
+    assert metrics["refused_reported_answer"] == "claimed answer"
+    assert state["last_halt_refused"] == "rejected"
+

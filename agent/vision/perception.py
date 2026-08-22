@@ -740,7 +740,8 @@ def read_text_in_box(box, pad_frac=0.04, image_path=None, source_image=None):
         raise OcrUnavailable(
             f"read_text_in_box failed ({type(e).__name__}: {e}). Region OCR is REQUIRED by the "
             f"callers that diff receipt lines - returning no text here would silently read as "
-            f"'nothing scanned'. Start the service with `uv run poe ocr-server`."
+            f"'nothing scanned'. Start the service with `uv run poe ocr-server` "
+            f"(or `ocr-server-directml`)."
         ) from e
 
 

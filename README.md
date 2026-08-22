@@ -32,7 +32,7 @@ The checked-in [`runconfig.toml`](runconfig.toml) already points at the complete
 Start these in separate terminals:
 
 ```bash
-# Terminal 1: required shared OCR service
+# Terminal 1: required shared OCR service (auto-selects DirectML on this Windows/WSL host)
 uv run poe ocr-server
 
 # Terminal 2: run one task
@@ -56,7 +56,7 @@ The simulator WebSocket defaults to `ws://localhost:8080/commands`; override `ws
 Edit `[bench]` in `runconfig.toml`, then run:
 
 ```bash
-uv run poe ocr-server
+uv run poe ocr-server  # auto-selects DirectML on the configured RX 6650 XT host
 uv run poe dbench-coordinator
 SARI_BENCH_COORDINATOR=ws://<coordinator-host>:9000/sandbox ./SariSandbox
 uv run poe dbench-run

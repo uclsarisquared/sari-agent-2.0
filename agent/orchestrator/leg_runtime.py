@@ -110,6 +110,7 @@ def initial_metrics(leg, completion_guard):
         "end_reason": None,
         "completion_evidence": None,
         "reported_answer": None,
+        "refused_reported_answer": None,
     }
 
 
