@@ -209,10 +209,10 @@
   .tabstrip { display: flex; align-items: flex-end; gap: 4px; padding: 8px 18px 0;
               border-bottom: 1px solid var(--line); background: #0e1013; }
   /* Two colours drive the whole shape - the fill and the outline - so the flares below can be
-     written once and inherit whatever state the tab is in. A tab that is not the front one is still
-     a tab: it keeps its outline and its flares and gives up only the fill, and its line is a shade
-     dimmer so the two are told apart by more than which one is filled. */
-  button.tab { --tab-fill: transparent; --tab-line: #23272e;
+     written once and inherit whatever state the tab is in. A tab that is neither hovered nor
+     selected sets both to transparent, which makes its outline and its flares vanish without a
+     second rule: only the front tab is drawn as a tab, the rest are just their labels. */
+  button.tab { --tab-fill: transparent; --tab-line: transparent;
                position: relative; margin-bottom: -1px; padding: 6px 16px 7px; font-size: 12.5px;
                /* The tab hangs 1px into the strip's rule, and its bottom edge is painted with its
                   own fill rather than its outline: that is what opens the seam on the front tab,
