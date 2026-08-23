@@ -199,11 +199,47 @@
   .mismatch { background: rgba(224,162,63,.12); color: #e8c48d; }
 
   /* -- tabs --------------------------------------------------------------------------------- */
-  .tabs { display: flex; gap: 4px; }
-  button.tab { padding: 4px 12px; border-radius: 999px; background: none;
-               border: 1px solid transparent; color: var(--dim); }
-  button.tab:hover { background: #262b33; }
-  button.tab.on { background: #262b33; border-color: var(--line); color: var(--ink); }
+  /* Folder tabs, not a segmented control: they sit on the rule that divides them from what they
+     switch, and the selected one breaks through that rule so the tab and the view below it read as
+     one surface. Everything here serves that single join - the negative bottom margin that lets the
+     tab overlap the strip's border, and the transparent bottom edge that opens the seam. */
+  /* The strip is its own surface, a step DARKER than the page the front tab opens onto - the same
+     recess a browser's tab bar sits in. Sharing the header's fill made the two read as one bar and
+     left the tabs looking like part of the title, which is what moving them down here undid. */
+  .tabstrip { display: flex; align-items: flex-end; gap: 4px; padding: 8px 18px 0;
+              border-bottom: 1px solid var(--line); background: #0e1013; }
+  /* Two colours drive the whole shape - the fill and the outline - so the flares below can be
+     written once and inherit whatever state the tab is in. A tab that is not the front one is still
+     a tab: it keeps its outline and its flares and gives up only the fill, and its line is a shade
+     dimmer so the two are told apart by more than which one is filled. */
+  button.tab { --tab-fill: transparent; --tab-line: #23272e;
+               position: relative; margin-bottom: -1px; padding: 6px 16px 7px; font-size: 12.5px;
+               /* The tab hangs 1px into the strip's rule, and its bottom edge is painted with its
+                  own fill rather than its outline: that is what opens the seam on the front tab,
+                  and on the others the fill is transparent so the rule shows straight through. */
+               border: 1px solid var(--tab-line); border-bottom-color: var(--tab-fill);
+               border-radius: 9px 9px 0 0; background: var(--tab-fill); color: var(--dim); }
+  button.tab:hover { --tab-fill: #262b33; color: var(--ink); }
+  button.tab.on { --tab-fill: var(--bg); --tab-line: var(--line); color: var(--ink); }
+  /* The curve out to the baseline, which is what makes these read as tabs rather than as boxes with
+     their corners filed off. Each bottom corner gets a square of its own, sitting outside the tab,
+     filled everywhere EXCEPT a quarter-disc centred on the corner nearest the tab's top - so what
+     is left is a concave sweep from the tab's side down to the rule. The two gradient stops at the
+     radius paint that sweep's 1px of outline before the fill, so the tab's border follows the curve
+     instead of stopping where the straight edge does. */
+  button.tab::before, button.tab::after {
+    content: ""; position: absolute; bottom: -1px; width: 9px; height: 9px; pointer-events: none;
+  }
+  button.tab::before {
+    left: -9px;
+    background: radial-gradient(circle at top left, transparent 9px,
+                var(--tab-line) 9px, var(--tab-line) 10px, var(--tab-fill) 10px);
+  }
+  button.tab::after {
+    right: -9px;
+    background: radial-gradient(circle at top right, transparent 9px,
+                var(--tab-line) 9px, var(--tab-line) 10px, var(--tab-fill) 10px);
+  }
 
   /* -- overview ----------------------------------------------------------------------------- */
   #overview { padding: 16px; }
@@ -565,10 +601,6 @@
     </button>
     <ul class="menu" id="battery-menu" role="listbox" hidden></ul>
   </span>
-  <span class="tabs">
-    <button class="tab on" data-act="tab" data-tab="live">live</button>
-    <button class="tab" data-act="tab" data-tab="overview">overview</button>
-  </span>
   <!-- The queue and the pool are one thought - what is dispatched, and what it is waiting on - so
        they sit together, ahead of the tally that is only a readout. The pool count is a door rather
        than a label: how many sandboxes there are is the least of what you want to know once one of
@@ -616,9 +648,19 @@
     </div>
   </span>
 </header>
-<main id="grid"><div class="empty" id="empty">Loading…</div></main>
 
-<section id="overview" hidden>
+<!-- Out of the header and down onto the views themselves: which of the two is on screen is a fact
+     about the body of the page, not one more thing the title bar is reporting. -->
+<nav class="tabstrip" role="tablist" aria-label="View">
+  <button class="tab on" id="tab-live" role="tab" aria-selected="true" aria-controls="grid"
+          data-act="tab" data-tab="live">live</button>
+  <button class="tab" id="tab-overview" role="tab" aria-selected="false" aria-controls="overview"
+          data-act="tab" data-tab="overview">overview</button>
+</nav>
+
+<main id="grid" role="tabpanel" aria-labelledby="tab-live"><div class="empty" id="empty">Loading…</div></main>
+
+<section id="overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
   <div class="ov-bar">
     <a class="btn" href="/api/report.csv" download>export to CSV</a>
     <a class="btn" href="/api/report.csv?grain=roles" data-grain="roles" download
@@ -2071,6 +2113,16 @@ const fmtWhen = ts => !ts ? "" : new Date(ts * 1000).toLocaleString([], {
   month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
 });
 
+// Runners name their directory `<YYYYMMDD_HHMMSS><sep><label>`, and every row in this menu already
+// carries the run's date beside it - so the stamp on the front is the same fact twice, in the harder
+// of the two forms to read. Strip it for display only: the id itself is still what gets copied,
+// renamed, put in a href and asked of the server. A directory that is only a stamp keeps it, since
+// the alternative is a row with no name at all.
+const benchLabel = id => {
+  const trimmed = String(id || "").replace(/^\d{8}_\d{6}[-_ ]+/, "");
+  return trimmed || String(id || "");
+};
+
 // Every run id this page has already seen on disk. Seeded from the first payload rather than left
 // empty, so opening the dashboard onto a bench_runs/ with a week of history announces none of it:
 // only a directory that appears while the page is watching is news.
@@ -2091,7 +2143,7 @@ function announceNewRuns(discovered, currentId) {
   if (!fresh) return;
 
   if (newRunBanner) newRunBanner();
-  newRunBanner = notify(`New bench run started: ${fresh} — click to watch it.`, () => {
+  newRunBanner = notify(`New bench run started: ${benchLabel(fresh)} — click to watch it.`, () => {
     newRunBanner = null;
     selectBattery(fresh);
   });
@@ -2179,7 +2231,8 @@ function renderPicker(state) {
 
   const dot = document.getElementById("battery-dot");
   dot.classList.toggle("live", Boolean(here && here.live));
-  setClip(document.getElementById("battery-name"), state.battery_id || "no battery");
+  setClip(document.getElementById("battery-name"),
+          state.battery_id ? benchLabel(state.battery_id) : "no battery");
   const batteryTag = document.getElementById("battery");
   batteryTag.dataset.tipTerm = "bench run (battery)";
   batteryTag.dataset.tip = TIP_BATTERY;
@@ -2209,8 +2262,9 @@ function renderPicker(state) {
       + `<span class="dot${d.live ? " live" : ""}"></span>`
       // The name it will be measured against once the list is on screen: a clip box has no width
       // while the menu is hidden, so nothing here can be sized until it opens.
-      + `<span class="m-id pill-clip" data-name="${esc(d.id)}">`
-      + `<span class="pill-scroll"><span class="pill-copy">${esc(d.id)}</span></span></span>`
+      + `<span class="m-id pill-clip" data-name="${esc(benchLabel(d.id))}">`
+      + `<span class="pill-scroll"><span class="pill-copy">${esc(benchLabel(d.id))}</span>`
+      + `</span></span>`
       + `<span class="m-note">${esc(note)}</span>`
       // Copying stays available on a live run: the name is just as useful to paste while the
       // runner is still working as it is afterwards.
@@ -2330,7 +2384,8 @@ function renderQueue(state) {
     const note = QUEUE_NOTE[e.state] || e.state;
     // The battery is named only when it is not the one on screen: on the usual single-run page it
     // would be the same word on every row.
-    const where = e.battery_id && e.battery_id !== state.battery_id ? ` · ${e.battery_id}` : "";
+    const where = e.battery_id && e.battery_id !== state.battery_id
+      ? ` · ${benchLabel(e.battery_id)}` : "";
     return `<li class="q-row" role="option" aria-selected="false"`
       + ` title="${esc(e.error || note)}">`
       + `<span class="q-pos">▸</span>`
@@ -2374,7 +2429,11 @@ function selectBattery(choice) {
 function setTab(tab) {
   if (tab === activeTab) return;
   activeTab = tab;
-  document.querySelectorAll("button.tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll("button.tab").forEach(b => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", String(on));
+  });
   document.getElementById("grid").hidden = tab !== "live";
   document.getElementById("overview").hidden = tab !== "overview";
   // A hidden terminal has no layout, so nothing written while the overview was up could position
