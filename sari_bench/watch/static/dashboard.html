@@ -244,6 +244,16 @@
   /* -- overview ----------------------------------------------------------------------------- */
   #overview { padding: 16px; }
   .ov-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  /* A round info mark at the far end of the bar: equal width and height with a radius past half of
+     either, so it is a circle rather than a very short pill, and it never stretches on the flex row
+     the way the export links do. The `i` is set in a serif, which is what keeps a single lowercase
+     letter reading as the info glyph rather than as a stray character in the UI font. */
+  .ov-help { margin-left: auto; flex: none; width: 22px; height: 22px; padding: 0;
+             border: 1px solid var(--line); border-radius: 999px; background: none;
+             color: var(--dim); line-height: 1; font-family: Georgia, "Times New Roman", serif;
+             font-style: italic; font-size: 13px; }
+  .ov-help:hover { background: #262b33; color: var(--ink); }
+  .ov-help[aria-expanded="true"] { border-color: var(--accent); color: var(--ink); }
   .ov-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px;
                background: var(--panel); }
   table.ov { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
@@ -665,11 +675,14 @@
     <a class="btn" href="/api/report.csv" download>export to CSV</a>
     <a class="btn" href="/api/report.csv?grain=roles" data-grain="roles" download
        title="one row per attempt per reasoner — tokens, calls and share of the attempt's spend">export tokens by role</a>
+    <span class="muted" id="ov-note"></span>
     <!-- What a cell means and what a key does are the same question asked twice, so they are one
          button: the bar keeps only the shape of the grid, and the glyphs and shortcuts move into a
-         panel that can show each cell as it actually looks. -->
-    <button id="legend-open" data-act="legend-open" aria-haspopup="dialog">legend &amp; controls</button>
-    <span class="muted" id="ov-note"></span>
+         panel that can show each cell as it actually looks. It is the help for this view rather
+         than a fourth thing to do with it, so it sits off at the far end as a mark, not a label. -->
+    <button class="ov-help" id="legend-open" data-act="legend-open" aria-haspopup="dialog"
+            title="legend &amp; controls — what each cell means and what the keys do"
+            aria-label="Legend and controls">i</button>
   </div>
   <div class="ov-scroll"><table class="ov" id="ov-table"></table></div>
 </section>
