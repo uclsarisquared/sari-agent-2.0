@@ -550,17 +550,14 @@
   #modal-play[hidden] { display: none; }
   /* A live attempt shows the run itself, not an offer to watch a recording of it, so the big ▶ is
      replaced by the frames as they land. These two sit in the corners over that picture: what it is
-     on the left, and the way out to the clip-so-far on the right. Positioned against the box rather
+     on the left. Positioned against the box rather
      than placed in its grid row, so they stay in the corners a reader can actually see however
      short the log below squeezes the picture. */
-  #modal-badge, #modal-replay { position: absolute; bottom: 10px; z-index: 1; }
+  #modal-badge { position: absolute; bottom: 10px; z-index: 1; }
   #modal-badge { left: 10px; padding: 3px 9px; border-radius: 999px; font-size: 12px;
                  color: #cfe7d6; background: rgba(15,17,21,.78); border: 1px solid rgba(79,169,107,.5);
                  display: inline-flex; align-items: center; gap: 6px; }
-  #modal-replay { right: 10px; color: #fff; background: rgba(15,17,21,.78);
-                  border-color: rgba(255,255,255,.28); }
-  #modal-replay:hover { background: rgba(38,43,51,.94); }
-  #modal-badge[hidden], #modal-replay[hidden] { display: none; }
+  #modal-badge[hidden] { display: none; }
   #modal-note { padding: 10px 14px; color: var(--dim); text-align: center; font-size: 12.5px; }
   #modal-rows { border-top: 1px solid var(--line); }
   /* The overlay is where a log is actually read, so it is given the height the card cannot spare -
@@ -700,15 +697,14 @@
     </div>
     <div id="modal-body">
       <div id="modal-media">
-        <video id="modal-video" controls preload="metadata" style="display:none"></video>
+        <video id="modal-video" controls preload="metadata" style="display:none">
+          <track id="modal-subtitles" kind="subtitles" srclang="en" label="English" default>
+        </video>
         <img id="modal-still" alt="latest frame" hidden>
         <button id="modal-play" data-act="replay-start" aria-label="Render and play replay"
                 title="Play replay">▶</button>
-        <!-- Shown together, and only while the attempt is still going: the frame above is the run
-             as it happens, and the clip is a second thing you can ask for rather than the default. -->
+        <!-- Shown only while the attempt is still going: the frame above is the run as it happens. -->
         <span id="modal-badge" hidden><span class="dot live"></span>live</span>
-        <button id="modal-replay" data-act="replay-start" hidden
-                title="Render the frames captured so far into a clip. The attempt is still running, so this covers only what it has done up to now; its full replay is rendered again when it finishes.">▶ replay so far</button>
       </div>
       <!-- Empty and hidden at rest: the ▶ button already says what to do, and how the clip gets
            made is the watcher's business. It speaks only while a render is in flight or has failed. -->
@@ -2841,15 +2837,13 @@ function resetModalShot() {
 }
 
 // Which of the three things the media area is showing. The clip wins outright once one has been
-// asked for; a running attempt gets its own frames and the offer of a clip-so-far; anything else
-// gets the ▶ that renders and plays its replay.
+// asked for; a running attempt gets its own frames; anything else gets the ▶ for its replay.
 function modalMedia(a) {
   const video = document.getElementById("modal-video");
   const playing = modalReplayRequested || Boolean(video.getAttribute("src"));
   const live = Boolean(a) && isLive(a);
   document.getElementById("modal-play").hidden = playing || live;
   document.getElementById("modal-badge").hidden = playing || !live;
-  document.getElementById("modal-replay").hidden = playing || !live;
   if (video.getAttribute("src")) document.getElementById("modal-still").hidden = true;
 }
 
@@ -2960,6 +2954,7 @@ async function pollReplay(key) {
 
   if (res.status === 206 || res.status === 200) {
     if (!video.getAttribute("src")) {
+      document.getElementById("modal-subtitles").src = api(key, "replay.vtt");
       video.src = api(key, "replay.mp4");
       video.style.display = "";
       note.style.display = "none";
