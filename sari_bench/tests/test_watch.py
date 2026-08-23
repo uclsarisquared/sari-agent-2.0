@@ -1339,6 +1339,7 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
                 "coordinator": "ws://127.0.0.1:9000",
                 "completion_guard": "vlm",
                 "context_policy": "a5",
+                "adaptive_leg_replanning": True,
                 "api_max_attempts": 7,
                 "max_api_requeues": 0,
                 "sandbox_command_timeout_seconds": 23.0,
@@ -1355,6 +1356,7 @@ def test_retry_config_preserves_completion_guard_and_context_policy() -> None:
         )
         assert config["completion_guard"] == "vlm", config
         assert config["context_policy"] == "a5", config
+        assert config["adaptive_leg_replanning"] is True, config
         assert config["api_max_attempts"] == 7, config
         assert config["max_api_requeues"] == 0, config
         assert config["sandbox_command_timeout"] == 31.0, config

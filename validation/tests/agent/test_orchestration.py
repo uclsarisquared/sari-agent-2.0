@@ -1,9 +1,13 @@
 from types import SimpleNamespace
+from dataclasses import replace
+import json
 
 import pytest
 
 from orchestrator import orchestration
 from orchestrator.task_response import new_response_memory
+from orchestrator.plan_controller import PlanController
+from orchestrator import plan_controller as plan_controller_module
 
 
 def _config(tmp_path, *, retries=1, refusal_cap_action="continue"):
@@ -155,6 +159,51 @@ def test_execute_plan_halt_policy_aborts_on_refusal_cap(monkeypatch, tmp_path):
     assert attempted == [0]
     assert state.success is False
     assert state.unverified_legs == []
+
+
+def test_exhausted_leg_revision_can_replace_failed_strategy_and_complete_goal(
+    monkeypatch, tmp_path
+):
+    state = _state(tmp_path, retries=0)
+    state.config = replace(state.config, adaptive_leg_replanning=True)
+    initial = [{"type": "pickup", "text": "Pick up chips", "target": "chips"}]
+
+    def resolve(_sm, _call, legs):
+        for leg in legs:
+            leg["feasible"] = True
+        return legs, 1
+
+    monkeypatch.setattr(plan_controller_module, "plan_legs", resolve)
+    controller = PlanController(
+        initial, object(), object(),
+        lambda *_args: json.dumps({"revised_suffix": [{
+            "type": "pickup", "text": "Pick up chips from the display", "target": "chips",
+            "goal_id": "goal-001",
+        }]}),
+    )
+    state.plan_controller = controller
+    state.legs = controller.pending
+    state.response_memory["experimental"] = {
+        "adaptive_leg_replanning": True, "initial_plan": controller.initial_legs,
+        "current_plan": controller.pending, "completed_goal_ids": [], "revision_events": [],
+    }
+    attempted = []
+
+    def run(_state, leg, _index, **_kwargs):
+        attempted.append(leg["text"])
+        return (
+            _metrics(success=len(attempted) == 2,
+                     reason="halt_granted" if len(attempted) == 2 else "time_cap"),
+            1,
+        )
+
+    monkeypatch.setattr(orchestration, "_run_leg_with_retries", run)
+    orchestration._execute_revisable_plan(state)
+
+    assert attempted == ["Pick up chips", "Pick up chips from the display"]
+    assert state.success is True
+    assert controller.completed_goal_ids == {"goal-001"}
+    assert controller.accepted_revisions == 1
 
 
 def test_orchestrate_preserves_run_error_and_always_closes(monkeypatch, tmp_path):

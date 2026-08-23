@@ -78,6 +78,68 @@ def test_one_step_stop_returns_the_stable_metrics_contract(monkeypatch):
     assert "visited_checkpoints" not in request["state"]
 
 
+def test_accepted_revision_ends_before_action_dispatch(monkeypatch):
+    state = {
+        "translation": (0, 0, 0), "leftGrippedState": False,
+        "rightGrippedState": False, "leftHoveredObject": "None",
+        "rightHoveredObject": "None",
+    }
+    monkeypatch.setattr(leg_runner, "_fresh_agent_state", lambda: dict(state))
+    monkeypatch.setattr(leg_runner, "_REQUEST_SCREENSHOT_", lambda: {"image": b"frame"})
+    request = {
+        "reason_code": "stale_assumption", "evidence": "empty shelf",
+        "suggested_change": "use another shelf",
+    }
+    agent = _Agent([{
+        "halt": False, "agent_mode": "plan_revision", "text": "",
+        "plan_revision_request": request,
+    }])
+    handled = []
+
+    result = leg_runner._run_leg_impl(
+        agent, {"type": "goto", "text": "Go", "candidates": [1]}, _StoreMap(),
+        (3, 1.0), completion_guard="none", revision_handler=(
+            lambda revision, *_args: handled.append(revision) or {"accepted": True}
+        ),
+    )
+
+    assert result["end_reason"] == "plan_revision_accepted"
+    assert result["success"] is False
+    assert handled == [request]
+    assert result["llm_calls"] == 1
+
+
+def test_rejected_revision_continues_same_caps_and_disables_second_request(monkeypatch):
+    state = {
+        "translation": (0, 0, 0), "leftGrippedState": False,
+        "rightGrippedState": False, "leftHoveredObject": "None",
+        "rightHoveredObject": "None",
+    }
+    monkeypatch.setattr(leg_runner, "_fresh_agent_state", lambda: dict(state))
+    monkeypatch.setattr(leg_runner, "_REQUEST_SCREENSHOT_", lambda: {"image": b"frame"})
+    request = {
+        "reason_code": "stale_assumption", "evidence": "weak evidence",
+        "suggested_change": "change",
+    }
+    agent = _Agent([
+        {"halt": False, "agent_mode": "plan_revision", "text": "",
+         "plan_revision_request": request},
+        {"halt": True, "agent_mode": "perception", "text": "STOP"},
+    ])
+
+    result = leg_runner._run_leg_impl(
+        agent, {"type": "goto", "text": "Go", "candidates": [1]}, _StoreMap(),
+        (3, 1.0), completion_guard="none",
+        revision_handler=lambda *_args: {"accepted": False, "feedback": "insufficient evidence"},
+    )
+
+    assert result["success"] is True and result["timesteps"] == 2
+    first_control = agent.requests[0][0]["state"]["_plan_revision_control"]
+    second_control = agent.requests[1][0]["state"]["_plan_revision_control"]
+    assert first_control["allowed"] is True
+    assert second_control == {"allowed": False, "feedback": "insufficient evidence"}
+
+
 def test_action_step_uses_session_state_and_event_assembler(monkeypatch, tmp_path):
     state = {
         "translation": (0, 0, 0),

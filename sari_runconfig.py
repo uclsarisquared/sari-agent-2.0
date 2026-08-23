@@ -49,6 +49,9 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "run_dir": str,
         "summary": str,
     },
+    "experimental": {
+        "adaptive_leg_replanning": bool,
+    },
     "bench": {
         "prompts": str,
         "tries": int,

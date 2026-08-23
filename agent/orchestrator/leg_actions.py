@@ -35,6 +35,8 @@ def invoke_actor(agent, request, step):
     previous_nav_task = getattr(agent, "_nav_task", None)
     advised_before = getattr(agent, "_advised_llm_calls", 0)
     response = agent.execute_lean(request, step)
+    if response.get("plan_revision_request") is not None:
+        return response, 1
     calls = 3 + getattr(agent, "_advised_llm_calls", 0) - advised_before
     if (
         agent.nav_mode in ("graph", "graph-advised")

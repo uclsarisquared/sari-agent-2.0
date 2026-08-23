@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -342,6 +343,42 @@ def test_refusal_cap_action_is_threaded_and_resume_checked() -> None:
         else:
             raise AssertionError("an unsupported refusal cap action was accepted")
     print("ok  refusal cap action reaches the agent command and is resume-checked")
+
+
+def test_adaptive_replanning_is_threaded_and_resume_checked() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        runner = _runner(
+            "ws://127.0.0.1:1", [Prompt(id="p", prompt="pick it up")], workspace,
+            adaptive_leg_replanning=True,
+        )
+        command = runner._agent_command(
+            runner.prompts["p"],
+            SimpleNamespace(commands_uri="ws://sandbox/commands"),
+            workspace / "attempt",
+        )
+        assert "--adaptive-leg-replanning" in command
+        assert runner._semantic_config()["adaptive_leg_replanning"] is True
+        runner.output_dir.mkdir(parents=True, exist_ok=True)
+        runner._write_battery_manifest(1)
+        battery = json.loads((runner.output_dir / "battery.json").read_text())
+        assert battery["adaptive_leg_replanning"] is True
+
+        disabled = _runner(
+            "ws://127.0.0.1:1", [Prompt(id="p", prompt="pick it up")],
+            workspace, adaptive_leg_replanning=False,
+        )
+        try:
+            disabled._validate_resume_config(battery)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("adaptive battery resumed with replanning disabled")
+
+        legacy = dict(battery)
+        legacy.pop("adaptive_leg_replanning")
+        disabled._validate_resume_config(legacy)
+    print("ok  adaptive replanning reaches subprocesses and is resume-checked")
 
 
 async def test_ocr_preflight_fails_before_coordinator_or_lease() -> None:
@@ -1714,6 +1751,7 @@ async def main() -> int:
     test_automatic_retries_outrank_fresh_work_fifo()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
     test_refusal_cap_action_is_threaded_and_resume_checked()
+    test_adaptive_replanning_is_threaded_and_resume_checked()
     for test in (
         test_ocr_preflight_fails_before_coordinator_or_lease,
         test_battery_runs_every_prompt_and_attempt,

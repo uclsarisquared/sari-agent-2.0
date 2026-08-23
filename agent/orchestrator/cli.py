@@ -81,6 +81,12 @@ def main(argv=None):
                          "'continue' (default) keeps the leg failed but runs the remaining legs, "
                          "treating the capped STOP as the agent's override to move on; 'halt' aborts "
                          "the task like any other failed leg")
+    ap.add_argument(
+        "--adaptive-leg-replanning",
+        action=argparse.BooleanOptionalAction,
+        default=configured("experimental", "adaptive_leg_replanning", False),
+        help="EXPERIMENTAL: allow bounded semantic and exhausted-leg plan revisions",
+    )
     ap.add_argument("--output-dir", default=configured("environment", "map_dir"),
                     help="mapping output dir to load the map from (topology/annotations/grid). "
                          "Default: $SARI_MAP_DIR, else mapping/output (StoreMap's "
@@ -163,4 +169,5 @@ def main(argv=None):
                 str(configured("bench", "max_api_requeues", 3)),
             )
         ),
+        adaptive_leg_replanning=args.adaptive_leg_replanning,
     ))

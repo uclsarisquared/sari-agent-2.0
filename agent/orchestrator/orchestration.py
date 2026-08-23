@@ -16,6 +16,7 @@ from agent_core.llm import configure_api_retries
 from agent_core.runtime import EmbodiedAgent
 from agent_core.context_policy import resolve_context_policy
 from orchestrator.leg_runner import run_leg
+from orchestrator.plan_controller import PlanController
 from orchestrator.orchestrator_llm import (
     ASSOCIATIVE_CONFIG,
     VLM_CONFIG,
@@ -106,6 +107,7 @@ class OrchestrationConfig:
     context_policy: str = "baseline"
     api_max_attempts: int = 10
     max_api_requeues: int = 3
+    adaptive_leg_replanning: bool = False
 
 
 @dataclass
@@ -133,6 +135,8 @@ class _RunState:
     started_at: float = 0.0
     error: BaseException | None = None
     ready_to_finalize: bool = False
+    plan_controller: object | None = None
+    initial_plan_size: int = 0
 
 
 def _new_run_state(config):
@@ -188,6 +192,8 @@ def _initialize_runtime(state):
         run_dir=state.run_dir,
         context_policy=state.policy,
     )
+    if config.adaptive_leg_replanning:
+        state.agent.adaptive_leg_replanning = True
     state.started_at = time.time()
     state.ready_to_finalize = True
     token_meter.dump(state.run_dir)
@@ -286,6 +292,39 @@ def _order_and_report_plan(state):
         )
 
 
+def _initialize_plan_controller(state):
+    """Create experimental goal identity only after the initial plan is finally ordered."""
+    resolve_call = make_resolve_call(state.config.resolver_backend)
+
+    def replan(system, user):
+        return _llm_call(
+            state.client, system, user, token_meter.ROLE_REPLANNER
+        )
+
+    state.plan_controller = PlanController(
+        state.legs, state.store_map, resolve_call, replan
+    )
+    state.initial_plan_size = len(state.legs)
+    state.legs = state.plan_controller.pending
+    state.response_memory["experimental"] = {
+        "adaptive_leg_replanning": True,
+        "initial_plan": state.plan_controller.initial_legs,
+        "current_plan": state.plan_controller.pending,
+        "completed_goal_ids": [],
+        "revision_events": [],
+    }
+    _save_experimental_plan(state)
+
+
+def _save_experimental_plan(state):
+    controller = state.plan_controller
+    journal = state.response_memory["experimental"]
+    journal["current_plan"] = controller.pending
+    journal["completed_goal_ids"] = sorted(controller.completed_goal_ids)
+    journal["revision_events"] = controller.events
+    save_response_memory(state.run_dir, state.response_memory)
+
+
 def _retry_context(state, previous):
     """Add the prior rejection reason to a retry's context."""
     reason = (
@@ -337,11 +376,11 @@ def _record_leg_attempt(state, leg, leg_index, attempt, metrics, tokens_before):
     )
 
 
-def _run_leg_with_retries(state, leg, leg_index):
+def _run_leg_with_retries(state, leg, leg_index, *, future_legs=None, revision_handler=None):
     """Run one leg until it succeeds or its retry budget is exhausted."""
     previous = None
     total_attempts = max(1, state.config.leg_retries + 1)
-    future_legs = state.legs[leg_index + 1:]
+    future_legs = state.legs[leg_index + 1:] if future_legs is None else future_legs
 
     for attempt in range(1, total_attempts + 1):
         context = state.cumulative_context
@@ -354,19 +393,18 @@ def _run_leg_with_retries(state, leg, leg_index):
 
         suffix = "" if attempt == 1 else f"_retry{attempt - 1}"
         tokens_before = token_meter.snapshot()
-        metrics = run_leg(
-            state.agent,
-            leg,
-            state.store_map,
-            state.config.caps,
+        kwargs = dict(
             log_path=os.path.join(state.run_dir, f"leg{leg_index:02d}{suffix}.jsonl"),
-            context=context,
-            future_legs=future_legs,
-            visited=state.visited,
-            leg_idx=leg_index + 1,
-            completion_guard=state.config.completion_guard,
+            context=context, future_legs=future_legs, visited=state.visited,
+            leg_idx=leg_index + 1, completion_guard=state.config.completion_guard,
             carried_names=state.carried_names,
         )
+        if revision_handler is not None:
+            kwargs["revision_handler"] = revision_handler
+        metrics = run_leg(state.agent, leg, state.store_map, state.config.caps, **kwargs)
+        if metrics.get("end_reason") == "plan_revision_accepted":
+            metrics["_tokens_before_revision_segment"] = tokens_before
+            return metrics, attempt
         _record_leg_attempt(state, leg, leg_index, attempt, metrics, tokens_before)
         if metrics["success"]:
             return metrics, attempt
@@ -433,11 +471,122 @@ def _execute_plan(state):
             _carry_findings_forward(state, leg, leg_index, attempt, metrics)
 
 
+def _record_revision_segment(state, leg, segment_index, attempt, metrics, tokens_before):
+    """Record a control boundary without presenting it as an embodied failed attempt."""
+    state.carried_names = (metrics.get("final_state") or {}).get("gripped_names")
+    state.llm_calls += metrics.get("llm_calls", 0)
+    tokens = token_meter.delta(metrics.pop("_tokens_before_revision_segment", tokens_before))
+    state.leg_rows.append({
+        "segment_type": "revision_control",
+        "type": leg.get("type"),
+        "text": leg.get("text", ""),
+        "goal_id": leg.get("goal_id"),
+        "attempt": attempt,
+        "success": False,
+        "end_reason": "plan_revision_accepted",
+        "timesteps": metrics.get("timesteps", 0),
+        "tokens_in": tokens["tokens_in"],
+        "tokens_out": tokens["tokens_out"],
+        "api_calls": tokens.get("api_calls", 0),
+        "tokens_by_role": tokens["by_role"],
+    })
+    token_meter.dump()
+
+
+def _execute_revisable_plan(state):
+    """Run a controller-owned suffix while preserving state across accepted revisions."""
+    controller = state.plan_controller
+    segment_index = 0
+    fatal_failure = False
+    while controller.pending:
+        segment_index += 1
+        leg = controller.pending[0]
+        print(f"\n[ORCHESTRATOR] ── Segment {segment_index} ({len(controller.pending)} pending) ──")
+
+        def request_revision(request, _leg, _step):
+            calls_before = controller.replanner_calls
+            result = controller.request_revision(request, trigger="semantic")
+            state.llm_calls += controller.replanner_calls - calls_before
+            state.resolver_calls += int(result.get("resolver_calls") or 0)
+            state.legs = controller.pending
+            _save_experimental_plan(state)
+            return result
+
+        before = token_meter.snapshot()
+        metrics, attempt = _run_leg_with_retries(
+            state, leg, segment_index - 1,
+            future_legs=controller.pending[1:],
+            revision_handler=(request_revision if controller.can_request_revision else None),
+        )
+        if metrics.get("end_reason") == "plan_revision_accepted":
+            _record_revision_segment(state, leg, segment_index - 1, attempt, metrics, before)
+            state.legs = controller.pending
+            _save_experimental_plan(state)
+            continue
+
+        if metrics.get("success"):
+            controller.complete(leg)
+            controller.remove_current(leg)
+            _save_experimental_plan(state)
+            if controller.pending:
+                _carry_findings_forward(state, leg, segment_index - 1, attempt, metrics)
+            continue
+
+        calls_before = controller.replanner_calls
+        automatic = (
+            controller.request_revision(
+                {
+                    "reason_code": "unreachable_goal",
+                    "evidence": (
+                        f"All {attempt} embodied attempt(s) ended with "
+                        f"{metrics.get('end_reason')}"
+                    ),
+                    "suggested_change": (
+                        "Replace or precede this goal with a feasible strategy while preserving it"
+                    ),
+                },
+                trigger="exhausted_leg",
+            )
+            if controller.can_request_revision
+            else {"accepted": False, "feedback": "revision budget exhausted"}
+        )
+        state.llm_calls += controller.replanner_calls - calls_before
+        state.resolver_calls += int(automatic.get("resolver_calls") or 0)
+        _save_experimental_plan(state)
+        if automatic.get("accepted"):
+            state.legs = controller.pending
+            continue
+
+        remaining = len(controller.pending) - 1
+        if not _continue_past_failure(state, metrics):
+            print(
+                f"[ORCHESTRATOR] segment {segment_index} did not complete "
+                f"({metrics['end_reason']}) — aborting the remaining {remaining} leg(s)."
+            )
+            fatal_failure = True
+            break
+        state.unverified_legs.append(segment_index)
+        controller.remove_current(leg)
+        _save_experimental_plan(state)
+
+    state.success = not fatal_failure and not controller.outstanding_goal_ids
+
+
 def _finalize_response(state):
     """Finalize the journal and synthesize the user-facing response."""
     finalize_response_memory(
         state.response_memory, success=state.success, planned_subtasks=state.legs
     )
+    if state.config.adaptive_leg_replanning and state.plan_controller is not None:
+        controller = state.plan_controller
+        completed = set(controller.completed_goal_ids)
+        initial = controller.initial_legs
+        state.response_memory["final"]["completed_subtasks"] = [
+            leg.get("text") or leg.get("type") for leg in initial if leg.get("goal_id") in completed
+        ]
+        state.response_memory["final"]["incomplete_subtasks"] = [
+            leg.get("text") or leg.get("type") for leg in initial if leg.get("goal_id") not in completed
+        ]
     if state.error is not None and not state.response_memory["final"].get("failure_reason"):
         state.response_memory["final"]["failure_reason"] = (
             f"{type(state.error).__name__}: {state.error}"
@@ -462,6 +611,9 @@ def _build_summary(state, response, response_source):
     """Build the stable summary.json payload."""
     config = state.config
     token_totals = token_meter.totals()
+    enabled = config.adaptive_leg_replanning and state.plan_controller is not None
+    controller = state.plan_controller if enabled else None
+    plan_for_metrics = controller.initial_legs if enabled else state.legs
     summary = {
         "task": config.task,
         "arm": config.arm,
@@ -489,8 +641,11 @@ def _build_summary(state, response, response_source):
         "success": state.success,
         "response": response,
         "response_source": response_source,
-        "legs_planned": len(state.legs),
-        "legs_completed": sum(1 for row in state.leg_rows if row.get("success")),
+        "legs_planned": controller.initial_plan_size if enabled else len(state.legs),
+        "legs_completed": (
+            len(controller.completed_goal_ids) if enabled
+            else sum(1 for row in state.leg_rows if row.get("success"))
+        ),
         # Legs the run continued past on the refusal cap. A run with legs_unverified > 0 reached its
         # final answer without the guard ever accepting those legs - the rows worth reviewing.
         "legs_unverified": len(state.unverified_legs),
@@ -503,7 +658,24 @@ def _build_summary(state, response, response_source):
         "wall_s": round(time.time() - state.started_at, 1),
         "legs": state.leg_rows,
     }
-    summary.update(planned_subtask_metrics(state.legs))
+    summary.update(planned_subtask_metrics(plan_for_metrics))
+    if enabled:
+        controller = state.plan_controller
+        rejected = sum(1 for event in controller.events if not event.get("accepted"))
+        summary["experimental"] = {
+            "adaptive_leg_replanning": True,
+            "revision_requests": controller.total_requests,
+            "revisions_accepted": controller.accepted_revisions,
+            "revisions_rejected": rejected,
+            "revision_triggers": [event.get("trigger") for event in controller.events],
+            "inserted_legs": controller.inserted_legs,
+            "replanner_calls": controller.replanner_calls,
+            "replanner_tokens": token_totals.get("by_role", {}).get("replanner", {}),
+            "initial_plan_size": controller.initial_plan_size,
+            "final_plan_size": controller.final_plan_size,
+            "completed_goal_ids": sorted(controller.completed_goal_ids),
+        }
+        summary["run_config"]["adaptive_leg_replanning"] = True
     if config.arm == "graph-advised":
         advised = getattr(state.agent, "_advised_stats", [])
         summary["advised"] = {
@@ -571,7 +743,11 @@ def orchestrate(config: OrchestrationConfig):
         _plan_task(state)
         _prepare_environment(state)
         _order_and_report_plan(state)
-        _execute_plan(state)
+        if config.adaptive_leg_replanning:
+            _initialize_plan_controller(state)
+            _execute_revisable_plan(state)
+        else:
+            _execute_plan(state)
     except BaseException as error:
         state.success = False
         state.error = error

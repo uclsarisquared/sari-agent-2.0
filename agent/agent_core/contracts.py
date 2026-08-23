@@ -90,6 +90,35 @@ class NavigationResult:
 _SEMANTIC_FALLBACK = SemanticDecision().as_dict()
 _EPISODIC_FALLBACK = EpisodicReflection().__dict__
 
+PLAN_REVISION_REASON_CODES = {
+    "missing_prerequisite",
+    "stale_assumption",
+    "unreachable_goal",
+    "dependency_change",
+}
+
+
+def parse_plan_revision_request(pattern: re.Pattern[str], text: str) -> dict[str, str] | None:
+    """Parse the optional experimental control field without changing SemanticDecision."""
+    parsed = safe_literal_dict(pattern, text, {}, tag="plan-revision")
+    value = parsed.get("plan_revision_request")
+    if not isinstance(value, Mapping):
+        return None
+    reason = value.get("reason_code")
+    evidence = value.get("evidence")
+    suggested = value.get("suggested_change")
+    if (
+        reason not in PLAN_REVISION_REASON_CODES
+        or not isinstance(evidence, str) or not evidence.strip()
+        or not isinstance(suggested, str) or not suggested.strip()
+    ):
+        return None
+    return {
+        "reason_code": reason,
+        "evidence": evidence.strip(),
+        "suggested_change": suggested.strip(),
+    }
+
 
 def extract_json(pattern: re.Pattern[str], text: str) -> str:
     """Extract a fenced JSON-like payload, falling back to the raw reply."""

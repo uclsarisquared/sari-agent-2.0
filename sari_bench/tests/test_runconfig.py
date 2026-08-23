@@ -102,6 +102,9 @@ map_dir = "../maps/frozen"
 prompts = "../prompts/battery.json"
 tries = 2
 max_api_requeues = 0
+
+[experimental]
+adaptive_leg_replanning = true
 """,
         encoding="utf-8",
     )
@@ -111,6 +114,7 @@ max_api_requeues = 0
     assert config.get("agent", "completion_guard") == "none"
     assert config.get("api_retry", "max_attempts") == 6
     assert config.get("bench", "max_api_requeues") == 0
+    assert config.get("experimental", "adaptive_leg_replanning", False) is True
     assert config.get("environment", "map_dir") == str(tmp_path / "maps" / "frozen")
     assert config.get("bench", "prompts") == str(tmp_path / "prompts" / "battery.json")
 
@@ -162,6 +166,8 @@ def test_deprecated_agent_arm_key_loads_and_warns(tmp_path: Path, capsys) -> Non
          "bench.sandbox_command_timeout must be a positive finite number"),
         ("[environment]\nsandbox_command_timeout = nan\n",
          "environment.sandbox_command_timeout must be a positive finite number"),
+        ("[experimental]\nadaptive_leg_replanning = 1\n",
+         "experimental.adaptive_leg_replanning must be a bool"),
         ("[mystery]\nvalue = 1\n", r"unknown section\(s\)"),
     ],
 )
@@ -192,6 +198,9 @@ max_api_requeues = 1
 lease_acquire_timeout = 11.0
 sandbox_command_timeout = 18.0
 
+[experimental]
+adaptive_leg_replanning = true
+
 [api_retry]
 max_attempts = 7
 """,
@@ -213,6 +222,7 @@ max_attempts = 7
             max_api_requeues=runner.max_api_requeues,
             lease_acquire_timeout=runner.lease_acquire_timeout,
             sandbox_command_timeout=runner.sandbox_command_timeout,
+            adaptive_leg_replanning=runner.adaptive_leg_replanning,
         )
         return {}
 
@@ -236,6 +246,7 @@ max_attempts = 7
                     "4.5",
                     "--sandbox-command-timeout",
                     "7.5",
+                    "--no-adaptive-leg-replanning",
                 ]
             )
         )
@@ -253,6 +264,7 @@ max_attempts = 7
         "max_api_requeues": 2,
         "lease_acquire_timeout": 4.5,
         "sandbox_command_timeout": 7.5,
+        "adaptive_leg_replanning": False,
     }
 
 
@@ -288,6 +300,9 @@ sandbox_command_timeout = 19.0
 [output]
 run_dir = "runs/one"
 summary = "runs/one/result.json"
+
+[experimental]
+adaptive_leg_replanning = true
 """,
         encoding="utf-8",
     )
@@ -315,6 +330,7 @@ summary = "runs/one/result.json"
                 "--no-reset-start",
                 "--api-max-attempts",
                 "4",
+                "--adaptive-leg-replanning",
             ]
         )
 
@@ -332,3 +348,4 @@ summary = "runs/one/result.json"
     assert seen["out"] == str(tmp_path / "runs" / "one" / "result.json")
     assert seen["reset_start"] is False
     assert seen["sandbox_command_timeout"] == "19.0"
+    assert seen["adaptive_leg_replanning"] is True

@@ -928,6 +928,7 @@ class WatchState:
                 leg_retries=config["leg_retries"],
                 completion_guard=config["completion_guard"],
                 refusal_cap_action=config["refusal_cap_action"],
+                adaptive_leg_replanning=config["adaptive_leg_replanning"],
                 context_policy=config["context_policy"],
                 api_max_attempts=config["api_max_attempts"],
                 max_api_requeues=config["max_api_requeues"],
@@ -1016,6 +1017,13 @@ class WatchState:
             "refusal_cap_action": str(
                 plan.get("refusal_cap_action")
                 or option("--refusal-cap-action", "halt")
+            ),
+            "adaptive_leg_replanning": bool(
+                source_manifest.get("adaptive_leg_replanning")
+                if source_manifest.get("adaptive_leg_replanning") is not None
+                else plan.get("adaptive_leg_replanning")
+                if plan.get("adaptive_leg_replanning") is not None
+                else "--adaptive-leg-replanning" in command
             ),
             "api_max_attempts": int(
                 source_manifest.get("api_max_attempts")
@@ -1285,6 +1293,11 @@ class WatchState:
                             or battery_manifest.get("context_policy")
                             or "baseline"
                         ),
+                        adaptive_leg_replanning=bool(
+                            source.get("adaptive_leg_replanning")
+                            if source.get("adaptive_leg_replanning") is not None
+                            else battery_manifest.get("adaptive_leg_replanning", False)
+                        ),
                         api_max_attempts=int(
                             source.get("api_max_attempts")
                             or battery_manifest.get("api_max_attempts")
@@ -1334,6 +1347,11 @@ class WatchState:
                         sibling.get("context_policy")
                         or battery_manifest.get("context_policy")
                         or "baseline"
+                    ),
+                    adaptive_leg_replanning=bool(
+                        sibling.get("adaptive_leg_replanning")
+                        if sibling.get("adaptive_leg_replanning") is not None
+                        else battery_manifest.get("adaptive_leg_replanning", False)
                     ),
                     api_max_attempts=int(
                         sibling.get("api_max_attempts")

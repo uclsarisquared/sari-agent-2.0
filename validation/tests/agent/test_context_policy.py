@@ -275,6 +275,43 @@ def test_baseline_semantic_prompt_actor_message_and_artifact_are_byte_stable(tmp
     assert embodied.vlm_agent.semantic_log.since(1) == "@ leg 2 step 2: new fact\n"
 
 
+def test_adaptive_semantic_request_returns_before_actor_navigation_or_episodic(tmp_path) -> None:
+    policy = resolve_context_policy("baseline")
+    embodied = object.__new__(agent_module.EmbodiedAgent)
+    embodied.context_policy = policy
+    embodied.nav_mode = "vlm"
+    embodied._run_dir = str(tmp_path)
+    embodied._mem_leg = 1
+    embodied.adaptive_leg_replanning = True
+    embodied.vlm_agent = _ActorCapture(policy)
+    embodied.associative_learner = _AssociativeShape()
+    embodied._call_associative = lambda *_args: (
+        "{'new_semantic_memory': 'shelf is empty', 'recall': '', 'mode': 'navigation', "
+        "'plan_revision_request': {'reason_code': 'stale_assumption', "
+        "'evidence': 'The mapped shelf is visibly empty', "
+        "'suggested_change': 'Use another source for this goal'}}"
+    )
+    embodied._call_episodic = lambda *_args: (_ for _ in ()).throw(AssertionError("episodic called"))
+    embodied._graph_navigate = lambda *_args: (_ for _ in ()).throw(AssertionError("navigation called"))
+
+    response = embodied.execute_lean(
+        {
+            "task": "Pick up chips",
+            "state": {
+                "leftGrippedState": False,
+                "rightGrippedState": False,
+                "_plan_revision_control": {"allowed": True, "feedback": ""},
+            },
+            "image": _one_pixel_png(),
+        },
+        1,
+    )
+
+    assert response["plan_revision_request"]["reason_code"] == "stale_assumption"
+    assert embodied.vlm_agent.actor_content is None
+    assert "shelf is empty" in embodied.vlm_agent.semantic_log.render()
+
+
 def test_a5_removes_only_the_actor_episodic_line(tmp_path) -> None:
     baseline_dir = tmp_path / "baseline"
     a5_dir = tmp_path / "a5"

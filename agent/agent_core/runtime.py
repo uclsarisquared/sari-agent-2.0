@@ -22,6 +22,7 @@ from agent_core.contracts import (
     available_actions,
     parse_episodic_reflection,
     parse_semantic_decision,
+    parse_plan_revision_request,
     reach_move_steps,
     resolve_agent_mode,
     stop_response,
@@ -466,19 +467,36 @@ class EmbodiedAgent:
     def _semantic_prompt(self, step: StepRequest) -> str:
         """Build the learner prompt, including episodic context after the first step."""
         if step.first_step:
-            return (
+            prompt = (
                 f"## CURRENT TIMESTEP: {step.timestep}\n"
                 f"## MAIN TASK: {step.task}\n"
                 f"## SEMANTIC MEMORY: {self.vlm_agent.semantic_log.render()}\n"
                 f"## STATE: {step.state_text}\n"
             )
-        return (
-            f"## MAIN TASK: {step.task}\n"
-            f"## CURRENT TIMESTEP: {step.timestep}\n"
-            f"## SEMANTIC MEMORY: {self.vlm_agent.semantic_log.render()}\n"
-            f"## EXISTING EPISODIC MEMORY: {self.vlm_agent.episodic_memory}\n"
-            f"## STATE: {step.state_text}\n"
-        )
+        else:
+            prompt = (
+                f"## MAIN TASK: {step.task}\n"
+                f"## CURRENT TIMESTEP: {step.timestep}\n"
+                f"## SEMANTIC MEMORY: {self.vlm_agent.semantic_log.render()}\n"
+                f"## EXISTING EPISODIC MEMORY: {self.vlm_agent.episodic_memory}\n"
+                f"## STATE: {step.state_text}\n"
+            )
+        if self.__dict__.get("adaptive_leg_replanning") and isinstance(step.raw_state, dict):
+            control = step.raw_state.get("_plan_revision_control") or {}
+            if control.get("allowed"):
+                prompt += (
+                    "\n## EXPERIMENTAL PLAN REVISION\n"
+                    "Only when concrete current evidence contradicts the plan because of a missing "
+                    "prerequisite, stale assumption, unreachable goal, or dependency change, you may "
+                    "add plan_revision_request shaped as "
+                    "{'reason_code': 'missing_prerequisite | stale_assumption | unreachable_goal | "
+                    "dependency_change', 'evidence': 'concrete observed contradiction', "
+                    "'suggested_change': 'desired planning outcome'}. The suggested change is not a "
+                    "replacement plan. Do not request revision for path blockage or motor recovery.\n"
+                )
+            if control.get("feedback"):
+                prompt += f"\n## PLAN REVISION FEEDBACK\n{control['feedback']}\n"
+        return prompt
 
     def _actor_prompt(
         self,
@@ -554,6 +572,26 @@ class EmbodiedAgent:
             self.associative_learner.extractable_json_structured_output, semantic_text
         )
         logger.info(f"[semantic-learner] {decision.as_dict()}")
+        self.vlm_agent.semantic_log.append(
+            self._semantic_tag(timestep), decision.new_semantic_memory
+        )
+
+        control = (
+            step.raw_state.get("_plan_revision_control")
+            if isinstance(step.raw_state, dict) else None
+        )
+        if self.__dict__.get("adaptive_leg_replanning") and (control or {}).get("allowed"):
+            revision_request = parse_plan_revision_request(
+                self.associative_learner.extractable_json_structured_output, semantic_text
+            )
+            if revision_request is not None:
+                return {
+                    "halt": False,
+                    "plan_revision_request": revision_request,
+                    "semantic": semantic_text,
+                    "agent_mode": "plan_revision",
+                    "text": "",
+                }
 
         mode = resolve_agent_mode(
             decision.mode,
@@ -561,10 +599,6 @@ class EmbodiedAgent:
             step.force_manipulate,
             inspect_mode=step.inspect_mode,
         )
-        self.vlm_agent.semantic_log.append(
-            self._semantic_tag(timestep), decision.new_semantic_memory
-        )
-
         # Held inspection evidence must remain posed until the guard consumes the frozen frame.
         if mode == AgentMode.STOP.value and step.inspect_mode == "held":
             return self._stop_and_persist(decision, semantic_text)

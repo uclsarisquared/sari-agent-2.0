@@ -387,6 +387,9 @@ def test_orchestrate_returns_and_persists_the_same_final_response(tmp_path, monk
         "actor_image_history": None,
     }
     assert summary["run_config"]["context_policy"] == "baseline"
+    assert "experimental" not in summary
+    assert "experimental" not in memory
+    assert "adaptive_leg_replanning" not in summary["run_config"]
     assert responder_roles == [orchestrator.token_meter.ROLE_RESPONDER]
     assert summary["llm_calls"] == 5  # decomposer + three per-step reasoners + responder
     assert summary["tokens"]["by_role"]["responder"]["calls"] == 1

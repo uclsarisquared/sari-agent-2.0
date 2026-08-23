@@ -75,11 +75,13 @@ ROLE_DECOMPOSER = "decomposer"      # task -> typed subtasks
 ROLE_FINDINGS = "findings"          # between-leg findings summaries
 ROLE_RESOLVER = "resolver"          # locate_task.resolve - plan-time map/product resolution
 ROLE_RESPONDER = "responder"        # task journal -> final user-facing response
+ROLE_REPLANNER = "replanner"        # experimental unfinished-plan revision
 UNATTRIBUTED = "unattributed"       # a call made outside any role block; see the module docstring
 
 ROLES = (
     ROLE_ACTOR, ROLE_SEMANTIC, ROLE_EPISODIC, ROLE_ADVISOR, ROLE_PERCEPTION,
-    ROLE_GUARD, ROLE_DECOMPOSER, ROLE_FINDINGS, ROLE_RESOLVER, ROLE_RESPONDER, UNATTRIBUTED,
+    ROLE_GUARD, ROLE_DECOMPOSER, ROLE_FINDINGS, ROLE_RESOLVER, ROLE_RESPONDER, ROLE_REPLANNER,
+    UNATTRIBUTED,
 )
 
 _lock = threading.Lock()

@@ -62,7 +62,8 @@ def _off_target(sm, leg, near_cp) -> bool:
 
 
 def _run_leg_impl(agent, leg, sm, caps, log_path=None, context="", future_legs=None,
-                  visited=None, leg_idx=0, completion_guard="deterministic", carried_names=None):
+                  visited=None, leg_idx=0, completion_guard="deterministic", carried_names=None,
+                  revision_handler=None):
     """Run one leg while guaranteeing that its artifact handles are closed."""
     # Artifact ownership wraps every terminal path, including unexpected exceptions.
     with LegArtifacts(log_path) as artifacts:
@@ -77,18 +78,20 @@ def _run_leg_impl(agent, leg, sm, caps, log_path=None, context="", future_legs=N
             leg_idx=leg_idx,
             completion_guard=completion_guard,
             carried_names=carried_names,
+            revision_handler=revision_handler,
             artifacts=artifacts,
         )
 
 
 def _run_leg_loop(agent, leg, sm, caps, context="", future_legs=None,
                   visited=None, leg_idx=0, completion_guard="deterministic", carried_names=None,
-                  artifacts=None):
+                  artifacts=None, revision_handler=None):
     """Run the capture, reason, dispatch, reconcile, and completion phases."""
     # Build the durable context once; each iteration then owns only a StepContext.
     session = _start_leg_session(
         agent, leg, sm, caps, context, future_legs, visited, leg_idx,
         completion_guard, carried_names, artifacts,
+        revision_handler,
     )
 
     # A zero step cap deliberately means an unbounded iterator.
@@ -129,7 +132,7 @@ def _run_leg_loop(agent, leg, sm, caps, context="", future_legs=None,
 
 
 def _start_leg_session(agent, leg, sm, caps, context, future_legs, visited,
-                       leg_idx, completion_guard, carried_names, artifacts):
+                       leg_idx, completion_guard, carried_names, artifacts, revision_handler=None):
     # Normalize caller inputs and reset only the agent's per-leg conversation state.
     leg = normalize_leg(leg)
     visited = visited if visited is not None else set()
@@ -184,6 +187,7 @@ def _start_leg_session(agent, leg, sm, caps, context, future_legs, visited,
         inspect_move_left=(
             _INSPECT_MOVE_BUDGET_STEPS if leg.get("type") == "inspect" else 0
         ),
+        revision_handler=revision_handler,
     )
 
     # Emit lifecycle metadata only after the session is fully initialized.
@@ -254,6 +258,12 @@ def _prepare_step(session, number):
         )
 
     # Navigation sees the bare goal; the actor receives the augmented task and lean state.
+    model_state = _model_facing_state(session.state)
+    if session.revision_handler is not None:
+        model_state["_plan_revision_control"] = {
+            "allowed": session.revision_requests_allowed,
+            "feedback": session.revision_feedback,
+        }
     step.request = {
         "task": session.augmented_task,
         "nav_goal": session.text,
@@ -261,7 +271,7 @@ def _prepare_step(session, number):
         "force_manipulate": step.force_manipulate,
         "inspect_mode": inspect_mode,
         "image": image_b64,
-        "state": _model_facing_state(session.state),
+        "state": model_state,
     }
     return step
 
@@ -293,6 +303,25 @@ def _invoke_step(session, step):
 
 
 def _classify_response(session, step):
+    revision_request = step.response.get("plan_revision_request")
+    if revision_request is not None and session.revision_handler is not None:
+        result = session.revision_handler(revision_request, session.leg, step.number)
+        accepted = bool(result.get("accepted"))
+        session.metrics["plan_revision_request"] = revision_request
+        session.metrics["plan_revision_result"] = result
+        session.events.emit(
+            "plan_revision_request", step=step.number, accepted=accepted,
+            request=revision_request, feedback=result.get("feedback", ""),
+        )
+        if accepted:
+            session.metrics["end_reason"] = "plan_revision_accepted"
+            return StepDisposition.STOP
+        session.revision_requests_allowed = False
+        session.revision_feedback = str(
+            result.get("feedback") or "Revision rejected; continue the current leg."
+        )
+        return StepDisposition.NEXT
+
     # STOP requests go through completion policy and never dispatch actor actions.
     if step.response.get("halt"):
         decision = session.completion.handle_stop(
@@ -397,7 +426,8 @@ def _finish_leg_session(session):
 
 
 def run_leg(agent, leg, sm, caps, log_path=None, context="", future_legs=None,
-            visited=None, leg_idx=0, completion_guard="deterministic", carried_names=None):
+            visited=None, leg_idx=0, completion_guard="deterministic", carried_names=None,
+            revision_handler=None):
     """Run one typed leg and restore inspection hand poses on every exit path."""
     # Normalize only for cleanup routing; the implementation retains its compatibility input.
     typed_leg = leg if isinstance(leg, dict) else {"type": "unknown", "text": str(leg)}
@@ -408,7 +438,8 @@ def run_leg(agent, leg, sm, caps, log_path=None, context="", future_legs=None,
         result = _run_leg_impl(
             agent, leg, sm, caps, log_path=log_path, context=context,
             future_legs=future_legs, visited=visited, leg_idx=leg_idx,
-            completion_guard=completion_guard, carried_names=carried_names)
+            completion_guard=completion_guard, carried_names=carried_names,
+            revision_handler=revision_handler)
         return result
     finally:
         if typed_leg.get("type") == "inspect":

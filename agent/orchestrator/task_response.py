@@ -51,6 +51,7 @@ def _compact_subtask(subtask: Any) -> dict[str, Any]:
     # not. Copy only stable task contract fields so the journal never becomes a planner dump.
     fields = (
         "type", "text", "target", "targets", "query", "destination", "candidates", "feasible",
+        "goal_id",
     )
     return {key: copy.deepcopy(subtask[key]) for key in fields if key in subtask}
 

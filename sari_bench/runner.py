@@ -215,6 +215,7 @@ def materialize_already_successful(
     winner: dict[str, Any],
     arm: str,
     context_policy: str,
+    adaptive_leg_replanning: bool = False,
     api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
     max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
     ocr_url: str = "",
@@ -246,6 +247,7 @@ def materialize_already_successful(
                 "attempt": attempt,
                 "arm": arm,
                 "context_policy": context_policy,
+                "adaptive_leg_replanning": bool(adaptive_leg_replanning),
                 "api_max_attempts": api_max_attempts,
                 "max_api_requeues": max_api_requeues,
                 "ocr_url": ocr_url,
@@ -335,6 +337,7 @@ class BenchmarkRunner:
         leg_retries: int,
         completion_guard: str = "deterministic",
         refusal_cap_action: str = "continue",
+        adaptive_leg_replanning: bool = False,
         api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
         max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
         context_policy: str = "baseline",
@@ -382,6 +385,7 @@ class BenchmarkRunner:
         if refusal_cap_action not in {"continue", "halt"}:
             raise ValueError(f"unsupported refusal cap action: {refusal_cap_action!r}")
         self.refusal_cap_action = refusal_cap_action
+        self.adaptive_leg_replanning = bool(adaptive_leg_replanning)
         if api_max_attempts < 1:
             raise ValueError("api_max_attempts must be at least 1")
         if max_api_requeues < 0:
@@ -663,6 +667,7 @@ class BenchmarkRunner:
             "leg_retries": self.leg_retries,
             "completion_guard": self.completion_guard,
             "refusal_cap_action": self.refusal_cap_action,
+            "adaptive_leg_replanning": self.adaptive_leg_replanning,
             "api_max_attempts": self.api_max_attempts,
             "max_api_requeues": self.max_api_requeues,
             "ocr_url": self.ocr_url,
@@ -686,6 +691,8 @@ class BenchmarkRunner:
             # Batteries recorded before the option existed aborted the task on the refusal cap.
             if key == "refusal_cap_action" and key not in battery:
                 return "halt"
+            if key == "adaptive_leg_replanning" and key not in battery:
+                return False
             if key == "ocr_url" and key not in battery:
                 return resolve_ocr_url()
             if key == "api_max_attempts" and key not in battery:
@@ -1260,6 +1267,7 @@ class BenchmarkRunner:
                 "leg_retries": self.leg_retries,
                 "completion_guard": self.completion_guard,
                 "refusal_cap_action": self.refusal_cap_action,
+                "adaptive_leg_replanning": self.adaptive_leg_replanning,
                 "api_max_attempts": self.api_max_attempts,
                 "max_api_requeues": self.max_api_requeues,
                 "ocr_url": self.ocr_url,
@@ -1601,6 +1609,7 @@ class BenchmarkRunner:
                 "arm": self.arm,
                 "context_policy": self.context_policy,
                 "completion_guard": self.completion_guard,
+                "adaptive_leg_replanning": self.adaptive_leg_replanning,
                 "api_max_attempts": self.api_max_attempts,
                 "max_api_requeues": self.max_api_requeues,
                 "api_requeues": api_requeues,
@@ -2026,6 +2035,7 @@ class BenchmarkRunner:
             winner=winner,
             arm=self.arm,
             context_policy=self.context_policy,
+            adaptive_leg_replanning=self.adaptive_leg_replanning,
             api_max_attempts=self.api_max_attempts,
             max_api_requeues=self.max_api_requeues,
             ocr_url=self.ocr_url,
@@ -2104,6 +2114,8 @@ class BenchmarkRunner:
             self.completion_guard,
             "--refusal-cap-action",
             self.refusal_cap_action,
+            "--adaptive-leg-replanning" if self.adaptive_leg_replanning
+            else "--no-adaptive-leg-replanning",
             "--api-max-attempts",
             str(self.api_max_attempts),
             "--ws-uri",
@@ -2335,6 +2347,7 @@ class BenchmarkRunner:
             "max_steps": self.max_steps,
             "arm": self.arm,
             "context_policy": self.context_policy,
+            "adaptive_leg_replanning": self.adaptive_leg_replanning,
             "api_max_attempts": self.api_max_attempts,
             "max_api_requeues": self.max_api_requeues,
             "total_attempts": len(results),
@@ -2381,6 +2394,9 @@ async def async_main(argv: list[str] | None = None) -> int:
 
     def api_configured(key: str, fallback: Any = None) -> Any:
         return config.get("api_retry", key, fallback) if config else fallback
+
+    def experimental_configured(key: str, fallback: Any = None) -> Any:
+        return config.get("experimental", key, fallback) if config else fallback
 
     parser = argparse.ArgumentParser(description="Run a prompt battery across a sandbox fleet.")
     parser.add_argument(
@@ -2513,6 +2529,12 @@ async def async_main(argv: list[str] | None = None) -> int:
         help="what an exhausted refusal cap does to the attempt, after leg retries: continue "
              "(default) runs the remaining legs with the leg left unverified, halt aborts.",
     )
+    parser.add_argument(
+        "--adaptive-leg-replanning",
+        action=argparse.BooleanOptionalAction,
+        default=experimental_configured("adaptive_leg_replanning", False),
+        help="EXPERIMENTAL: enable bounded unfinished-leg plan revision",
+    )
     args = parser.parse_args(argv)
 
     prompts = load_prompts(args.prompts)
@@ -2586,6 +2608,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         leg_retries=max(0, args.leg_retries),
         completion_guard=args.completion_guard,
         refusal_cap_action=args.refusal_cap_action,
+        adaptive_leg_replanning=args.adaptive_leg_replanning,
         api_max_attempts=args.api_max_attempts,
         max_api_requeues=args.max_api_requeues,
         ocr_url=args.ocr_url,

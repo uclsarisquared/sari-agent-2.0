@@ -18,6 +18,10 @@
 # 150 seconds; request timeouts are additional. Transport and malformed-content failures share it.
 max_attempts = 10
 
+[experimental]
+# Opt-in bounded plan revision at safe timestep and exhausted-leg boundaries.
+adaptive_leg_replanning = false
+
 [agent]
 # Optional fixed task. Usually leave this commented and pass the prompt on the command line.
 # task = "Pick up Ritz Crackers"

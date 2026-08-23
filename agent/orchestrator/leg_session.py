@@ -32,6 +32,9 @@ class LegSession:
     inspect_move_left: int = 0
     last_actor_text: str = ""
     last_inspection_result: dict | None = None
+    revision_handler: object | None = None
+    revision_requests_allowed: bool = True
+    revision_feedback: str = ""
 
     @property
     def text(self):
