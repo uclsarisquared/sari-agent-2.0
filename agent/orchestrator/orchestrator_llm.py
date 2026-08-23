@@ -7,16 +7,16 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from agent_core import token_meter
-from agent_core.llm import MalformedContentError, call_with_api_retries, agent_vlm_config
+from agent_core.llm import EndpointProfile, MalformedContentError, call_with_api_retries, agent_vlm_config
 from agent_core.context_policy import ContextPolicy
-from agent_core.models import agent_model
 from agent_core.prompt_loader import load_prompt
 from orchestrator.subtask_completion import TYPED_DECOMPOSER_SYSTEM, parse_decomposition
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
 
 
-ORCHESTRATOR_MODEL = agent_model()  # $OPENAI_MODEL in config.env (OpenRouter retired 2026-07-19)
+_ENDPOINT_PROFILE = EndpointProfile.from_env()
+ORCHESTRATOR_MODEL = _ENDPOINT_PROFILE.model
 
 # Every reasoner runs on the OpenAI API compatible endpoint from config.env (OpenRouter fully
 # retired 2026-07-21). agent_vlm_config carries the load-bearing enable_thinking=False +
@@ -32,9 +32,8 @@ ASSOCIATIVE_CONFIG = agent_vlm_config(temperature=0.3)
 
 def _llm_client() -> OpenAI:
     """Build the shared orchestrator client from configured endpoint credentials."""
-    from agent_core.llm import endpoint_creds
-    endpoint, key = endpoint_creds()
-    return OpenAI(base_url=f"{endpoint}/v1", api_key=key, max_retries=0)
+    return OpenAI(base_url=_ENDPOINT_PROFILE.base_url, api_key=_ENDPOINT_PROFILE.api_key,
+                  max_retries=0)
 
 
 def _llm_call(client: OpenAI, system: str, user: str, role: str, validator=None) -> str:
@@ -51,6 +50,7 @@ def _llm_call(client: OpenAI, system: str, user: str, role: str, validator=None)
                 ],
                 temperature=0.3,
                 timeout=120,
+                extra_body=_ENDPOINT_PROFILE.extra_body,
             )
             return response.choices[0].message.content
 

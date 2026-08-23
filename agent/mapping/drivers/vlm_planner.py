@@ -78,8 +78,6 @@ import math
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 
 import numpy as np
 
@@ -103,13 +101,11 @@ from frontier_planner import (  # noqa: E402
 )
 from mapping import normalize_deg  # noqa: E402
 
-# image_content_block/resolve_base_url are imported rather than re-vendored: they encode measured
-# server facts (the qwen data-URI block shape; OPENAI_API_URL owning its port and needing /v1)
-# and a second copy in this directory would drift from the probe's. post_chat is deliberately NOT
-# imported - it sys.exit()s on any HTTPError, which is right for a one-shot probe and catastrophic
-# for a 300-step live run, where one transient blip would kill the run and lose the map. Hence the
-# retrying _post_chat below.
-from annotate_probe import image_content_block, resolve_api_key, resolve_base_url  # noqa: E402
+# Endpoint configuration and image encoding come from agent_core.llm. The planner keeps its own
+# graceful retry outcome because one transient failure must not discard a 300-step live map.
+from agent_core.llm import (  # noqa: E402
+    ChatEndpoint, EndpointProfile, image_url_part, is_transient_api_error,
+)
 from agent_core.models import agent_model  # noqa: E402
 from agent_core.prompt_loader import load_prompt  # noqa: E402
 
@@ -162,35 +158,17 @@ _SYS_FULL = load_prompt("mapping/planner_full")
 _SYS_GOAL = load_prompt("mapping/planner_goal")
 
 
-def _post_chat(base, payload, api_key, timeout, retries, backoff=2.0):
-    """POST with retries, returning the parsed body, or None once retries are spent.
-
-    Deliberately NOT annotate_probe.post_chat, which sys.exit()s on HTTPError. That is correct for
-    a one-shot probe and ruinous here: an exploration run is 300 sequential steps against a shared
-    remote server, and killing the process on one transient 5xx would lose the whole map. Returning
-    None instead lets the planner record the failure as data (vlm_http_failures) and coast.
-    """
-    body = json.dumps(payload).encode()
+def _post_chat(request, retries, backoff=2.0):
+    """Run one SDK completion with graceful planner fallback after transient retries."""
     last = None
     for attempt in range(retries + 1):
-        req = urllib.request.Request(
-            f"{base}/chat/completions",
-            data=body,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            # vLLM puts the real complaint (bad schema, unsupported field) in the body, not the
-            # status line, so surface it - a 400 here is our bug and will repeat on every retry.
-            last = f"HTTP {e.code}: {e.read().decode()[:400]}"
-            if 400 <= e.code < 500:
-                print(f"[vlm] {last} (client error - not retrying)", flush=True)
+            return request()
+        except Exception as error:
+            last = f"{type(error).__name__}: {error}"
+            if not is_transient_api_error(error):
+                print(f"[vlm] {last} (non-transient - not retrying)", flush=True)
                 return None
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
-            last = f"{type(e).__name__}: {e}"
         if attempt < retries:
             wait = backoff * (2 ** attempt)
             print(f"[vlm] {last} - retry {attempt + 1}/{retries} in {wait:.0f}s", flush=True)
@@ -368,12 +346,10 @@ class _VLMClientMixin:
                   think, max_tokens, temperature, ascii_map_res, map_crop_m,
                   include_clearance, capture_dir, debug):
         self.uri = uri
-        self.base = resolve_base_url(base_url)
-        self.model = model
-        # Resolved at init, never trusted as a literal: the server 401s without the real
-        # bearer (measured 2026-07-19), and the key may rotate - resolve_api_key reads
-        # $OPENAI_API_KEY, then sari_env_old's conda state.
-        self.api_key = resolve_api_key(api_key)
+        self.profile = EndpointProfile.from_env(model=model, base_url=base_url, api_key=api_key)
+        self.endpoint = ChatEndpoint(self.profile, timeout=timeout)
+        self.base = self.profile.base_url
+        self.model = self.profile.model
         self.timeout = timeout
         self.retries = retries
         self.mode = mode                      # "both" | "map" | "ego"
@@ -421,37 +397,28 @@ class _VLMClientMixin:
         return png
 
     def _ask(self, system, schema, user_blocks, label):
-        payload = {
-            "model": self.model,
-            "messages": [
+        messages = [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_blocks},
-            ],
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            # Qwen3.x reasons unless told not to; measured to burn the whole budget and loop
-            # without reaching an answer (annotate_probe.py). The schema does the structuring.
-            "chat_template_kwargs": {"enable_thinking": self.think},
-            # MUST be response_format. `guided_json` is silently ignored by this vLLM build, and
-            # silently is the trap: the prompt alone yields conforming JSON, so an ignored schema
-            # looks identical to a working one. Only a negative control ("banana") exposed it.
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": label, "schema": schema, "strict": True},
-            },
-        }
+            ]
+        extra = ({"chat_template_kwargs": {"enable_thinking": self.think}}
+                 if self.profile.provider == "vllm" else None)
         t0 = time.time()
-        resp = _post_chat(self.base, payload, self.api_key, self.timeout, self.retries)
+        response = _post_chat(lambda: self.endpoint.create(
+            messages=messages, schema=schema, schema_name=label, model=self.model,
+            max_tokens=self.max_tokens, temperature=self.temperature, extra_body=extra,
+        ), self.retries)
         dt = time.time() - t0
         self.stats["vlm_calls"] += 1
         self.stats["vlm_latency_s_total"] += dt
-        if resp is None:
+        if response is None:
             self.stats["vlm_http_failures"] += 1
             return None, dt
-        usage = resp.get("usage", {})
+        resp = self.endpoint.envelope(response)
+        usage = resp.get("usage", {}) or {}
         self.stats["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
         self.stats["completion_tokens"] += usage.get("completion_tokens", 0) or 0
-        text = resp["choices"][0]["message"].get("content")
+        text = response.choices[0].message.content
         if not text:
             # content=None means it never reached an answer (e.g. thinking ate max_tokens) - a
             # real outcome, not a glitch to route around.
@@ -508,10 +475,10 @@ class _VLMClientMixin:
                 with open(os.path.join(self.capture_dir, f"{step_tag}_map.png"), "wb") as f:
                     f.write(png)
             parts.append({"type": "text", "text": "TOP-DOWN MAP (same map, as an image):"})
-            parts.append(image_content_block(self.model, "image/png", _b64(png)))
+            parts.append(image_url_part(png, "image/png"))
         if self.mode in ("both", "ego"):
             parts.append({"type": "text", "text": "FIRST-PERSON CAMERA (what the robot sees now):"})
-            parts.append(image_content_block(self.model, "image/png", _b64(self._camera_png(step_tag))))
+            parts.append(image_url_part(self._camera_png(step_tag), "image/png"))
         return parts
 
     def write_report(self, output_dir, tag="final"):
@@ -521,11 +488,6 @@ class _VLMClientMixin:
             for d in self.decisions:
                 f.write(json.dumps(d) + "\n")
         return path
-
-
-def _b64(raw):
-    import base64
-    return base64.b64encode(raw).decode()
 
 
 class VLMFrontierPlanner(_VLMClientMixin):

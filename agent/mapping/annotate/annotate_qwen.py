@@ -1,10 +1,11 @@
-"""Qwen/vLLM annotation backend - the same `annotate()` interface as annotate_claude_cli, so
+"""OpenAI-compatible endpoint annotation implementation (legacy module name).
+
+It has the same `annotate()` interface as annotate_claude_cli, so
 annotate_pass can pick either with one `--backend` flag.
 
 This is the batch counterpart to annotate_probe.py (which is a one-image CLI probe): it exposes a
 reusable `annotate(image_path, system, schema, ...) -> (result_dict, envelope)` with the SAME
-signature annotate_claude_cli.annotate has, and reuses annotate_probe's measured server plumbing
-so the two probe/batch paths cannot drift on the facts that were expensive to establish:
+signature annotate_claude_cli.annotate has, using the shared SDK transport:
 
   * response_format (json_schema, strict), NOT guided_json - this vLLM build silently ignores the
     older spelling (negative-control "banana" test, see annotate_probe / annotator_sys_inst).
@@ -15,22 +16,16 @@ so the two probe/batch paths cannot drift on the facts that were expensive to es
     item-bearing.
 
 The annotator was un-pinned from claude on 2026-07-20 (user directive) - claude-cli stays the
-DEFAULT because annotation quality was measured/frozen on sonnet, but qwen is now selectable. Use
-it when the run should be fully self-hosted (no claude.ai subscription / no `claude` CLI), or to
-A/B annotation quality qwen-vs-sonnet on identical captures.
+DEFAULT because annotation quality was measured/frozen on sonnet, but endpoint is selectable.
 
-    python mapping/annotate/annotate_qwen.py mapping/output/captures/cp067_primary.png
-    python mapping/annotate/annotate_qwen.py mapping/output/captures/cp028_primary.png --classify
+    python mapping/annotate/annotate_endpoint.py mapping/output/captures/cp067_primary.png
 """
 import argparse
-import base64
 import json
 import mimetypes
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/annotate
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -41,8 +36,8 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 # Reused verbatim so the batch path and the probe path share ONE set of measured server facts
 # (data-URI block shape, OPENAI_API_URL -> /v1, OPENAI_API_KEY bearer resolution). These
 # also trigger annotate_probe's module-level load_dotenv(repo-root config.env), so creds are present.
-from annotate_probe import (  # noqa: E402
-    image_content_block, resolve_api_key, resolve_base_url,
+from agent_core.llm import (  # noqa: E402
+    ChatEndpoint, EndpointProfile, image_url_part, is_transient_api_error,
 )
 from agent_core.models import annotator_model  # noqa: E402
 from annotator_sys_inst import (  # noqa: E402
@@ -56,8 +51,8 @@ _MAX_TOKENS = 4096
 _RETRIES = 2
 
 
-class QwenAnnotateError(RuntimeError):
-    """A qwen annotation call failed (HTTP error, empty content, or unparseable JSON). Mirrors
+class EndpointAnnotateError(RuntimeError):
+    """An endpoint annotation failed (API error, empty content, or unparseable JSON). Mirrors
     annotate_claude_cli.ClaudeCliError's role: annotate_pass catches both so one failed checkpoint
     is skipped and --resume continues, instead of killing the whole pass."""
 
@@ -68,37 +63,25 @@ def _image_part(label, path, model):
     mime = mimetypes.guess_type(path)[0] or "image/png"
     return [
         {"type": "text", "text": f"{label} view:"},
-        image_content_block(model, mime, base64.b64encode(raw).decode()),
+        image_url_part(raw, mime),
     ]
 
 
-def _post(base, payload, api_key, timeout):
-    """POST /chat/completions, returning the parsed body. Retries transient failures; raises
-    QwenAnnotateError on a client (4xx) error or once retries are spent. Deliberately NOT
-    annotate_probe.post_chat, which sys.exit()s - a batch of 39 checkpoints must survive one bad
-    call, not abort."""
-    body = json.dumps(payload).encode()
+def _post(request):
+    """Run an SDK request with the annotator's historical two transient retries."""
     last = None
     for attempt in range(_RETRIES + 1):
-        req = urllib.request.Request(
-            f"{base}/chat/completions", data=body,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:400]
-            # 4xx is our bug (bad schema/field) and will repeat on every retry - fail fast.
-            if 400 <= e.code < 500:
-                raise QwenAnnotateError(f"HTTP {e.code} from qwen server: {detail}")
-            last = f"HTTP {e.code}: {detail}"
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
-            last = f"{type(e).__name__}: {e}"
+            return request()
+        except Exception as error:  # OpenAI exceptions retain response diagnostics
+            if not is_transient_api_error(error):
+                raise EndpointAnnotateError(f"endpoint request failed: {error}") from error
+            last = f"{type(error).__name__}: {error}"
         if attempt < _RETRIES:
             time.sleep(2.0 * (attempt + 1))
-    raise QwenAnnotateError(f"qwen server unreachable after {_RETRIES} retries: {last}")
+    raise EndpointAnnotateError(
+        f"endpoint unreachable after {_RETRIES} transient retries: {last}"
+    )
 
 
 def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
@@ -111,50 +94,46 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
     case the two backends). `extra_views` is [(label, path)] of additional same-spot views - every
     one item-bearing, labelled, per the annotator caller contract.
 
-    The envelope mirrors the claude one's shape where it matters: `total_cost_usd` is None (the
-    server is self-hosted, nothing is billed per call) and `usage` carries the token counts.
+    The envelope mirrors the claude one's shape where it matters: `total_cost_usd` is None because
+    this repository does not calculate endpoint pricing, and `usage` carries token counts.
     """
-    base = resolve_base_url(base_url)
-    key = resolve_api_key(api_key)
+    profile = EndpointProfile.from_env(model=model, base_url=base_url, api_key=api_key)
+    transport = ChatEndpoint(profile, timeout=timeout)
+    model = profile.model
 
     content = _image_part("STANDING", image_path, model)
     for label, path in (extra_views or []):
         content += _image_part(label, path, model)
 
-    payload = {
-        "model": model,
-        "messages": [
+    messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "chat_template_kwargs": {"enable_thinking": think},
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "annotation", "schema": schema, "strict": True},
-        },
-    }
+        ]
+    extra = ({"chat_template_kwargs": {"enable_thinking": think}}
+             if profile.provider == "vllm" else None)
 
     t0 = time.time()
-    resp = _post(base, payload, key, timeout)
+    response = _post(lambda: transport.create(
+        messages=messages, schema=schema, schema_name="annotation", model=model,
+        max_tokens=max_tokens, temperature=temperature, extra_body=extra,
+    ))
     dt = time.time() - t0
-
-    choice = resp["choices"][0]
-    message = choice["message"]
+    resp = transport.envelope(response)
+    choice = response.choices[0]
+    message = choice.message
     # finish_reason is the whole diagnostic when the JSON won't parse - "length" (truncated,
     # never terminated) needs a completely different response than "stop" (model finished but
     # emitted malformed output). The old error threw it away and reported every failure as "not
     # valid JSON", which read as a formatting bug when it was really a max_tokens truncation.
-    finish = choice.get("finish_reason")
+    finish = choice.finish_reason
     usage = resp.get("usage", {})
     completion = usage.get("completion_tokens")
-    text = message.get("content")
+    text = message.content
     if not text:
         # content=None: the model never reached an answer (e.g. thinking ate max_tokens). A real
         # outcome, surfaced as a failure so annotate_pass records it and moves on.
-        raise QwenAnnotateError(
-            f"qwen returned empty content (finish_reason={finish}, completion={completion}; "
+        raise EndpointAnnotateError(
+            f"endpoint returned empty content (finish_reason={finish}, completion={completion}; "
             "thinking may have hit max_tokens - enable_thinking is off by default for exactly "
             "this reason)")
     try:
@@ -172,18 +151,21 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
         #     single item and never loops. Do NOT re-attempt sampling knobs here.
         #   * anything else: genuinely malformed output - show more of it to diagnose.
         if finish == "length":
-            raise QwenAnnotateError(
-                f"qwen hit max_tokens without terminating the JSON (finish_reason=length, "
+            raise EndpointAnnotateError(
+                f"endpoint hit max_tokens without terminating the JSON (finish_reason=length, "
                 f"completion={completion}) - the model did not finish its output, on this store "
                 f"typically a repetition loop on a visually repetitive shelf. Raising max_tokens or "
                 f"adding a sampling penalty does NOT fix this (measured 2026-07-24); the claude-cli "
                 f"backend handles this checkpoint.")
-        raise QwenAnnotateError(f"qwen output was not valid JSON (finish_reason={finish}): {text[:600]}")
+        raise EndpointAnnotateError(
+            f"endpoint output was not valid JSON (finish_reason={finish}): {text[:600]}"
+        )
 
     envelope = {
-        "backend": "qwen",
+        "backend": "endpoint",
+        "provider": profile.provider,
         "model": model,
-        "total_cost_usd": None,   # self-hosted; no per-call billing (claude parity field)
+        "total_cost_usd": None,   # pricing is provider-dependent and deliberately not estimated
         "duration_ms": dt * 1000.0,
         "finish_reason": finish,
         "usage": usage,
@@ -199,7 +181,7 @@ def _build_request(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Annotate one capture via the qwen/vLLM server.")
+    p = argparse.ArgumentParser(description="Annotate one capture via the configured endpoint.")
     p.add_argument("image", help="STANDING view (a PNG from the capture walk)")
     p.add_argument("--crouch", default=None, help="CROUCHED view of the same shelf (cp<id>_crouch.png)")
     p.add_argument("--classify", action="store_true", help="Run Stage 1 (shelf/non_shelf) instead of Stage 2")
@@ -213,16 +195,17 @@ def main():
 
     system, schema, label = _build_request(args)
     views = [("CROUCHED", args.crouch)] if args.crouch else None
-    print(f"[qwen] {label}  model={args.model}  {os.path.basename(args.image)}")
+    print(f"[endpoint] {label}  model={args.model}  {os.path.basename(args.image)}")
     try:
         result, env = annotate(args.image, system, schema, model=args.model, timeout=args.timeout,
                                extra_views=views, base_url=args.base_url, api_key=args.api_key,
                                think=args.think)
-    except QwenAnnotateError as e:
-        print(f"[qwen] FAILED: {e}")
+    except EndpointAnnotateError as e:
+        print(f"[endpoint] FAILED: {e}")
         sys.exit(1)
     u = env.get("usage", {})
-    print(f"[qwen] {env['duration_ms']/1000:.1f}s  prompt={u.get('prompt_tokens','?')} "
+    print(f"[endpoint] provider={env['provider']} {env['duration_ms']/1000:.1f}s  "
+          f"prompt={u.get('prompt_tokens','?')} "
           f"completion={u.get('completion_tokens','?')}")
     print("-" * 80)
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -230,3 +213,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# Compatibility for imports from older scripts and persisted backend configurations.
+QwenAnnotateError = EndpointAnnotateError

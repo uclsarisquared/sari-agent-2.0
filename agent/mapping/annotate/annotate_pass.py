@@ -62,8 +62,8 @@ from annotate_claude_cli import (  # noqa: E402
     annotate as annotate_claude, ClaudeCliError,
     DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL, DEFAULT_EFFORT,
 )
-from annotate_qwen import (  # noqa: E402
-    annotate as annotate_qwen, QwenAnnotateError, DEFAULT_MODEL as QWEN_DEFAULT_MODEL,
+from annotate_endpoint import (  # noqa: E402
+    annotate as annotate_endpoint, EndpointAnnotateError, DEFAULT_MODEL as ENDPOINT_DEFAULT_MODEL,
 )
 from topology import route_hints  # noqa: E402
 
@@ -76,10 +76,10 @@ INTERESTING_KINDS = ("shelf", "landmark")
 # to A/B annotation quality on identical captures. Both expose the same annotate() signature.
 ANNOTATE_BACKENDS = {
     "claude-cli": (annotate_claude, CLAUDE_DEFAULT_MODEL),
-    "qwen": (annotate_qwen, QWEN_DEFAULT_MODEL),
+    "endpoint": (annotate_endpoint, ENDPOINT_DEFAULT_MODEL),
 }
 # One "backend call failed for this checkpoint" signal, whichever backend raised it.
-AnnotateError = (ClaudeCliError, QwenAnnotateError)
+AnnotateError = (ClaudeCliError, EndpointAnnotateError)
 
 # Per-backend default worker counts for the parallel pass (override with --jobs). Checkpoints are
 # embarrassingly parallel: each annotate_checkpoint() reads only its own PNGs + the frozen topology
@@ -91,18 +91,27 @@ AnnotateError = (ClaudeCliError, QwenAnnotateError)
 #     nearest prescribed figure. Each call is its own subprocess; billing is subscription-covered.
 #   qwen: 4 (user directive 2026-07-30). Servers like vLLM batch concurrent requests fine; 4
 #     keeps the shared endpoint responsive for other users.
-DEFAULT_JOBS = {"claude-cli": 8, "qwen": 4}
+DEFAULT_JOBS = {"claude-cli": 8, "endpoint": 4}
+
+
+def normalize_backend(value):
+    if value == "qwen":
+        print("[--backend] 'qwen' is DEPRECATED; use 'endpoint'. Continuing with 'endpoint'.",
+              file=sys.stderr)
+        return "endpoint"
+    return value
 
 
 def resolve_annotate_fn(args):
     """Resolve --backend/--model/--base-url into the backend's ready-to-call annotate() (filling
     args.model with the backend's default when unset). Shared by this offline pass and the fused
     capture+annotate walk (capture_annotate_walk.py) so backend wiring lives in one place."""
+    args.backend = normalize_backend(args.backend)
     annotate_fn, default_model = ANNOTATE_BACKENDS[args.backend]
     if not args.model:
         args.model = default_model
-    if args.backend == "qwen" and args.base_url:
-        # Only the qwen backend accepts base_url; inject it so classify/annotate_checkpoint stay
+    if args.backend == "endpoint" and args.base_url:
+        # Only the endpoint backend accepts base_url; inject it so classify/annotate_checkpoint stay
         # backend-agnostic (they call annotate_fn with the shared signature only).
         _base_fn = annotate_fn
         annotate_fn = lambda *a, **k: _base_fn(*a, base_url=args.base_url, **k)
@@ -244,6 +253,7 @@ def annotate_checkpoint(cp, primary, views, args, annotate_fn):
         # without loading the whole graph.
         "neighbors": cp.get("neighbors", []),
         "backend": args.backend,
+        "provider": env.get("provider"),
         "model": args.model,
         "effort": args.effort if args.backend == "claude-cli" else None,
         "cost_equiv_usd": env.get("total_cost_usd"),
@@ -424,7 +434,7 @@ def write_derived_outputs(annotations, topology, ann_path, prod_path, map_path,
 
 def run(args):
     # Resolve the backend: its annotate() and its default model. --model overrides the default,
-    # so `--backend qwen` without --model uses $OPENAI_ANNOTATOR_MODEL, not sonnet.
+    # so `--backend endpoint` without --model uses $OPENAI_ANNOTATOR_MODEL, not sonnet.
     annotate_fn = resolve_annotate_fn(args)
 
     topo_path = os.path.join(args.output_dir, f"topology_{args.topology_tag}.json")
@@ -500,7 +510,7 @@ def run(args):
 
     total_cost = sum(r.get("cost_equiv_usd") or 0 for r in annotations.values())
     cost_note = ("subscription-covered on Max" if args.backend == "claude-cli"
-                 else "self-hosted qwen - no per-call billing")
+                 else "configured endpoint - see provider/model metadata")
     print(f"[annotate_pass] done: {done} annotated, {skipped} skipped, {failed} failed")
     print(f"[annotate_pass] {len(annotations)} checkpoints, {len(products)} products, "
           f"~${total_cost:.2f} equiv ({cost_note})")
@@ -517,20 +527,22 @@ def add_annotator_args(p):
     p.add_argument("--out-tag", default="final_shelf", help="Suffix for the output files")
     p.add_argument("--resume", action="store_true", help="Skip checkpoints already in annotations_<tag>.json")
     p.add_argument("--skip-classify", action="store_true", help="Skip Stage 1; treat every shelf-kind checkpoint as a real shelf")
-    p.add_argument("--backend", choices=list(ANNOTATE_BACKENDS), default="claude-cli",
+    p.add_argument("--backend", choices=list(ANNOTATE_BACKENDS), type=normalize_backend,
+                   default="claude-cli",
                    help="Annotation model backend. claude-cli (default): `claude -p` sonnet, the "
-                        "measured/frozen quality baseline. qwen: the self-hosted vLLM server - no "
-                        "claude.ai subscription or `claude` CLI needed. Un-pinned 2026-07-20.")
+                        "measured/frozen quality baseline. endpoint: the configured vLLM or Vertex "
+                        "OpenAI-compatible endpoint. ('qwen' is a deprecated alias.)")
     p.add_argument("--model", default=None,
                    help="Model or alias. Default depends on --backend: 'sonnet' for claude-cli, "
-                        f"'{QWEN_DEFAULT_MODEL}' for qwen.")
+                        f"'{ENDPOINT_DEFAULT_MODEL}' for endpoint.")
     p.add_argument("--effort", default=DEFAULT_EFFORT, choices=["low", "medium", "high", "xhigh", "max"],
-                   help="claude-cli only; ignored by the qwen backend.")
-    p.add_argument("--base-url", default=None, help="qwen backend root (default $OPENAI_API_URL, +/v1)")
+                   help="claude-cli only; ignored by the endpoint backend.")
+    p.add_argument("--base-url", default=None,
+                   help="vLLM endpoint root override (default $OPENAI_API_URL; ignored by Vertex)")
     p.add_argument("--timeout", type=float, default=240.0)
     p.add_argument("--jobs", type=int, default=0,
                    help="Concurrent checkpoint annotations (0 = backend default: "
-                        f"{DEFAULT_JOBS['claude-cli']} for claude-cli, {DEFAULT_JOBS['qwen']} for qwen). "
+                        f"{DEFAULT_JOBS['claude-cli']} for claude-cli, {DEFAULT_JOBS['endpoint']} for endpoint). "
                         "Use --jobs 1 for the old sequential behaviour.")
     return p
 

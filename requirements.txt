@@ -20,6 +20,7 @@
 
 # --- Agent runtime -----------------------------------------------------------
 openai>=1.79.0
+google-auth>=2.40.0
 python-dotenv>=1.1.0
 tomli>=2.0.0
 loguru>=0.7.3

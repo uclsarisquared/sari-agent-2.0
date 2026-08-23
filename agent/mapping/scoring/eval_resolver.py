@@ -30,7 +30,7 @@ Scoring is about RESOLUTION, not stock: "Coke Zero" resolving to the cola checkp
 CORRECT even though the store doesn't stock it. Found/not-found is the driving+verification
 layer's job, measured separately by the live trial set.
 
-    python mapping/scoring/eval_resolver.py --backend qwen        # needs $OPENAI_API_URL + $OPENAI_API_KEY
+    python mapping/scoring/eval_resolver.py --backend endpoint    # configured vLLM or Vertex
     python mapping/scoring/eval_resolver.py --backend claude-cli
 """
 import argparse
@@ -170,7 +170,8 @@ def score_one(stratum, expect_cps, expect_tier, result):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", choices=["claude-cli", "qwen"], default="qwen")
+    ap.add_argument("--backend", choices=["claude-cli", "endpoint"],
+                    type=locate_task.normalize_backend, default="endpoint")
     ap.add_argument("--model-name", default=None)
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--base-url", default=None)

@@ -1,4 +1,5 @@
 config.env
+qwen-config.env
 api.env
 .venv/
 __pycache__/

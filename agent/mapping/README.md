@@ -81,9 +81,9 @@ A good `grid_final.png` has **no grey holes** in the store interior — if it do
 - **Steps 1 & 4** need the sim in Play mode (`ws://localhost:8080/commands`).
 - **Step 5** defaults to `--backend claude-cli` (`claude -p`, Sonnet, medium effort) — the
   measured/frozen quality baseline. Requires `claude auth login` (bills the claude.ai subscription).
-  `--backend qwen` runs on the OpenAI API compatible endpoint instead (creds in repo-root
-  `config.env`); if you switch, A/B qwen-vs-sonnet on cp015/cp017/cp067 first — quality was only ever
-  measured on Sonnet.
+  `--backend endpoint` runs on the configured vLLM or Vertex OpenAI-compatible endpoint instead;
+  `qwen` remains a deprecated input alias. If you switch, A/B the explicitly approved saved
+  cp015/cp017/cp067 captures first — quality was only ever measured on Sonnet.
 - **Step 5b** is pure string matching against the pinned Unity catalog
   (`SariSandboxV2/Assets/Resources/Data/`) — no model, no sim, deterministic.
 

@@ -19,7 +19,7 @@ from agent_core.actors import VLMAgent
 from agent_core.context_policy import ContextPolicy
 from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, LLMConfig, configure_api_retries
 from agent_core.runtime import EmbodiedAgent
-from nav.locate_task import RESOLVE_SCHEMA, qwen_json
+from nav.locate_task import RESOLVE_SCHEMA, endpoint_json
 from orchestrator.orchestrator_llm import decompose_task
 
 
@@ -104,23 +104,19 @@ def test_resolver_retries_malformed_schema_response(monkeypatch):
         )}}]},
     ])
 
-    class _Response:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return next(bodies)
-
     calls = []
 
-    def post(*_args, **_kwargs):
+    def create(*_args, **_kwargs):
         calls.append(1)
-        return _Response()
+        body = next(bodies)
+        content = body["choices"][0]["message"]["content"]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            model_dump=lambda **_kwargs: body,
+        )
 
-    monkeypatch.setattr("requests.post", post)
-    result, _body = qwen_json(
+    monkeypatch.setattr("agent_core.llm.ChatEndpoint.create", create)
+    result, _body = endpoint_json(
         "system", "prompt", RESOLVE_SCHEMA,
         base_url="http://127.0.0.1:8000", api_key="test",
     )

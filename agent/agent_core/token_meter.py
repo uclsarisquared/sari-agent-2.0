@@ -22,12 +22,9 @@ The context variable is per-thread by construction (a fresh thread starts with t
 is the right failure mode: a background thread's call reads as unattributed, never as whatever role
 the main thread happened to be inside at the time.
 
-NOT COUNTED BY THE PATCH: nav.locate_task's ``qwen_json`` posts to /v1/chat/completions with
-``requests`` and never touches the SDK - the advisor and the map resolver both run through it, and
-before roles existed BOTH were missing from the totals entirely despite this docstring once claiming
-otherwise. They now call ``record_api_call`` before the send and report response usage through
-``record_external``. ``claude_json`` (the claude-cli backend) is billed to a different account
-altogether and is still not counted here.
+The runtime resolver/advisor/verifier, endpoint annotator, probe, and mapping planner all use the
+SDK transport, so the patch is their single accounting path. ``claude_json`` (the claude-cli
+backend) is billed to a different account altogether and is not counted here.
 
 NOT COUNTED, deliberately: moondream (vision/md_tools) is a different API that reports no token
 usage at all, so there is nothing to add up; its qwen ERROR-fallback path does go through the SDK
@@ -200,11 +197,8 @@ def install(run_dir: Optional[str] = None) -> None:
 def record_external(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
     """Counts one token-bearing response that did NOT go through the patched SDK.
 
-    nav.locate_task's qwen backend posts to /v1/chat/completions with ``requests`` (it predates the
-    meter and stayed on raw HTTP because the claude-cli backend's argv limit forced the split), so
-    the patch never sees it. Its ``usage`` block is an ordinary dict off the JSON body. ``role_name``
-    overrides the ambient role for callers that know which reasoner they are serving but cannot wrap
-    the call site.
+    Retained for unrelated legacy callers that do not use the OpenAI SDK. ``role_name`` overrides
+    the ambient role for callers that know which reasoner they are serving but cannot wrap the call.
 
     The caller separately invokes ``record_api_call`` before its raw send. Never call this for a
     response that also went through the SDK - that double-counts its token-bearing ``calls`` row.

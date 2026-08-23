@@ -72,14 +72,14 @@ CWD-relative by `agent_core.agent`; run everything from `agent/`).
   Never pass `--bare` to `claude -p` here: it forces `ANTHROPIC_API_KEY` and refuses the OAuth login.
 - **The ANNOTATOR defaults to `claude -p`, sonnet, medium effort** — the measured/frozen quality
   baseline. It is no longer *locked* to claude: as of 2026-07-20 (user directive) `annotate_pass.py`
-  takes `--backend {claude-cli,qwen}`, and the pipeline app exposes the choice. claude-cli stays the
-  DEFAULT (unchanged baseline); `qwen` (the same endpoint, `annotate_qwen.py`) is selectable for a
-  fully self-hosted run or to A/B annotation quality on identical captures. If you switch the
-  annotator to qwen for a real pass, A/B qwen-vs-sonnet on the reviewed captures (cp015/cp017/cp067)
+  takes `--backend {claude-cli,endpoint}`, and the pipeline app exposes the choice. claude-cli stays
+  the DEFAULT (unchanged baseline); `endpoint` selects the configured vLLM or Vertex transport.
+  `qwen` remains a deprecated CLI alias. If you switch for a real pass, A/B the reviewed saved
+  captures (cp015/cp017/cp067)
   first — quality was only ever measured on sonnet. The AGENT RUNTIME (per-step VLM/learner calls)
-  runs against an **OpenAI API compatible endpoint** (`$OPENAI_API_URL/v1`, bearer
-  `$OPENAI_API_KEY`) — OpenRouter was retired for agent calls when its credits ran out.
-- **Model ids are config, not code.** `$OPENAI_MODEL` (and `$OPENAI_ANNOTATOR_MODEL` for the qwen
+  runs against an **OpenAI API compatible endpoint** selected by `$LLM_PROVIDER` (`vllm` uses
+  `$OPENAI_API_URL`/`$OPENAI_API_KEY`; `vertex` uses ADC and `$GOOGLE_CLOUD_PROJECT`).
+- **Model ids are config, not code.** `$OPENAI_MODEL` (and `$OPENAI_ANNOTATOR_MODEL` for the endpoint
   annotator backend) in the repo-root `config.env` select what the endpoint is asked for; code
   reads them via `agent_core/models.py`, which holds the ONLY hardcoded default in the tree
   (`Qwen/Qwen3.6-27B`, the measured baseline). Don't reintroduce model literals at call sites.

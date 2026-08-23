@@ -22,8 +22,11 @@ uv sync
 cp config.env.example config.env
 ```
 
-Set `OPENAI_API_URL` (scheme, host, and port; for example `http://host:8000`) and
-`OPENAI_API_KEY` in `config.env`. Runtime clients append `/v1`.
+The default `LLM_PROVIDER=vllm` uses `OPENAI_API_URL` (scheme, host, and port; for example
+`http://host:8000`), `OPENAI_API_KEY`, and `OPENAI_MODEL`; runtime clients append `/v1`.
+For Vertex, set `LLM_PROVIDER=vertex`, `GOOGLE_CLOUD_PROJECT`, optional
+`GOOGLE_CLOUD_LOCATION` (default `global`), and `OPENAI_MODEL=google/gemini-3.1-flash-lite`.
+Vertex authentication uses Application Default Credentials.
 `MDREAM_API_KEY` enables the primary grab-pointing service; the runtime falls back to Qwen if it is
 unavailable.
 

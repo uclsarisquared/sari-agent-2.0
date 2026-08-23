@@ -17,13 +17,12 @@ The division of labour is the whole architecture (`phase4_agent_integration.md`)
 Backends (--backend):
   claude-cli  (default) `claude -p` - same billing path as annotate_pass: the claude.ai
               subscription, NOT API credits. Do not switch silently (CLAUDE.md).
-  qwen        the OpenAI API compatible endpoint (Chat Completions at $OPENAI_API_URL/v1);
-              model id from $OPENAI_MODEL. Credentials come from the repo-root config.env.
+  endpoint    the configured vLLM or Vertex OpenAI-compatible Chat Completions endpoint.
+              `qwen` is accepted as a deprecated alias.
 
 Outputs land in --run-dir: every screenshot, every verifier verdict, locate_report.json.
 """
 import argparse
-import base64
 import json
 import os
 import shutil
@@ -118,31 +117,6 @@ VERIFIER_SYS = load_prompt("navigation/verifier")
 
 # ---------------------------------------------------------------------------- backends
 
-def _meter(model, body):
-    """Reports one raw-HTTP completion to the token meter.
-
-    This backend posts with ``requests``, so agent_core.token_meter's OpenAI-SDK patch never sees
-    it - which means the advisor's and the resolver's tokens were missing from every run's totals
-    until this call existed, not merely unattributed. The import is lazy and swallowed: mapping
-    tools import this module on sys.paths where agent_core is not present, and accounting is never
-    a reason to fail a call that already succeeded.
-    """
-    try:
-        from agent_core import token_meter
-        token_meter.record_external(model, (body or {}).get("usage"))
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _meter_api_call():
-    """Count the raw OpenAI-compatible transport attempt before it is sent."""
-    try:
-        from agent_core import token_meter
-        token_meter.record_api_call()
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="medium",
                 timeout=240.0):
     """One `claude -p` call -> (dict, envelope). Images ride via absolute paths in the prompt +
@@ -185,43 +159,32 @@ def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="
     return result, envelope
 
 
-def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
-              base_url=None, api_key=None):
+def endpoint_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
+                  base_url=None, api_key=None):
     """One logical Chat Completions call against the configured endpoint -> (dict, envelope-ish).
     `model` defaults to $OPENAI_MODEL. MEASURED (see CLAUDE.md): vLLM has silently ignored
     guided_json before - the schema is stated in the prompt AND parsed defensively, never
     trusted to be enforced server-side. The endpoint requires a bearer key
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside
     $OPENAI_API_URL in the repo-root config.env."""
-    import requests
     from agent_core.llm import (
+        ChatEndpoint,
+        EndpointProfile,
         MalformedContentError,
         call_with_api_retries,
-        normalize_endpoint_root,
+        image_url_part,
     )
-    model = model or agent_model()
-    endpoint = base_url or os.environ.get("OPENAI_API_URL")
-    key = api_key or os.environ.get("OPENAI_API_KEY")
-    if not endpoint:
-        raise RuntimeError("qwen backend needs --base-url or $OPENAI_API_URL "
-                           "(set it in the repo-root config.env)")
-    endpoint = normalize_endpoint_root(endpoint)
-    url = f"{endpoint}/v1/chat/completions"
+    profile = EndpointProfile.from_env(model=model, base_url=base_url, api_key=api_key)
+    transport = ChatEndpoint(profile, timeout=timeout)
+    model = profile.model
 
     content = [{"type": "text", "text": prompt + "\n\nReply with ONLY a JSON object matching:\n"
                 + json.dumps(schema)}]
     for label, path in image_paths:
         with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": content}],
-        "temperature": 0.0,
-    }
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+            content.append(image_url_part(f.read(), "image/png"))
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": content}]
 
     call_name = (
         "resolver" if schema is RESOLVE_SCHEMA else
@@ -262,12 +225,11 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
             raise ValueError(f"{path} must be one of {contract['enum']}")
 
     def request():
-        _meter_api_call()
-        response = requests.post(url, json=payload, timeout=timeout, headers=headers)
-        response.raise_for_status()
+        response = transport.create(messages=messages, schema=schema, schema_name=call_name,
+                                    model=model, temperature=0.0)
+        body = transport.envelope(response)
         try:
-            body = response.json()
-            text = body["choices"][0]["message"]["content"]
+            text = response.choices[0].message.content
             start, end = text.find("{"), text.rfind("}")
             if start < 0 or end < 0:
                 raise ValueError(f"reply had no JSON object: {text[:200]!r}")
@@ -278,10 +240,13 @@ def qwen_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
             raise MalformedContentError(
                 f"{call_name} response violated its schema: {error}", content=content
             ) from error
-        _meter(model, body)
         return result, body
 
     return call_with_api_retries(request, call_name=call_name)
+
+
+# Public compatibility alias for saved scripts; endpoint is the provider-neutral name.
+qwen_json = endpoint_json
 
 
 def backend_callable(backend: str):
@@ -290,9 +255,17 @@ def backend_callable(backend: str):
         return lambda system, prompt, schema, images=(): claude_json(
             system, prompt, schema, images
         )
-    return lambda system, prompt, schema, images=(): qwen_json(
+    return lambda system, prompt, schema, images=(): endpoint_json(
         system, prompt, schema, images
     )
+
+
+def normalize_backend(value):
+    if value == "qwen":
+        print("[--backend] 'qwen' is DEPRECATED; use 'endpoint'. Continuing with 'endpoint'.",
+              file=sys.stderr)
+        return "endpoint"
+    return value
 
 
 def make_backend(args):
@@ -300,7 +273,7 @@ def make_backend(args):
         return lambda system, prompt, schema, images=(): claude_json(
             system, prompt, schema, images, model=args.model_name or "sonnet",
             effort=args.effort)
-    return lambda system, prompt, schema, images=(): qwen_json(
+    return lambda system, prompt, schema, images=(): endpoint_json(
         system, prompt, schema, images, model=args.model_name or agent_model(),
         base_url=args.base_url)
 
@@ -403,10 +376,12 @@ def verify(call, task, resolution, cp_info, views):
 def main():
     p = argparse.ArgumentParser(description="Locate a product in the store via the frozen map.")
     p.add_argument("task", help='e.g. "Locate the Coke Zero in the store."')
-    p.add_argument("--backend", choices=["claude-cli", "qwen"], default="claude-cli")
+    p.add_argument("--backend", choices=["claude-cli", "endpoint"], type=normalize_backend,
+                   default="claude-cli")
     p.add_argument("--model-name", default=None)
     p.add_argument("--effort", default="medium")
-    p.add_argument("--base-url", default=None, help="qwen backend host (default $OPENAI_API_URL)")
+    p.add_argument("--base-url", default=None,
+                   help="vLLM endpoint host override (default $OPENAI_API_URL)")
     p.add_argument("--max-visits", type=int, default=4)
     p.add_argument("--uri", default=None, help="sim websocket (default from executor args)")
     p.add_argument("--run-dir", default=None,

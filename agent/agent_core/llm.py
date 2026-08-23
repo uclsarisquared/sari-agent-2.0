@@ -9,6 +9,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlsplit
@@ -41,6 +42,168 @@ class LLMConfig:
 
 # Compatibility name retained while callers migrate to the transport-neutral spelling.
 OpenRouterConfig = LLMConfig
+
+VERTEX_MODEL = "google/gemini-3.1-flash-lite"
+VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+class EndpointConfigurationError(RuntimeError):
+    """The selected OpenAI-compatible endpoint is not completely configured."""
+
+
+class ADCBearerToken:
+    """Thread-safe callable bearer token for the OpenAI client's ``api_key`` hook."""
+
+    def __init__(self, credentials=None, request=None, *, refresh_margin_s: int = 300):
+        if credentials is None:
+            try:
+                import google.auth
+                from google.auth.transport.requests import Request
+                credentials, _ = google.auth.default(scopes=[VERTEX_SCOPE])
+                request = request or Request()
+            except Exception as error:  # noqa: BLE001
+                raise EndpointConfigurationError(
+                    "Vertex authentication failed. Configure Application Default Credentials "
+                    "(for example GOOGLE_APPLICATION_CREDENTIALS or workload identity)."
+                ) from error
+        self._credentials = credentials
+        self._request = request
+        self._refresh_margin_s = refresh_margin_s
+        self._lock = threading.Lock()
+
+    def _needs_refresh(self) -> bool:
+        from datetime import datetime, timedelta, timezone
+        if not getattr(self._credentials, "token", None):
+            return True
+        expiry = getattr(self._credentials, "expiry", None)
+        if expiry is None:
+            return False
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= datetime.now(timezone.utc) + timedelta(seconds=self._refresh_margin_s)
+
+    def __call__(self) -> str:
+        if self._needs_refresh():
+            with self._lock:
+                if self._needs_refresh():
+                    try:
+                        self._credentials.refresh(self._request)
+                    except Exception as error:  # noqa: BLE001
+                        raise EndpointConfigurationError(
+                            "Could not refresh Vertex Application Default Credentials."
+                        ) from error
+        token = getattr(self._credentials, "token", None)
+        if not token:
+            raise EndpointConfigurationError("Vertex credentials refreshed without an access token.")
+        return token
+
+
+@dataclass(frozen=True)
+class EndpointProfile:
+    """Provider-specific transport and request settings behind one Chat Completions API."""
+
+    provider: Literal["vllm", "vertex"]
+    base_url: str
+    api_key: Any
+    model: str
+    extra_body: dict[str, Any]
+
+    @classmethod
+    def from_env(
+        cls, *, model: str | None = None, base_url: str | None = None,
+        api_key: str | None = None, provider: str | None = None,
+    ) -> "EndpointProfile":
+        selected = (provider or os.getenv("LLM_PROVIDER") or "vllm").strip().lower()
+        if selected == "vllm":
+            endpoint, fallback_key = endpoint_creds()
+            if base_url:
+                endpoint = normalize_endpoint_root(base_url)
+            key = api_key or fallback_key
+            if not endpoint:
+                raise EndpointConfigurationError(
+                    "LLM_PROVIDER=vllm requires OPENAI_API_URL (scheme/host/port)."
+                )
+            if not key:
+                raise EndpointConfigurationError("LLM_PROVIDER=vllm requires OPENAI_API_KEY.")
+            return cls(
+                provider="vllm", base_url=f"{endpoint}/v1", api_key=key,
+                model=model or agent_model(),
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        if selected == "vertex":
+            if base_url or api_key:
+                raise EndpointConfigurationError(
+                    "LLM_PROVIDER=vertex constructs its endpoint internally and uses ADC; "
+                    "--base-url/--api-key overrides are not supported."
+                )
+            project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+            if not project:
+                raise EndpointConfigurationError(
+                    "LLM_PROVIDER=vertex requires GOOGLE_CLOUD_PROJECT."
+                )
+            location = (os.getenv("GOOGLE_CLOUD_LOCATION") or "global").strip()
+            if not location:
+                raise EndpointConfigurationError("GOOGLE_CLOUD_LOCATION cannot be empty.")
+            host = ("aiplatform.googleapis.com" if location == "global"
+                    else f"{location}-aiplatform.googleapis.com")
+            url = (f"https://{host}/v1/projects/{project}/locations/{location}"
+                   "/endpoints/openapi")
+            return cls(
+                provider="vertex", base_url=url, api_key=ADCBearerToken(),
+                model=model or os.getenv("OPENAI_MODEL") or VERTEX_MODEL,
+                extra_body={"google": {"thinking_config": {"thinking_level": "MINIMAL"}}},
+            )
+        raise EndpointConfigurationError(
+            f"Unknown LLM_PROVIDER={selected!r}; expected 'vllm' or 'vertex'."
+        )
+
+    def request_options(self) -> dict[str, Any]:
+        return {"extra_body": self.extra_body.copy()}
+
+
+def image_url_part(data: bytes, mime_type: str = "image/png") -> dict[str, Any]:
+    """Build the OpenAI Chat Completions image part used by every provider."""
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}
+
+
+class ChatEndpoint:
+    """Non-streaming OpenAI-compatible Chat Completions transport."""
+
+    def __init__(self, profile: EndpointProfile | None = None, *, timeout: float = 180.0):
+        self.profile = profile or EndpointProfile.from_env()
+        self.client = OpenAI(base_url=self.profile.base_url, api_key=self.profile.api_key,
+                             timeout=timeout, max_retries=0)
+
+    def create(
+        self, *, messages: list[dict[str, Any]], schema: dict | None = None,
+        schema_name: str = "response", model: str | None = None,
+        temperature: float = 0.0, max_tokens: int | None = None,
+        extra_body: dict | None = None,
+    ):
+        body = dict(self.profile.extra_body)
+        if extra_body:
+            body.update(extra_body)
+        kwargs: dict[str, Any] = {
+            "model": model or self.profile.model, "messages": messages,
+            "temperature": temperature, "extra_body": body,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+            }
+        return self.client.chat.completions.create(**kwargs)
+
+    @staticmethod
+    def envelope(response) -> dict[str, Any]:
+        if hasattr(response, "model_dump"):
+            return response.model_dump(mode="json", exclude_none=False)
+        if isinstance(response, dict):
+            return response
+        raise TypeError(f"Unsupported Chat Completions response: {type(response).__name__}")
 
 
 def normalize_endpoint_root(raw: str) -> str:
@@ -90,28 +253,22 @@ def endpoint_creds() -> tuple[Optional[str], Optional[str]]:
 
 
 def agent_vlm_config(temperature: float = 0.5, mode: str = "lean") -> LLMConfig:
-    endpoint, key = endpoint_creds()
-    if not endpoint:
-        raise RuntimeError(
-            "OPENAI_API_URL not found (looked in repo-root config.env, then "
-            "sari_env_old conda state)"
-        )
+    profile = EndpointProfile.from_env()
     return LLMConfig(
-        model_id=agent_model(),
+        model_id=profile.model,
         temperature=temperature,
         mode=mode,
-        api_key=key,
-        base_url=f"{endpoint}/v1",
+        api_key=profile.api_key,
+        base_url=profile.base_url,
         max_tokens=1536,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        extra_body=profile.extra_body,
     )
 
 
 def encode_image(image: Image.Image) -> dict:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+    return image_url_part(buffer.getvalue(), "image/png")
 
 
 def build_content(*parts) -> list:

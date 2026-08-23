@@ -137,7 +137,7 @@ class PipelineApp:
         self._row(caf, 1, "Capture limit (0 = all)", ttk.Entry(caf, textvariable=self.limit, width=8))
         self.ann_backend = tk.StringVar(value="claude-cli")
         self._row(caf, 2, "Annotator backend", ttk.Combobox(
-            caf, textvariable=self.ann_backend, values=["claude-cli", "qwen"],
+            caf, textvariable=self.ann_backend, values=["claude-cli", "endpoint"],
             state="readonly", width=12))
         self.ann_model = tk.StringVar(value="sonnet")
         self._row(caf, 3, "Model (claude only)", ttk.Entry(caf, textvariable=self.ann_model, width=12))
@@ -153,9 +153,9 @@ class PipelineApp:
         self.fuse_cap_ann = tk.BooleanVar(value=False)
         ttk.Checkbutton(caf, text="Fuse capture+annotate (annotate during the walk)",
                         variable=self.fuse_cap_ann).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Label(caf, text="claude-cli = measured baseline (sonnet/medium). qwen = self-hosted,\n"
-                            "no subscription; model/effort fields ignored. A/B before trusting qwen.\n"
-                            "Jobs default: 8 claude-cli, 4 qwen. Set 1 if rate limits bite.\n"
+        ttk.Label(caf, text="claude-cli = measured baseline. endpoint = configured vLLM/Vertex,\n"
+                            "with provider/model recorded. A/B saved captures before switching.\n"
+                            "Jobs default: 8 claude-cli, 4 endpoint. Set 1 if rate limits bite.\n"
                             "Fused runs as ONE stage; needs both stage 4 and 5 ticked.",
                   foreground="grey").grid(row=7, column=0, columnspan=2, sticky="w")
 

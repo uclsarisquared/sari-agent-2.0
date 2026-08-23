@@ -1,4 +1,4 @@
-"""First-contact probe: can the Qwen server actually annotate one of our captures?
+"""First-contact probe for the configured OpenAI-compatible endpoint.
 
 This is NOT the Phase 3 annotator. It is deliberately the smallest thing that answers the
 questions blocking it, one image at a time, with no navigation and no graph:
@@ -18,7 +18,7 @@ and the two most informative inputs are already on disk from the capture walk:
         -> a bare wall the topology mislabelled "shelf". Expect "non_shelf". This is the case
            Stage 1 exists for; ~40% of shelf checkpoints look like this.
 
-Endpoint: an OpenAI API compatible server over Chat Completions at <OPENAI_API_URL>/v1.
+Endpoint: vLLM at <OPENAI_API_URL>/v1 or Vertex's /endpoints/openapi compatibility API.
 Model id comes from $OPENAI_ANNOTATOR_MODEL (falling back to $OPENAI_MODEL) in the repo-root config.env.
 """
 import argparse
@@ -28,8 +28,6 @@ import mimetypes
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -51,23 +49,16 @@ from annotator_sys_inst import (  # noqa: E402
     build_annotation_instructions, schema_for, effective_kind,
 )
 from agent_core.models import annotator_model  # noqa: E402
-from agent_core.llm import normalize_endpoint_root  # noqa: E402
+from agent_core.llm import (  # noqa: E402
+    ChatEndpoint, EndpointProfile, image_url_part, normalize_endpoint_root,
+)
 
 DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in config.env
 
 
 def image_content_block(model, mime_type, base64_data):
-    """Vendored verbatim from SariAgent/sari_agent/openai_client.py.
-
-    Vendored rather than imported: SariAgent lives in a different repo (SariSandboxMY), and a
-    cross-repo sys.path hack for five lines is a worse dependency than a copy. The phase3 doc
-    scopes the reuse to exactly this helper - not SariAgent's streaming/tool-loop harness, since
-    annotation is single-turn.
-    """
-    url = f"data:{mime_type};base64,{base64_data}"
-    if "qwen" in model.lower():
-        return {"type": "image_url", "image_url": {"url": url}}
-    return {"type": "input_image", "image_url": url}
+    """Compatibility wrapper around the shared provider-neutral image part builder."""
+    return image_url_part(base64.b64decode(base64_data), mime_type)
 
 
 def resolve_api_key(explicit=None):
@@ -109,23 +100,8 @@ def resolve_base_url(explicit):
     return f"{normalize_endpoint_root(raw)}/v1"
 
 
-def post_chat(base, payload, api_key, timeout):
-    req = urllib.request.Request(
-        f"{base}/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        # vLLM puts the real complaint (bad schema, unsupported field) in the body, not the status.
-        sys.exit(f"HTTP {e.code} from server:\n{e.read().decode()[:2000]}")
-
-
 def main():
-    p = argparse.ArgumentParser(description="Probe the Qwen server with one captured image.")
+    p = argparse.ArgumentParser(description="Probe the configured OpenAI-compatible endpoint.")
     p.add_argument("image", help="PNG from the capture walk")
     p.add_argument("--base-url", default=None, help="Default: $OPENAI_API_URL, +/v1")
     p.add_argument("--api-key", default=None,
@@ -148,7 +124,10 @@ def main():
     p.add_argument("--timeout", type=float, default=300.0)
     args = p.parse_args()
 
-    base = resolve_base_url(args.base_url)
+    profile = EndpointProfile.from_env(model=args.model, base_url=args.base_url,
+                                       api_key=args.api_key)
+    endpoint = ChatEndpoint(profile, timeout=args.timeout)
+    base = profile.base_url
     with open(args.image, "rb") as f:
         raw = f.read()
     mime = mimetypes.guess_type(args.image)[0] or "image/png"
@@ -159,54 +138,46 @@ def main():
         kind = effective_kind(args.kind) if args.kind != "non_shelf" else "non_shelf"
         system, schema, label = build_annotation_instructions(kind), schema_for(kind), f"annotate:{kind}"
 
-    payload = {
-        "model": args.model,
-        "messages": [
+    messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": [
                 {"type": "text", "text": "PRIMARY image:"},
-                image_content_block(args.model, mime, base64.b64encode(raw).decode()),
+                image_url_part(raw, mime),
             ]},
-        ],
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
-        # Qwen3.x reasons unless told not to. This is the documented off-switch and vLLM passes
-        # it through to the chat template.
-        "chat_template_kwargs": {"enable_thinking": args.think},
-    }
-    if args.guided:
-        # MUST be response_format. `guided_json` is the older vLLM spelling and this build
-        # SILENTLY IGNORES it - measured with a negative-control schema whose only legal label was
-        # "banana": with guided_json the model answered "non_shelf" (its own answer), with
-        # response_format it answered "banana". Silent, because the prompt alone already yields
-        # conforming JSON, so an ignored schema looks exactly like a working one.
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": label.replace(":", "_"), "schema": schema, "strict": True},
-        }
+        ]
+    extra = ({"chat_template_kwargs": {"enable_thinking": args.think}}
+             if profile.provider == "vllm" else None)
 
     print(f"[probe] {label}  guided={args.guided}  {os.path.basename(args.image)} "
           f"({len(raw)/1e6:.1f}MB)  -> {base}")
     t0 = time.time()
-    resp = post_chat(base, payload, resolve_api_key(args.api_key), args.timeout)
+    try:
+        response = endpoint.create(
+            messages=messages, schema=schema if args.guided else None,
+            schema_name=label.replace(":", "_"), model=profile.model,
+            max_tokens=args.max_tokens, temperature=args.temperature, extra_body=extra,
+        )
+    except Exception as error:  # fail-fast probe with the SDK's full diagnostic
+        sys.exit(f"endpoint probe failed: {type(error).__name__}: {error}")
+    resp = endpoint.envelope(response)
     dt = time.time() - t0
 
-    choice = resp["choices"][0]
-    message = choice["message"]
-    text = message.get("content")
+    choice = response.choices[0]
+    message = choice.message
+    text = message.content
     usage = resp.get("usage", {})
     print(f"[probe] {dt:.1f}s  prompt={usage.get('prompt_tokens','?')} "
           f"completion={usage.get('completion_tokens','?')} "
-          f"finish={choice.get('finish_reason')}")
+          f"finish={choice.finish_reason}")
     print("-" * 80)
 
     if not text:
         # content=None is not a bug to route around - it says the model never reached an answer.
         # Qwen3.x reasons by default and vLLM splits that into reasoning_content, so a thinking
         # run that hits max_tokens returns exactly this. Show what it DID emit.
-        print(f"[probe] content is empty. message keys: {sorted(message)}")
+        print("[probe] content is empty.")
         # vLLM names this `reasoning` on this build; other builds use `reasoning_content`.
-        reasoning = message.get("reasoning") or message.get("reasoning_content")
+        reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
         if reasoning:
             print(f"[probe] reasoning_content ({len(reasoning)} chars) - tail:")
             print(reasoning[-1500:])

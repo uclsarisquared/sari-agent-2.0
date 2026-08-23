@@ -103,7 +103,8 @@ def score(expect, report):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", choices=["claude-cli", "qwen"], default="claude-cli")
+    ap.add_argument("--backend", choices=["claude-cli", "endpoint"],
+                    type=locate_task.normalize_backend, default="claude-cli")
     ap.add_argument("--model-name", default=None)
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--base-url", default=None)

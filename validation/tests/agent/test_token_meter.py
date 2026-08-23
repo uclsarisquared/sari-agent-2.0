@@ -19,7 +19,6 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from openai import OpenAI
-import requests
 
 from agent_core import token_meter
 from nav import locate_task
@@ -226,9 +225,8 @@ def test_innermost_role_wins_and_resets_after_a_failure():
     assert by_role[token_meter.UNATTRIBUTED]["calls"] == 1, by_role
 
 
-def test_record_external_counts_the_raw_http_backends():
-    """nav.locate_task's qwen backend posts with `requests` and never touches the patched SDK, so
-    without this path the advisor and the map resolver are missing from the totals entirely."""
+def test_record_external_remains_available_for_non_sdk_backends():
+    """Legacy non-SDK integrations can still report usage without affecting endpoint calls."""
     token_meter.install()
     token_meter.reset()
     token_meter.record_api_call(token_meter.ROLE_ADVISOR)
@@ -245,22 +243,24 @@ def test_record_external_counts_the_raw_http_backends():
     assert token_meter.totals()["untracked_calls"] == 1, token_meter.totals()
 
 
-def test_raw_http_request_retries_and_counts_each_failed_send(monkeypatch):
+def test_endpoint_sdk_retries_and_counts_each_failed_send(monkeypatch):
+    from openai import APIStatusError
     token_meter.install()
     token_meter.reset()
     monkeypatch.setattr("agent_core.llm.time.sleep", lambda _delay: None)
-
-    def fail(*_args, **_kwargs):
-        raise requests.ConnectionError("offline")
-
-    monkeypatch.setattr(requests, "post", fail)
+    server, sdk_base_url = _server(_FailHandler)
     try:
-        locate_task.qwen_json("system", "prompt", {"type": "object"},
-                              base_url="http://127.0.0.1:1", api_key="test")
-    except requests.ConnectionError:
-        pass
-    else:
-        raise AssertionError("the raw HTTP request unexpectedly succeeded")
+        try:
+            locate_task.endpoint_json(
+                "system", "prompt", {"type": "object"},
+                base_url=sdk_base_url.removesuffix("/v1"), api_key="test",
+            )
+        except APIStatusError:
+            pass
+        else:
+            raise AssertionError("the endpoint request unexpectedly succeeded")
+    finally:
+        server.shutdown()
 
     totals = token_meter.totals()
     assert totals["api_calls"] == 10, totals

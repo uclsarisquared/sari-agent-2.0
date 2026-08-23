@@ -1,14 +1,14 @@
 """Model ids for the agent runtime, declared in config.env rather than in code.
 
-Every reasoner in this repo talks to an **OpenAI API compatible endpoint** (`$OPENAI_API_URL`,
-bearer `$OPENAI_API_KEY`) — nothing here is tied to a particular vendor or host. Which model that
+Every reasoner in this repo talks to an **OpenAI API compatible endpoint** selected by
+`$LLM_PROVIDER` (`vllm` or `vertex`). Which model that
 endpoint should be asked for is configuration, not a code constant, so it lives in the repo-root
 `config.env`:
 
     OPENAI_MODEL            the model every agent-runtime reasoner uses (orchestrator, actor,
                             associative memory, perception, item resolver, planners, probes)
     OPENAI_ANNOTATOR_MODEL  the offline annotator's model when it runs on the OpenAI-compatible
-                            endpoint (`--backend qwen`); falls back to OPENAI_MODEL when unset.
+                            endpoint (`--backend endpoint`); falls back to OPENAI_MODEL when unset.
                             The `claude-cli` annotator backend is unaffected — it carries its own
                             `--model` (sonnet, the frozen quality baseline; see CLAUDE.md).
 
@@ -35,11 +35,17 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
 
 # The one hardcoded model id in the tree; OPENAI_MODEL in config.env overrides it.
 DEFAULT_MODEL = "Qwen/Qwen3.6-27B"
+VERTEX_DEFAULT_MODEL = "google/gemini-3.1-flash-lite"
 
 
 def agent_model() -> str:
     """The model every agent-runtime reasoner asks the endpoint for ($OPENAI_MODEL)."""
-    return os.getenv("OPENAI_MODEL") or DEFAULT_MODEL
+    configured = os.getenv("OPENAI_MODEL")
+    if configured:
+        return configured
+    if (os.getenv("LLM_PROVIDER") or "vllm").strip().lower() == "vertex":
+        return VERTEX_DEFAULT_MODEL
+    return DEFAULT_MODEL
 
 
 def annotator_model() -> str:

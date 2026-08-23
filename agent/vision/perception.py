@@ -2,7 +2,6 @@ import ast
 import json
 import random
 import os
-import base64
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -22,18 +21,17 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / 'config.env')
 # OpenRouter retired on 402). This is the bounding-box/centering client - the endpoint's VL model
 # replaces Gemini here, identically in BOTH A/B arms; bbox quality vs Gemini is unmeasured and
 # shared, so it cannot skew the arms.
-from agent_core.llm import MalformedContentError, call_with_api_retries, endpoint_creds
-from agent_core.models import agent_model
+from agent_core.llm import EndpointProfile, MalformedContentError, call_with_api_retries, image_url_part
 from agent_core.prompt_loader import load_prompt, render_prompt
 # Every LLM call in this module is perception's cost - bbox, centering and OCR-bbox reasoning alike.
 # The role blocks wrap call_with_api_retries, not the lambda inside it, so a flaky call's retries are
 # billed to perception as well; the endpoint charged for them.
 from agent_core import token_meter
-_ENDPOINT_ROOT, _ENDPOINT_KEY = endpoint_creds()
-MODEL_NAME = agent_model()
+_ENDPOINT_PROFILE = EndpointProfile.from_env()
+MODEL_NAME = _ENDPOINT_PROFILE.model
 CLIENT = OpenAI(
-    base_url=f"{_ENDPOINT_ROOT}/v1",
-    api_key=_ENDPOINT_KEY,
+    base_url=_ENDPOINT_PROFILE.base_url,
+    api_key=_ENDPOINT_PROFILE.api_key,
     max_retries=0,
 )
 ORIGINAL_WIDTH = 1920
@@ -93,8 +91,7 @@ def _ocr_lines(source):
 def _encode_image(image: Image.Image) -> dict:
     buf = BytesIO()
     image.save(buf, format='PNG')
-    b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+    return image_url_part(buf.getvalue(), "image/png")
 
 
 def read_text(image_path=None):
@@ -115,7 +112,7 @@ def find_most_similar_bbox_to_target_name(target_name, ocr_result):
             messages=[{"role": "user", "content": f"{FIND_MOST_SIMILAR_OCR_BBOX_PROMPT}\n\ntarget_name={target_name}\n\n{bboxes}"}],
             temperature=0.5,
             max_tokens=400,
-            extra_body={'chat_template_kwargs': {'enable_thinking': False}},
+            extra_body=_ENDPOINT_PROFILE.extra_body,
         ).choices[0].message.content
 
     def validate(content):
@@ -286,7 +283,7 @@ def _bbox_request(image, target_info, prompt, max_tokens, temperature):
         ]}],
         temperature=temperature,
         max_tokens=max_tokens,
-        extra_body={'chat_template_kwargs': {'enable_thinking': False}},
+        extra_body=_ENDPOINT_PROFILE.extra_body,
     ).choices[0].message.content
 
 
