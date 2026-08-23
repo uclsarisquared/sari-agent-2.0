@@ -61,9 +61,19 @@ _HARNESS_FAILURES = {
 class Discord:
     """Fail-soft Discord webhook client with per-key cooldowns."""
 
-    def __init__(self, webhook_url: str | None = None, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        webhook_url: str | None = None,
+        *,
+        enabled: bool = True,
+        collapse_alerts: bool = False,
+    ) -> None:
         self.webhook_url = webhook_url or os.getenv(WEBHOOK_ENV, "")
         self.enabled = bool(enabled and self.webhook_url)
+        # Collapse alerts fire on a health-score heuristic, not a hard failure, so they are the
+        # noisiest message type this module sends. Off by default; see [discord].collapse_alerts
+        # in runconfig.toml.
+        self.collapse_alerts_enabled = collapse_alerts
         self._last_sent: dict[str, float] = {}
         self._seen_finished: set[str] = set()
         self._alerted: set[str] = set()
@@ -140,6 +150,8 @@ class Discord:
         The frame is the payload that matters: a still of the agent nose-to-nose with a shelf tells
         you in one glance what no metric does, and it is what lets you decide to kill from a phone.
         """
+        if not self.collapse_alerts_enabled:
+            return
         key = attempt.get("key", "")
         if key in self._alerted or not self._cooled(f"collapse:{key}"):
             return
