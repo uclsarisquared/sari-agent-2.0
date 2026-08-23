@@ -106,6 +106,27 @@ def downscale_for_storage(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
         return image_bytes
 
 
+def downscale_for_storage_jpeg(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H, quality=85):
+    """Bound an ordinary debug screenshot and encode it as a quality-controlled JPEG.
+
+    Unlike functional OCR/inspection evidence, step copies are only for review. The caller keeps
+    using the original native bytes for models and guards.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        if w > max_w or h > max_h:
+            scale = min(max_w / w, max_h / h)
+            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+    except Exception:
+        return image_bytes
+
+
 def downscale_pil_for_storage(img, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
     """PIL-image sibling of downscale_for_storage: return `img` shrunk to fit max_w x max_h (aspect
     preserved), or the SAME image if already within bounds. Never upscales; best-effort (returns the

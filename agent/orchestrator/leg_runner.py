@@ -142,7 +142,7 @@ def _start_leg_session(agent, leg, sm, caps, context, future_legs, visited,
 
     # Start metrics and structured logging from the same wall-clock origin.
     started_at = time.time()
-    artifacts.started_at = started_at
+    artifacts.mark_started(started_at)
     events = artifacts.event_logger(leg_idx)
     metrics = initial_metrics(leg, completion_guard)
 

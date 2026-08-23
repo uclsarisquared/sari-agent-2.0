@@ -4,7 +4,7 @@ import json
 import os
 import time
 
-from sim.env import downscale_for_storage
+from sim.env import downscale_for_storage_jpeg
 
 
 def write_step_output(out_dir, step, response, stamp=""):
@@ -69,10 +69,20 @@ class LegArtifacts:
         """Save a bounded-resolution debug frame; return the written path if enabled."""
         if not self.shots_dir:
             return None
-        path = os.path.join(self.shots_dir, f"step{step:02d}{stamp}.png")
+        path = os.path.join(self.shots_dir, f"step{step:02d}{stamp}.jpg")
         with open(path, "wb") as fh:
-            fh.write(downscale_for_storage(image_bytes))
+            fh.write(downscale_for_storage_jpeg(image_bytes, quality=85))
         return path
+
+    def mark_started(self, started_at):
+        """Persist the leg's absolute clock origin for replay subtitle conversion."""
+        self.started_at = started_at
+        if self.shots_dir:
+            path = os.path.join(self.shots_dir, "leg_start.ts")
+            temp = f"{path}.tmp"
+            with open(temp, "w", encoding="utf-8") as fh:
+                fh.write(f"{started_at:.9f}\n")
+            os.replace(temp, path)
 
     def save_response(self, step, stamp, response):
         write_step_output(self.shots_dir, step, response, stamp=stamp)
