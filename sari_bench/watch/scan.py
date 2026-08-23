@@ -47,7 +47,7 @@ LIVE_GRACE_SECONDS = 120.0
 # Run dirs look like <prompt_id>/try01, plus <prompt_id>/try01.requeue00 for rotated-aside ones.
 _TRY_DIR = re.compile(r"^try\d+(\.requeue\d+)?$")
 _LEG_JSONL = re.compile(r"^leg(\d+)\.jsonl$")
-_STEP_PNG = re.compile(r"^step(\d+)\.png$")
+_STEP_FRAME = re.compile(r"^step(\d+)(?:_[^.]+)?\.(?:png|jpe?g)$", re.IGNORECASE)
 
 
 @dataclass
@@ -402,7 +402,7 @@ def _latest_frame(run_dir: Path) -> Path | None:
         except ValueError:
             continue
         for frame in leg_dir.iterdir():
-            match = _STEP_PNG.match(frame.name)
+            match = _STEP_FRAME.match(frame.name)
             if not match:
                 continue
             rank = (leg_index, int(match.group(1)))

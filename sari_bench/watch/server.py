@@ -117,10 +117,6 @@ class WatchState:
         self.battery: Path | None = None
         self._retry_jobs: dict[str, dict[str, Any]] = {}
         self._runner_retries: dict[tuple[str, str], dict[str, Any]] = {}
-        # Attempts whose replay.mp4 was rendered while they were still running. The clip covers only
-        # the frames that existed when a reviewer asked for it, and `enqueue` treats any existing
-        # replay.mp4 as final - so the finish transition throws these away and renders them again.
-        self._partial_replays: set[str] = set()
 
     def resolve_battery(self) -> Path | None:
         """Auto-discovery with a single-battery override.
@@ -406,7 +402,6 @@ class WatchState:
                     key = str(attempt.get("key") or "")
                     run_dir_value = attempt.get("run_dir")
                     if self.replay is not None and key and run_dir_value:
-                        self._discard_partial_replay(key, Path(str(run_dir_value)))
                         self.replay.enqueue(key, Path(str(run_dir_value)))
                 elif self.discord.enabled and (
                     (attempt.get("health") or {}).get("level") == health.LEVEL_ALERT
@@ -424,22 +419,6 @@ class WatchState:
                 self.discord.battery_finished(view)
         finally:
             self._notify_lock.release()
-
-    def _discard_partial_replay(self, key: str, run_dir: Path) -> None:
-        """Throws away a clip rendered mid-run, exactly once, as the attempt finishes.
-
-        Nothing else deletes it: `enqueue` answers READY for any replay.mp4 on disk, so a partial one
-        would quietly stand in for the whole run for the rest of the battery's life.
-        """
-        with self._lock:
-            if key not in self._partial_replays:
-                return
-            self._partial_replays.discard(key)
-        with contextlib.suppress(OSError):
-            (run_dir / video.REPLAY_NAME).unlink(missing_ok=True)
-        if self.replay is not None:
-            self.replay.invalidate(key)
-        _log(f"re-rendering {key}: its replay was made while the run was still going")
 
     def set_pool(
         self,
@@ -1441,12 +1420,8 @@ class WatchState:
         manifest = scan._read_json(run_dir / scan.ATTEMPT_MANIFEST)
         if manifest.get("end_reason") == ALREADY_SUCCESSFUL:
             return replay_mod.UNAVAILABLE, None
-        # A clip asked for mid-run can only hold the frames written so far. Serving it is the point -
-        # the overlay offers "replay so far" beside the live view - but it must not become the
-        # attempt's replay: note the key so `_notify` re-renders once the run is actually over.
         if manifest.get("state") in {"starting", "running"}:
-            with self._lock:
-                self._partial_replays.add(key)
+            return replay_mod.UNAVAILABLE, None
         status = self.replay.request(key, run_dir)
         clip = run_dir / video.REPLAY_NAME
         return status, (clip if status == replay_mod.READY and clip.is_file() else None)
@@ -1832,6 +1807,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"status": replay_mod.UNAVAILABLE,
                                 "reason": "no frames or ffmpeg is unavailable"},
                                code=409)
+                return
+            if action == "replay.vtt":
+                battery = self.state.battery_for(battery_id)
+                run_dir = _safe_run_dir(battery, key) if battery is not None else None
+                subtitles = run_dir / "replay.vtt" if run_dir is not None else None
+                if subtitles is None or not subtitles.is_file():
+                    self._send(404, b"no subtitles", "text/plain")
+                else:
+                    self._send(200, subtitles.read_bytes(), "text/vtt; charset=utf-8")
                 return
 
         self._send(404, b"not found", "text/plain")

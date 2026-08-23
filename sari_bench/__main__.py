@@ -9,6 +9,8 @@
     watch         live dashboard for a running battery (run it beside the runner)
     report        flatten a battery into attempts.csv / legs.csv
     video         render an attempt's screenshots into a replay video
+    cleanup-captures  safely remove legacy numbered captures after replay validation
+    convert-step-pngs  re-encode legacy per-step PNG debug frames as JPEG
     ocr-server    run the shared runner-local PaddleOCR daemon
 """
 
@@ -186,6 +188,14 @@ def main(argv: list[str] | None = None) -> int:
         from sari_bench.video import main as video_main
 
         return video_main(rest)
+    if command == "cleanup-captures":
+        from sari_bench.cleanup_captures import main as cleanup_main
+
+        return cleanup_main(rest)
+    if command == "convert-step-pngs":
+        from sari_bench.convert_step_pngs import main as convert_main
+
+        return convert_main(rest)
     if command == "ocr-server":
         from agent.vision.ocr_server import main as ocr_server_main
 

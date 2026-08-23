@@ -35,7 +35,7 @@ from typing import Any
 from sari_bench import capture
 from sari_bench.watch import scan
 
-_STEP_PNG = re.compile(r"^step(\d+)\.png$")
+_STEP_FRAME = re.compile(r"^step(\d+)(?:_[^.]+)?\.(?:png|jpe?g)$", re.IGNORECASE)
 
 # Chat-attachment budget. Discord's real webhook cap is 10 MB; 8 leaves room for the embed and for
 # libx264 overshooting its target on the last GOP.
@@ -81,8 +81,9 @@ def _caption(record: dict[str, Any] | None, leg_name: str, step: int) -> str:
         bits.append(f"@{record['near_cp']}")
     if record.get("blocked"):
         bits.append("BLOCKED")
-    if record.get("gripped_name"):
-        bits.append(f"held={record['gripped_name']}")
+    held = record.get("gripped_name") or record.get("gripped_names")
+    if held:
+        bits.append(f"held={held}")
     return "   ".join(bits)
 
 
@@ -121,7 +122,7 @@ def collect_frames(run_dir: Path, *, include_captures: bool = True) -> list[tupl
     for leg_dir in leg_dirs:
         records = _steps_by_index(run_dir / f"{leg_dir.name}.jsonl")
         numbered = sorted(
-            ((int(m.group(1)), p) for p in leg_dir.iterdir() if (m := _STEP_PNG.match(p.name))),
+            ((int(m.group(1)), p) for p in leg_dir.iterdir() if (m := _STEP_FRAME.match(p.name))),
         )
         for step, path in numbered:
             text = _caption(records.get(step), leg_dir.name, step)
@@ -215,6 +216,75 @@ def is_complete_mp4(path: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def ffprobe_duration(path: Path, *, timeout: float = 10.0) -> float | None:
+    """Return a positive media duration, or None for missing/unreadable/empty video."""
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            check=True, capture_output=True, text=True, timeout=timeout,
+        )
+        duration = float(result.stdout.strip())
+        return duration if duration > 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def valid_replay(path: Path) -> bool:
+    """Structural plus duration validation used before archival publication or deletion."""
+    return is_complete_mp4(path) and ffprobe_duration(path) is not None
+
+
+def _vtt_time(seconds: float) -> str:
+    milliseconds = max(0, round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _vtt_escape(text: str) -> str:
+    return text.replace("-->", "→").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def write_replay_vtt(run_dir: Path) -> Path:
+    """Build selectable captions from absolute leg starts and per-event wall offsets."""
+    manifest = scan._read_json(run_dir / scan.ATTEMPT_MANIFEST)
+    attempt_start = float(manifest.get("started_epoch") or 0)
+    cues: list[tuple[float, str]] = []
+    for leg_jsonl in sorted(run_dir.glob("leg[0-9][0-9].jsonl")):
+        leg_name = leg_jsonl.stem
+        start_path = run_dir / leg_name / "leg_start.ts"
+        try:
+            leg_start = float(start_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if not attempt_start:
+            attempt_start = leg_start
+        for record in scan.read_step_records(leg_jsonl):
+            if record.get("event") != "step" or record.get("step") is None:
+                continue
+            try:
+                at = max(0.0, leg_start + float(record.get("wall") or 0) - attempt_start)
+                step = int(record["step"])
+            except (TypeError, ValueError):
+                continue
+            cues.append((at, _caption(record, leg_name, step)))
+    cues.sort(key=lambda cue: cue[0])
+    lines = ["WEBVTT", ""]
+    for index, (start, caption) in enumerate(cues):
+        next_start = cues[index + 1][0] if index + 1 < len(cues) else start + 2.0
+        end = max(start + 0.1, next_start)
+        lines.extend([f"{_vtt_time(start)} --> {_vtt_time(end)}", _vtt_escape(caption), ""])
+    path = run_dir / "replay.vtt"
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+    return path
 
 
 def target_bitrate(frame_count: int, fps: float, budget_bytes: int = DISCORD_BUDGET_BYTES,

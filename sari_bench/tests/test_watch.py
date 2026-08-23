@@ -1090,10 +1090,7 @@ def test_finished_run_queues_dashboard_replay_without_discord() -> None:
 
 
 def test_a_clip_asked_for_mid_run_does_not_become_the_replay() -> None:
-    """The detail overlay offers `▶ replay so far` on a running attempt, which renders whatever
-    frames exist at that moment. `enqueue` answers READY for any replay.mp4 on disk, so without the
-    invalidation below that partial would silently stand in for the finished run's replay forever.
-    """
+    """Running attempts expose only their live image; replay work starts after finalization."""
     with tempfile.TemporaryDirectory() as temp:
         battery = Path(temp) / "b"
         run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(3), state="running",
@@ -1124,24 +1121,23 @@ def test_a_clip_asked_for_mid_run_does_not_become_the_replay() -> None:
                            replay=RecordingReplay(), min_interval=0.0)  # type: ignore[arg-type]
         state.snapshot(force=True)
 
-        # A reviewer watching the live run asks for the clip so far.
-        state.replay_status("p/try01")
+        status, ready = state.replay_status("p/try01")
         clip = run_dir / video.REPLAY_NAME
-        assert clip.read_bytes() == b"clip 1", "the mid-run request rendered nothing"
-        assert queued == ["p/try01"], queued
+        assert status == "unavailable" and ready is None
+        assert not clip.exists() and queued == []
 
         _stamp(run_dir, {"state": "finished", "outcome": "completed", "success": True,
                          "end_reason": "halt_granted"})
         state.snapshot(force=True)
 
-        assert invalidated == ["p/try01"], "the finish did not discard the mid-run clip"
-        assert clip.read_bytes() == b"clip 2", "the partial clip was served as the replay"
+        assert invalidated == []
+        assert clip.read_bytes() == b"clip 1"
 
         # And exactly once. Deleting a finished attempt's clip on every poll would re-encode the
         # whole battery for as long as the watcher is up.
         state.snapshot(force=True)
-        assert invalidated == ["p/try01"], invalidated
-    print("ok  a replay rendered mid-run is thrown away and rendered again when the run ends")
+        assert invalidated == []
+    print("ok  running attempts stay live-only and render once after finishing")
 
 
 def test_every_finished_attempt_is_reviewable() -> None:
@@ -1664,6 +1660,7 @@ def test_verdict_and_replay_over_http() -> None:
                                outcome="completed", success=True, end_reason="halt_granted")
         clip_bytes = _complete_mp4(bytes(range(256)) * 8)
         (run_dir / video.REPLAY_NAME).write_bytes(clip_bytes)
+        (run_dir / "replay.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
         make_attempt(battery, "bare", 1, steps=healthy_steps(3), state="finished",
                      outcome="completed", success=True, end_reason="halt_granted", frames=False)
 
@@ -1687,6 +1684,9 @@ def test_verdict_and_replay_over_http() -> None:
             assert headers["Content-Type"] == "video/mp4"
             assert headers["Accept-Ranges"] == "bytes", "the clip advertises as unseekable"
             assert body == clip_bytes
+            code, subtitles, headers = request("/api/attempt/p/try01/replay.vtt")
+            assert code == 200 and subtitles == b"WEBVTT\n\n"
+            assert headers["Content-Type"].startswith("text/vtt")
             total = len(clip_bytes)
 
             # Seekable, or the reviewer can only watch the clip straight through.

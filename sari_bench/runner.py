@@ -1672,12 +1672,8 @@ class BenchmarkRunner:
             sandbox_fault_task = asyncio.create_task(
                 self._wait_for_path_or_exit(process, sandbox_fault_signal)
             )
-            capture_task = (
-                asyncio.create_task(
-                    self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
-                )
-                if self.capture_interval > 0
-                else None
+            capture_task = asyncio.create_task(
+                self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
             )
 
             try:
@@ -2046,27 +2042,43 @@ class BenchmarkRunner:
         commands_uri: str,
         manifest_path: Path,
     ) -> None:
-        """Own the recorder for exactly the lifetime of its agent process."""
+        """Own recording and subtitles for exactly the lifetime of the agent process."""
         stats = capture.CaptureStats()
-        recorder = asyncio.create_task(
-            capture.record_previews(
-                run_dir,
-                commands_uri,
-                self.capture_interval,
-                stats=stats,
-                log=_log,
+        recorder = None
+        if self.capture_interval > 0:
+            recorder = asyncio.create_task(
+                capture.record_previews(
+                    run_dir,
+                    commands_uri,
+                    self.capture_interval,
+                    stats=stats,
+                    log=_log,
+                    run_id=str(_manifest_field(manifest_path, "run_id") or ""),
+                )
             )
-        )
         try:
             await process.wait()
         finally:
-            recorder.cancel()
-            await asyncio.gather(recorder, return_exceptions=True)
+            if recorder is not None:
+                recorder.cancel()
+                await asyncio.gather(recorder, return_exceptions=True)
+            from sari_bench import video
+            try:
+                await asyncio.to_thread(video.write_replay_vtt, run_dir)
+            except Exception as error:  # subtitles must never alter attempt outcome
+                _log(f"replay subtitles failed for {run_dir}: {error!r}")
             _patch_json(
                 manifest_path,
                 {
                     "capture_frames": stats.frames,
                     "capture_failures": stats.failures,
+                    "capture_acquired": stats.acquired,
+                    "capture_encoded": stats.encoded,
+                    "capture_repeated": stats.repeated,
+                    "capture_dropped": stats.dropped,
+                    "capture_acquisition_failures": stats.acquisition_failures,
+                    "capture_encoder_failures": stats.encoder_failures,
+                    "capture_replay_ready": (run_dir / video.REPLAY_NAME).is_file(),
                 },
             )
 
@@ -2523,8 +2535,13 @@ async def async_main(argv: list[str] | None = None) -> int:
         not math.isfinite(args.sandbox_command_timeout) or args.sandbox_command_timeout <= 0
     ):
         parser.error("--sandbox-command-timeout must be a positive finite number")
-    if args.capture_interval < 0:
-        parser.error("--capture-interval cannot be negative")
+    if not math.isfinite(args.capture_interval) or args.capture_interval < 0:
+        parser.error("--capture-interval must be a finite non-negative number")
+    if 0 < args.capture_interval < 0.1:
+        print(
+            "warning: --capture-interval below 0.1s may overload screenshot acquisition or encoding",
+            file=sys.stderr,
+        )
     if args.api_max_attempts < 1:
         parser.error("--api-max-attempts must be at least 1")
     if args.max_api_requeues < 0:

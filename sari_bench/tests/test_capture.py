@@ -36,6 +36,30 @@ def test_default_capture_rate_is_four_frames_per_second() -> None:
     print("ok  capture and full replay default to four frames per second")
 
 
+def test_continuous_encoder_contract() -> None:
+    command = capture.archive_command(Path("/tmp/replay.part.mp4"), 7.5)
+    assert command[command.index("-framerate") + 1] == "7.5"
+    assert command[command.index("-video_size") + 1] == "1280x720"
+    assert command[command.index("-crf") + 1] == "19"
+    assert command[command.index("-preset") + 1] == "veryfast"
+    assert command[command.index("-threads") + 1] == "1"
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
+    assert "frag_keyframe" in command[command.index("-movflags") + 1]
+    print("ok  continuous ffmpeg contract fixes quality, dimensions and one encoder thread")
+
+
+def test_timestamped_png_and_jpeg_steps_are_discovered() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        run_dir = Path(temp)
+        leg = run_dir / "leg00"
+        leg.mkdir()
+        names = ["step01.png", "step02_123.png", "step03_retry.jpg", "step04.jpeg"]
+        for name in names:
+            (leg / name).write_bytes(_png(16, 9))
+        assert {p.name for p in capture.observation_frames(run_dir)} == set(names)
+    print("ok  exact and timestamped PNG/JPEG step frames remain discoverable")
+
+
 def _png(width: int = 1600, height: int = 900, color: tuple[int, int, int] = (40, 80, 120)) -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (width, height), color).save(output, format="PNG")
@@ -69,7 +93,8 @@ async def test_recorder_fills_gaps_and_publishes_small_jpegs() -> None:
             await asyncio.gather(task, return_exceptions=True)
 
         frames = sorted((run_dir / capture.CAPTURE_DIR).glob("*.jpg"))
-        assert len(frames) == stats.frames
+        assert [path.name for path in frames] == [capture.LATEST_CAPTURE]
+        assert stats.frames >= 2
         assert calls in {stats.frames, stats.frames + 1}
         with Image.open(frames[-1]) as image:
             assert image.size == (960, 540), image.size
@@ -295,6 +320,8 @@ def test_failed_render_preserves_existing_output_and_removes_partial() -> None:
 
 async def main() -> int:
     test_default_capture_rate_is_four_frames_per_second()
+    test_continuous_encoder_contract()
+    test_timestamped_png_and_jpeg_steps_are_discovered()
     original_to_thread = asyncio.to_thread
     asyncio.to_thread = _inline_to_thread  # type: ignore[assignment]
     try:

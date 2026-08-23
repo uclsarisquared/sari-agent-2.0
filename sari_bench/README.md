@@ -54,7 +54,9 @@ Runs are written to `bench_runs/<timestamp>[_<name>]/`. The main files are:
 
 - `summary.json` — battery and per-prompt results
 - `attempts.jsonl` — one row per attempt
-- `<prompt_id>/try<NN>/` — logs, screenshots, tokens, response, and attempt details
+- `<prompt_id>/try<NN>/` — logs, JPEG step evidence, tokens, response, and attempt details
+- `<prompt_id>/try<NN>/capture/latest.jpg` — atomically refreshed live preview
+- `<prompt_id>/try<NN>/replay.mp4` and `replay.vtt` — continuous replay and selectable captions
 
 Useful follow-up commands:
 
@@ -62,6 +64,8 @@ Useful follow-up commands:
 python -m sari_bench report                       # export CSV summaries
 python -m sari_bench video --battery <run-dir>    # render attempt replays
 python -m sari_bench watch --run-dir <run-dir>    # inspect a specific run
+python -m sari_bench cleanup-captures --bench-root bench_runs  # dry-run legacy cleanup
+# Add --apply only after reviewing the per-attempt deletion summary.
 ```
 
 To continue an interrupted battery, keep the same prompt and attempt settings, set its existing
