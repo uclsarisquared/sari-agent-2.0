@@ -13,11 +13,7 @@ mkdir -p "$log_dir"
 # prompt battery, so overriding it with the comprehensive battery would duplicate baseline.
 policies=(baseline a1 a2c a3 a4 a5 a6-2 a6-4 a7-no-stop-guard)
 
-# baseline died overnight to a Windows update reboot; resume its existing battery directory
-# instead of starting a fresh one.
-declare -A resume_dirs=(
-    [baseline]="$repo_root/bench_runs/20260818_231043_context-ablation-baseline-comprehensive"
-)
+declare -A resume_dirs=()
 prompt_files=(
     "$repo_root/sari_bench/prompts/easy_prompts.json"
     "$repo_root/sari_bench/prompts/medium_prompts.json"
@@ -73,7 +69,7 @@ for policy in "${policies[@]}"; do
     config="$script_dir/$policy.toml"
     log="$log_dir/$policy.log"
     status_file="$log_dir/$policy.status"
-    name="context-ablation-$policy-comprehensive"
+    name="gem-context-ablation-$policy-comprehensive"
     resume_dir="${resume_dirs[$policy]:-}"
     if [[ -n "$resume_dir" ]]; then
         printf 'Resuming %-17s -> %s\n' "$policy" "$log"
