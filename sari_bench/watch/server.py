@@ -50,6 +50,10 @@ LOG_BOOTSTRAP_BYTES = 16_384
 ALREADY_SUCCESSFUL = scan.ALREADY_SUCCESSFUL
 # How long the watcher waits for a runner to close an attempt out before deciding nobody will.
 FINALIZE_GRACE_SECONDS = 3.0
+# The manifest records the agent subprocess, which exits before its runner has drained and
+# finalized the continuous encoder. Do not let a replay request race that bounded cleanup. The
+# extra margin also covers the manifest write which follows it.
+REPLAY_FINALIZE_GRACE_SECONDS = capture.ENCODER_GRACE_SECONDS + 5.0
 # The end_reason written for an attempt nobody recorded: not something the agent decided, and
 # deliberately not blank, so a row that exists only because the watcher adopted it says so.
 RUNNER_GONE = "runner_gone"
@@ -1439,7 +1443,17 @@ class WatchState:
         if manifest.get("end_reason") == ALREADY_SUCCESSFUL:
             return replay_mod.UNAVAILABLE, None
         if manifest.get("state") in {"starting", "running"}:
-            return replay_mod.UNAVAILABLE, None
+            # `pid` is the agent subprocess, not the runner. A missing pid is the normal startup
+            # window, and a dead one begins the runner's normal replay-finalization window. Only a
+            # quiescent manifest is evidence that the runner itself is gone and fallback rendering
+            # can no longer race it.
+            if scan.agent_is_alive(manifest, manifest.get("pid")):
+                return replay_mod.UNAVAILABLE, None
+            quiet_for = time.time() - _last_sign_of_life(run_dir)
+            if quiet_for < REPLAY_FINALIZE_GRACE_SECONDS:
+                # Keep an orphaned overlay polling while the runner gets first chance to publish
+                # its clip. Returning UNAVAILABLE would strand that already-open overlay on a 409.
+                return replay_mod.RENDERING, None
         status = self.replay.request(key, run_dir)
         clip = run_dir / video.REPLAY_NAME
         return status, (clip if status == replay_mod.READY and clip.is_file() else None)

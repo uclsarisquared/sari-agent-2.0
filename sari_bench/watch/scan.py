@@ -392,8 +392,7 @@ def _latest_frame(run_dir: Path) -> Path | None:
     Agent frames retain their leg/step ordering for compatibility with coarse filesystems. A
     supplementary capture wins only when its embedded capture timestamp is newer.
     """
-    best: tuple[int, int] | None = None
-    best_path: Path | None = None
+    candidates: list[tuple[tuple[int, int], Path]] = []
     if not run_dir.is_dir():
         return None
     for leg_dir in sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name.startswith("leg")):
@@ -406,8 +405,12 @@ def _latest_frame(run_dir: Path) -> Path | None:
             if not match:
                 continue
             rank = (leg_index, int(match.group(1)))
-            if best is None or rank > best:
-                best, best_path = rank, frame
+            candidates.append((rank, frame))
+    best_path = next(
+        (path for _, path in sorted(candidates, reverse=True)
+         if capture.is_valid_frame(path)),
+        None,
+    )
     capture_dir = run_dir / capture.CAPTURE_DIR
     newest_capture = capture.latest_capture(run_dir) if capture_dir.is_dir() else None
 

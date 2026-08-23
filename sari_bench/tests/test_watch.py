@@ -1140,6 +1140,47 @@ def test_a_clip_asked_for_mid_run_does_not_become_the_replay() -> None:
     print("ok  running attempts stay live-only and render once after finishing")
 
 
+def test_replay_waits_for_startup_and_runner_finalization() -> None:
+    """A dead or absent agent pid is not by itself proof that the runner is gone."""
+    from sari_bench.watch import server as server_mod
+
+    class RecordingReplay:
+        def __init__(self) -> None:
+            self.queued: list[str] = []
+
+        def seed(self, _attempts: list[dict[str, Any]]) -> None:
+            pass
+
+        def request(self, key: str, _path: Path) -> str:
+            self.queued.append(key)
+            return "rendering"
+
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        starting = make_attempt(battery, "starting", 1, steps=[], state="starting", pid=None)
+        finalizing = make_attempt(
+            battery, "finalizing", 1, steps=healthy_steps(2), pid=999_999_998
+        )
+        orphan = make_attempt(battery, "orphan", 1, steps=healthy_steps(2), pid=999_999_997)
+        old = time.time() - server_mod.REPLAY_FINALIZE_GRACE_SECONDS - 5.0
+        for path in [orphan, *orphan.rglob("*")]:
+            os.utime(path, (old, old))
+
+        replay = RecordingReplay()
+        state = WatchState(
+            bench_root=Path(temp), fixed_battery=battery, discord=Discord(enabled=False),
+            replay=replay, min_interval=0.0,  # type: ignore[arg-type]
+        )
+
+        assert state.replay_status("starting/try01") == ("rendering", None)
+        assert state.replay_status("finalizing/try01") == ("rendering", None)
+        assert replay.queued == []
+        assert state.replay_status("orphan/try01") == ("rendering", None)
+        assert replay.queued == ["orphan/try01"]
+        assert starting.is_dir() and finalizing.is_dir()
+    print("ok  replay requests wait out startup/finalization but admit stale orphans")
+
+
 def test_every_finished_attempt_is_reviewable() -> None:
     """The gate on the verdict buttons.
 
@@ -2061,6 +2102,7 @@ def main() -> int:
     test_full_replay_queue_falls_back_to_text_notification()
     test_finished_run_queues_dashboard_replay_without_discord()
     test_a_clip_asked_for_mid_run_does_not_become_the_replay()
+    test_replay_waits_for_startup_and_runner_finalization()
     test_every_finished_attempt_is_reviewable()
     test_verdict_round_trip_and_refusals()
     test_invalid_verdict_is_excluded_rather_than_failed()

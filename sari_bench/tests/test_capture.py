@@ -60,6 +60,38 @@ def test_timestamped_png_and_jpeg_steps_are_discovered() -> None:
     print("ok  exact and timestamped PNG/JPEG step frames remain discoverable")
 
 
+def test_corrupt_legacy_pointer_stops_at_newest_valid_capture() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        run_dir = Path(temp) / "attempt"
+        capture_dir = run_dir / capture.CAPTURE_DIR
+        capture_dir.mkdir(parents=True)
+        older = capture_dir / "frame000001-100.jpg"
+        newest_valid = capture_dir / "frame000002-200.jpg"
+        corrupt = capture_dir / "frame000003-300.jpg"
+        Image.new("RGB", (16, 9), (10, 20, 30)).save(older, format="JPEG")
+        Image.new("RGB", (16, 9), (30, 20, 10)).save(newest_valid, format="JPEG")
+        corrupt.write_bytes(b"")
+        (capture_dir / capture.LEGACY_LATEST_CAPTURE).write_text(
+            json.dumps({"file": corrupt.name}), encoding="utf-8"
+        )
+
+        checked: list[str] = []
+        original = capture.is_valid_frame
+
+        def recording_check(path: Path) -> bool:
+            checked.append(path.name)
+            return original(path)
+
+        capture.is_valid_frame = recording_check
+        try:
+            assert capture.latest_capture(run_dir) == newest_valid
+        finally:
+            capture.is_valid_frame = original
+
+        assert checked == [corrupt.name, newest_valid.name], checked
+    print("ok  corrupt legacy pointers fall back without opening the whole capture archive")
+
+
 def _png(width: int = 1600, height: int = 900, color: tuple[int, int, int] = (40, 80, 120)) -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (width, height), color).save(output, format="PNG")
@@ -322,6 +354,7 @@ async def main() -> int:
     test_default_capture_rate_is_four_frames_per_second()
     test_continuous_encoder_contract()
     test_timestamped_png_and_jpeg_steps_are_discovered()
+    test_corrupt_legacy_pointer_stops_at_newest_valid_capture()
     original_to_thread = asyncio.to_thread
     asyncio.to_thread = _inline_to_thread  # type: ignore[assignment]
     try:

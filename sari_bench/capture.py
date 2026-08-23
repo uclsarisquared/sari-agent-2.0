@@ -54,6 +54,35 @@ def is_step_frame(path: Path) -> bool:
     return bool(_STEP_FRAME.match(path.name))
 
 
+_JPEG_SOI = b"\xff\xd8"
+_JPEG_EOI = b"\xff\xd9"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_IEND = b"IEND"
+
+
+def is_valid_frame(path: Path) -> bool:
+    """Whether a frame's bytes look like a complete image rather than a crash artifact.
+
+    An interrupted or incompletely persisted publication can leave an empty, zero-filled, or
+    truncated file at the final path. Checking the format's header and trailer is far cheaper than
+    decoding every candidate and rejects those known crash artifacts.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(8)
+            if not head:
+                return False
+            handle.seek(-8, os.SEEK_END)
+            tail = handle.read(8)
+    except OSError:
+        return False
+    if head[:2] == _JPEG_SOI:
+        return tail[-2:] == _JPEG_EOI
+    if head == _PNG_SIGNATURE:
+        return _PNG_IEND in tail
+    return False
+
+
 def frame_timestamp_ns(path: Path) -> int:
     match = _CAPTURE_FRAME.match(path.name) if path.parent.name == CAPTURE_DIR else None
     if match:
@@ -87,30 +116,42 @@ def latest_step_frame(run_dir: Path) -> Path | None:
     frames: list[Path] = []
     for leg_dir in run_dir.iterdir():
         if leg_dir.is_dir() and leg_dir.name.startswith("leg"):
-            frames.extend(path for path in leg_dir.iterdir() if path.is_file() and is_step_frame(path))
-    return max(frames, key=frame_timestamp_ns) if frames else None
+            frames.extend(
+                path for path in leg_dir.iterdir()
+                if path.is_file() and is_step_frame(path)
+            )
+    return next(
+        (path for path in sorted(frames, key=frame_timestamp_ns, reverse=True)
+         if is_valid_frame(path)),
+        None,
+    )
 
 
 def latest_capture(run_dir: Path) -> Path | None:
     """The fixed live image, falling back to old pointer/numbered archives."""
     capture_dir = run_dir / CAPTURE_DIR
     fixed = capture_dir / LATEST_CAPTURE
-    if fixed.is_file():
+    if fixed.is_file() and is_valid_frame(fixed):
         return fixed
     pointer = capture_dir / LEGACY_LATEST_CAPTURE
+    rejected: Path | None = None
     try:
         payload = json.loads(pointer.read_text(encoding="utf-8"))
         name = payload.get("file") if isinstance(payload, dict) else None
         if isinstance(name, str) and _CAPTURE_FRAME.match(name):
             path = capture_dir / name
-            if path.is_file():
+            if path.is_file() and is_valid_frame(path):
                 return path
+            rejected = path
     except (OSError, ValueError):
         pass
     if not capture_dir.is_dir():
         return None
-    frames = [p for p in capture_dir.iterdir() if p.is_file() and _CAPTURE_FRAME.match(p.name)]
-    return max(frames, key=frame_timestamp_ns) if frames else None
+    frames = sorted((
+        p for p in capture_dir.iterdir()
+        if p.is_file() and _CAPTURE_FRAME.match(p.name) and p != rejected
+    ), key=frame_timestamp_ns, reverse=True)
+    return next((path for path in frames if is_valid_frame(path)), None)
 
 
 def latest_observation(run_dir: Path) -> Path | None:
@@ -167,6 +208,8 @@ def _publish_latest(run_dir: Path, jpeg: bytes) -> Path:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(jpeg)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp_name, final)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
