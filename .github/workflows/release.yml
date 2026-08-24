@@ -23,28 +23,7 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
-      - name: Bump version and tag
-        id: release
+      - name: Bump version and create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          semantic-release version
-          # A ci:/docs: (no-bump) push does not create a new tag; skip release creation then.
-          AFTER="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          if [ -z "${AFTER}" ] || [ "${AFTER}" = "${PREV}" ]; then
-            echo "No new release (${AFTER:-none} == ${PREV:-none}); skipping release creation"
-            echo "new_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "new_release=true" >> "$GITHUB_OUTPUT"
-            echo "tag=${AFTER}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create GitHub release with auto-generated notes
-        if: steps.release.outputs.new_release == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # GitHub-native auto-generated notes: the body is left empty so GitHub
-          # builds it from the commits since the previous tag.
-          gh release create "${{ steps.release.outputs.tag }}" --generate-notes --repo "${GITHUB_REPOSITORY}"
+        run: semantic-release version
