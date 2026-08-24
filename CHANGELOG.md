@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-08-24)
+
+### Features
+
+- **vision**: Treat plain-language target absence as a valid negative detection
+  ([`1f81c52`](https://github.com/uclsarisquared/sari-agent-2.0/commit/1f81c52f7bd6bc7307ad2a2cb73cf74ae6379c88))
+
+
 ## v1.2.0 (2026-08-24)
 
 ### Features
