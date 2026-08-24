@@ -74,7 +74,7 @@ def test_comprehensive_context_ablation_runner_covers_every_distinct_arm() -> No
     assert match is not None
     assert match.group(1).split() == [
         "baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4",
-        "a7-no-stop-guard",
+        "a7-no-stop-guard", "replan-test",
     ]
     for battery in ("easy_prompts.json", "medium_prompts.json", "hard_prompts.json"):
         assert battery in text

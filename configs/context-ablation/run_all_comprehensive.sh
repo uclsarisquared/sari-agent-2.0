@@ -11,7 +11,7 @@ mkdir -p "$log_dir"
 
 # hard-baseline is intentionally omitted: it differs from baseline only by using the hard-only
 # prompt battery, so overriding it with the comprehensive battery would duplicate baseline.
-policies=(baseline a1 a2c a3 a4 a5 a6-2 a6-4 a7-no-stop-guard)
+policies=(baseline a1 a2c a3 a4 a5 a6-2 a6-4 a7-no-stop-guard replan-test)
 
 declare -A resume_dirs=()
 prompt_files=(
