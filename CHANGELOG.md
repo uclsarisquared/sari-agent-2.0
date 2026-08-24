@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.3 (2026-08-24)
+
+### Bug Fixes
+
+- **agent**: Drop wrong coordinate-order claim from detect prompts
+  ([`c8e9848`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c8e984831f823117bb29daae8f4aa98c1dc22e92))
+
+
 ## v1.0.2 (2026-08-24)
 
 ### Bug Fixes
