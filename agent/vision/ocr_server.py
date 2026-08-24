@@ -6,6 +6,7 @@ import argparse
 import gc
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -27,6 +28,23 @@ OCR_BACKEND_ENV = "SARI_OCR_BACKEND"
 OCR_BACKENDS = ("auto", "paddle", "onnx-cpu", "directml")
 DEFAULT_OCR_BACKEND = "auto"
 DEFAULT_DIRECTML_DEVICE_ID = 0
+
+
+class OcrHttpServer(ThreadingHTTPServer):
+    """HTTP server whose listening port has exactly one owner.
+
+    ``TCPServer`` normally enables ``SO_REUSEADDR``.  On Windows that option
+    permits multiple live processes to bind the same address, unlike its Unix
+    meaning.  OCR is a singleton service, so use Windows' exclusive-address
+    option there while retaining quick restarts on Unix.
+    """
+
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def resolve_ocr_backend(requested: str) -> str:
@@ -295,7 +313,14 @@ def make_handler(application: OcrApplication) -> type[BaseHTTPRequestHandler]:
                 application.release()
 
         def log_message(self, fmt: str, *args: Any) -> None:
-            print(f"[ocr-server] {self.address_string()} {fmt % args}", flush=True)
+            # A Windows process can outlive the PowerShell/WSL terminal that
+            # launched it.  Its inherited stdout is then invalid; request
+            # logging must not turn an otherwise valid response into a dropped
+            # connection.
+            try:
+                print(f"[ocr-server] {self.address_string()} {fmt % args}", flush=True)
+            except (OSError, ValueError):
+                pass
 
     return OcrHandler
 
@@ -310,7 +335,7 @@ def create_server(
     execution_provider: str | None = None,
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
-) -> ThreadingHTTPServer:
+) -> OcrHttpServer:
     application = OcrApplication(
         engine_factory,
         model=model,
@@ -319,7 +344,7 @@ def create_server(
         max_in_flight=max_in_flight,
         max_request_bytes=max_request_bytes,
     )
-    server = ThreadingHTTPServer((host, port), make_handler(application))
+    server = OcrHttpServer((host, port), make_handler(application))
     server.daemon_threads = True
     return server
 

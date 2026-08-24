@@ -18,8 +18,10 @@ if _ROOT not in sys.path:
 from agent.vision import ocr_server
 from agent.vision.ocr_server import (
     OcrApplication,
+    OcrHttpServer,
     build_paddle_engine,
     create_server,
+    make_handler,
     parse_paddle_lines,
     resolve_ocr_backend,
 )
@@ -103,6 +105,36 @@ def test_health_reports_accelerator_identity_when_configured():
         "backend": "directml",
         "execution_provider": "DmlExecutionProvider",
     }
+
+
+def test_windows_server_uses_exclusive_address_ownership(monkeypatch):
+    monkeypatch.setattr(ocr_server.sys, "platform", "win32")
+    monkeypatch.setattr(ocr_server.socket, "SO_EXCLUSIVEADDRUSE", 12345, raising=False)
+    calls = []
+
+    class FakeSocket:
+        def setsockopt(self, *args):
+            calls.append(args)
+
+    server = object.__new__(OcrHttpServer)
+    server.socket = FakeSocket()
+    monkeypatch.setattr(ocr_server.ThreadingHTTPServer, "server_bind", lambda _self: None)
+
+    server.server_bind()
+
+    assert calls == [(ocr_server.socket.SOL_SOCKET, 12345, 1)]
+
+
+def test_closed_log_stream_does_not_abort_request(monkeypatch):
+    app = OcrApplication(lambda: object())
+    handler = object.__new__(make_handler(app))
+    monkeypatch.setattr(handler, "address_string", lambda: "127.0.0.1")
+
+    def closed_stream(*_args, **_kwargs):
+        raise OSError("invalid inherited stdout")
+
+    monkeypatch.setattr("builtins.print", closed_stream)
+    handler.log_message('%s "%s"', "GET", "/health")
 
 
 def test_slow_engine_is_constructed_once_and_inference_is_serialized():
