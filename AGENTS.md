@@ -36,6 +36,12 @@ chore(release): 1.0.1 [skip ci]
 Do NOT create a new tag or bump the version yourself — the workflow does that automatically.
 Just write conventional commits.
 
+## Deprecated: moondream pointing path
+
+The moondream-based pointing path (`agent/vision/md_tools.py`, cloud API, `$MDREAM_API_KEY`) is
+**deprecated** in favor of the VL model on the configured OpenAI-compatible endpoint
+(bbox → center). Do not extend or re-promote it.
+
 ## VLM bounding-box support (read before switching the agent's model)
 
 The agent's per-step VLM emits bounding boxes whose **coordinate order is per-model**, and the

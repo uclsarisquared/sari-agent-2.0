@@ -92,6 +92,9 @@ CWD-relative by `agent_core.agent`; run everything from `agent/`).
   the `BBOX_YMIN_FIRST` branch. Verify on an elongated/off-centre box, not a near-centred one (see
   the measured history in `perception.py`). See root `AGENTS.md` for the full note.
 - **Map quality bar:** a good `grid_final.png` has **no grey holes** in the store interior.
+- **The moondream pointing path is deprecated.** `agent/vision/md_tools.py` (cloud API,
+  `$MDREAM_API_KEY`) is superseded by the VL model on the configured OpenAI-compatible endpoint
+  (bbox → center). Do not extend or re-promote it.
 
 ## How to work here — this matters more than it sounds
 
