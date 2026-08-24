@@ -71,6 +71,12 @@ version_toml = ["pyproject.toml:project.version"]
 [tool.semantic_release.branches.main]
 match = "main"
 
+[tool.semantic_release.publish]
+# PSR must NOT create the GitHub release: its own body would prevent GitHub's
+# native auto-generated notes (which only fire on an empty body). The release is
+# created by the workflow with `gh release create --generate-notes` instead.
+upload_to_vcs_release = false
+
 [tool.pytest.ini_options]
 testpaths = ["validation/tests"]
 pythonpath = [".", "agent", "agent/mapping"]

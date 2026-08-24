@@ -23,7 +23,16 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
-      - name: Bump version and create release
+      - name: Bump version and tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: semantic-release version
+
+      - name: Create GitHub release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$(git describe --tags --abbrev=0)"
+          # GitHub-native auto-generated notes: the body is left empty so GitHub
+          # builds it from the commits since the previous tag.
+          gh release create "$TAG" --generate-notes --repo "${GITHUB_REPOSITORY}"
