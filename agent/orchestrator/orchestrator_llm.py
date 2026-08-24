@@ -7,7 +7,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from agent_core import token_meter
-from agent_core.llm import EndpointProfile, MalformedContentError, call_with_api_retries, agent_vlm_config
+from agent_core.llm import (
+    EndpointProfile, MalformedContentError, agent_vlm_config, call_with_api_retries,
+    effective_max_tokens,
+)
 from agent_core.context_policy import ContextPolicy
 from agent_core.prompt_loader import load_prompt
 from orchestrator.subtask_completion import TYPED_DECOMPOSER_SYSTEM, parse_decomposition
@@ -42,7 +45,7 @@ def _llm_call(client: OpenAI, system: str, user: str, role: str, validator=None)
     caller must say which one it is rather than letting them pool into one unreadable number."""
     with token_meter.role(role):
         def request():
-            response = client.chat.completions.create(
+            kwargs = dict(
                 model=ORCHESTRATOR_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -52,6 +55,13 @@ def _llm_call(client: OpenAI, system: str, user: str, role: str, validator=None)
                 timeout=120,
                 extra_body=_ENDPOINT_PROFILE.extra_body,
             )
+            budget = effective_max_tokens(
+                _ENDPOINT_PROFILE.provider, None, "reasoning",
+                _ENDPOINT_PROFILE.thinking_level,
+            )
+            if budget is not None:
+                kwargs["max_tokens"] = budget
+            response = client.chat.completions.create(**kwargs)
             return response.choices[0].message.content
 
         def validate(content):

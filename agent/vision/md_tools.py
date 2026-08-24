@@ -30,9 +30,11 @@ _URI = "ws://localhost:8080/commands"
 
 def _point_via_qwen(image: Image.Image, name: str):
     """Fallback pointer: qwen bbox -> center, normalized 0-1 like moondream's points."""
-    from agent_core.llm import MalformedContentError, call_with_api_retries
+    from agent_core.llm import (
+        MalformedContentError, call_with_api_retries, effective_max_tokens,
+    )
     from agent_core import token_meter
-    from vision.perception import CLIENT, MODEL_NAME, _encode_image
+    from vision.perception import CLIENT, MODEL_NAME, _ENDPOINT_PROFILE, _encode_image
     prompt = render_prompt("vision/qwen_point", TARGET_NAME=name)
     # Billed to perception, not to a role of its own: this is the same pointing job moondream was
     # doing, just on the fallback path, and an ablation of pointing wants both halves in one number.
@@ -41,8 +43,12 @@ def _point_via_qwen(image: Image.Image, name: str):
                 model=MODEL_NAME,
                 messages=[{"role": "user", "content": [_encode_image(image),
                                                        {"type": "text", "text": prompt}]}],
-                temperature=0.0, max_tokens=200,
-                extra_body={'chat_template_kwargs': {'enable_thinking': False}}
+                temperature=0.0,
+                max_tokens=effective_max_tokens(
+                    _ENDPOINT_PROFILE.provider, 200, "localization",
+                    _ENDPOINT_PROFILE.thinking_level,
+                ),
+                extra_body=_ENDPOINT_PROFILE.extra_body,
             ).choices[0].message.content
 
     def validate(text):

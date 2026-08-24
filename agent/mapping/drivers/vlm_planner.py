@@ -101,10 +101,9 @@ from frontier_planner import (  # noqa: E402
 )
 from mapping import normalize_deg  # noqa: E402
 
-# Endpoint configuration and image encoding come from agent_core.llm. The planner keeps its own
-# graceful retry outcome because one transient failure must not discard a 300-step live map.
+# Endpoint configuration, structured retries, and image encoding come from agent_core.llm.
 from agent_core.llm import (  # noqa: E402
-    ChatEndpoint, EndpointProfile, image_url_part, is_transient_api_error,
+    ChatEndpoint, EndpointProfile, image_url_part,
 )
 from agent_core.models import agent_model  # noqa: E402
 from agent_core.prompt_loader import load_prompt  # noqa: E402
@@ -156,25 +155,6 @@ CLUSTER_CHOICE_SCHEMA = {
 _SYS_FULL = load_prompt("mapping/planner_full")
 
 _SYS_GOAL = load_prompt("mapping/planner_goal")
-
-
-def _post_chat(request, retries, backoff=2.0):
-    """Run one SDK completion with graceful planner fallback after transient retries."""
-    last = None
-    for attempt in range(retries + 1):
-        try:
-            return request()
-        except Exception as error:
-            last = f"{type(error).__name__}: {error}"
-            if not is_transient_api_error(error):
-                print(f"[vlm] {last} (non-transient - not retrying)", flush=True)
-                return None
-        if attempt < retries:
-            wait = backoff * (2 ** attempt)
-            print(f"[vlm] {last} - retry {attempt + 1}/{retries} in {wait:.0f}s", flush=True)
-            time.sleep(wait)
-    print(f"[vlm] giving up after {retries} retries: {last}", flush=True)
-    return None
 
 
 def render_map_png(grid, cur_world_xz, yaw_deg, clusters, dpi=110, figsize=8.0,
@@ -404,33 +384,28 @@ class _VLMClientMixin:
         extra = ({"chat_template_kwargs": {"enable_thinking": self.think}}
                  if self.profile.provider == "vllm" else None)
         t0 = time.time()
-        response = _post_chat(lambda: self.endpoint.create(
-            messages=messages, schema=schema, schema_name=label, model=self.model,
-            max_tokens=self.max_tokens, temperature=self.temperature, extra_body=extra,
-        ), self.retries)
+        try:
+            structured = self.endpoint.create_structured(
+                messages=messages, schema=schema, schema_name=label, model=self.model,
+                max_tokens=self.max_tokens, temperature=self.temperature, extra_body=extra,
+                workload="reasoning", call_name=f"vlm_planner.{label}",
+            )
+        except Exception as error:
+            if self.vlm_debug:
+                print(f"[vlm] request failed: {error}", flush=True)
+            structured = None
         dt = time.time() - t0
         self.stats["vlm_calls"] += 1
         self.stats["vlm_latency_s_total"] += dt
-        if response is None:
+        if structured is None:
             self.stats["vlm_http_failures"] += 1
             return None, dt
+        response = structured.completion.raw_response
         resp = self.endpoint.envelope(response)
         usage = resp.get("usage", {}) or {}
         self.stats["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
         self.stats["completion_tokens"] += usage.get("completion_tokens", 0) or 0
-        text = response.choices[0].message.content
-        if not text:
-            # content=None means it never reached an answer (e.g. thinking ate max_tokens) - a
-            # real outcome, not a glitch to route around.
-            self.stats["vlm_unparseable"] += 1
-            return None, dt
-        try:
-            return json.loads(text), dt
-        except json.JSONDecodeError:
-            self.stats["vlm_unparseable"] += 1
-            if self.vlm_debug:
-                print(f"[vlm] unparseable: {text[:300]}", flush=True)
-            return None, dt
+        return structured.value, dt
 
     def _build_blocks(self, grid, cur_world_xz, yaw_deg, clusters, step_tag, task_text):
         parts = []

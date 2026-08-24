@@ -162,24 +162,21 @@ def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="
 def endpoint_json(system, prompt, schema, image_paths=(), model=None, timeout=180.0,
                   base_url=None, api_key=None):
     """One logical Chat Completions call against the configured endpoint -> (dict, envelope-ish).
-    `model` defaults to $OPENAI_MODEL. MEASURED (see CLAUDE.md): vLLM has silently ignored
-    guided_json before - the schema is stated in the prompt AND parsed defensively, never
-    trusted to be enforced server-side. The endpoint requires a bearer key
+    `model` defaults to $OPENAI_MODEL. The shared transport uses native strict schemas on Vertex;
+    vLLM receives both native enforcement and the measured prompt-schema aid. Both are parsed and
+    validated locally. The endpoint requires a bearer key
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside
     $OPENAI_API_URL in the repo-root secrets.env."""
     from agent_core.llm import (
         ChatEndpoint,
         EndpointProfile,
-        MalformedContentError,
-        call_with_api_retries,
         image_url_part,
     )
     profile = EndpointProfile.from_env(model=model, base_url=base_url, api_key=api_key)
     transport = ChatEndpoint(profile, timeout=timeout)
     model = profile.model
 
-    content = [{"type": "text", "text": prompt + "\n\nReply with ONLY a JSON object matching:\n"
-                + json.dumps(schema)}]
+    content = [{"type": "text", "text": prompt}]
     for label, path in image_paths:
         with open(path, "rb") as f:
             content.append(image_url_part(f.read(), "image/png"))
@@ -192,57 +189,15 @@ def endpoint_json(system, prompt, schema, image_paths=(), model=None, timeout=18
         "perception_verifier"
     )
 
-    def validate_schema(value, contract, path="response"):
-        expected = contract.get("type")
-        if expected == "object":
-            if not isinstance(value, dict):
-                raise ValueError(f"{path} must be an object")
-            for key in contract.get("required", []):
-                if key not in value:
-                    raise ValueError(f"{path} is missing {key}")
-            for key, child in contract.get("properties", {}).items():
-                if key in value:
-                    validate_schema(value[key], child, f"{path}.{key}")
-        elif expected == "array":
-            if not isinstance(value, list):
-                raise ValueError(f"{path} must be an array")
-            for index, item in enumerate(value):
-                validate_schema(item, contract.get("items", {}), f"{path}[{index}]")
-        elif expected == "string" and not isinstance(value, str):
-            raise ValueError(f"{path} must be a string")
-        elif expected == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
-            raise ValueError(f"{path} must be an integer")
-        elif expected == "boolean" and type(value) is not bool:
-            raise ValueError(f"{path} must be a boolean")
-        elif isinstance(expected, list):
-            allowed = {
-                "string": isinstance(value, str),
-                "null": value is None,
-            }
-            if not any(allowed.get(kind, False) for kind in expected):
-                raise ValueError(f"{path} has the wrong type")
-        if "enum" in contract and value not in contract["enum"]:
-            raise ValueError(f"{path} must be one of {contract['enum']}")
-
-    def request():
-        response = transport.create(messages=messages, schema=schema, schema_name=call_name,
-                                    model=model, temperature=0.0)
-        body = transport.envelope(response)
-        try:
-            text = response.choices[0].message.content
-            start, end = text.find("{"), text.rfind("}")
-            if start < 0 or end < 0:
-                raise ValueError(f"reply had no JSON object: {text[:200]!r}")
-            result = json.loads(text[start:end + 1])
-            validate_schema(result, schema)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            content = locals().get("text", locals().get("body"))
-            raise MalformedContentError(
-                f"{call_name} response violated its schema: {error}", content=content
-            ) from error
-        return result, body
-
-    return call_with_api_retries(request, call_name=call_name)
+    structured = transport.create_structured(
+        messages=messages, schema=schema, schema_name=call_name, model=model,
+        temperature=0.0,
+        workload="reasoning" if call_name in ("resolver", "advisor") else "localization",
+        call_name=call_name,
+    )
+    body = transport.envelope(structured.completion.raw_response)
+    body["structured_output_enforcement"] = structured.enforcement
+    return structured.value, body
 
 
 # Public compatibility alias for saved scripts; endpoint is the provider-neutral name.

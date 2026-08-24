@@ -37,7 +37,7 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 # (data-URI block shape, OPENAI_API_URL -> /v1, OPENAI_API_KEY bearer resolution). These
 # also trigger annotate_probe's module-level load_dotenv(repo-root secrets.env), so creds are present.
 from agent_core.llm import (  # noqa: E402
-    ChatEndpoint, EndpointProfile, image_url_part, is_transient_api_error,
+    ChatEndpoint, EndpointProfile, image_url_part,
 )
 from agent_core.models import annotator_model  # noqa: E402
 from annotator_sys_inst import (  # noqa: E402
@@ -48,7 +48,6 @@ from annotator_sys_inst import (  # noqa: E402
 DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in secrets.env
 DEFAULT_TIMEOUT_S = 300.0
 _MAX_TOKENS = 4096
-_RETRIES = 2
 
 
 class EndpointAnnotateError(RuntimeError):
@@ -65,23 +64,6 @@ def _image_part(label, path, model):
         {"type": "text", "text": f"{label} view:"},
         image_url_part(raw, mime),
     ]
-
-
-def _post(request):
-    """Run an SDK request with the annotator's historical two transient retries."""
-    last = None
-    for attempt in range(_RETRIES + 1):
-        try:
-            return request()
-        except Exception as error:  # OpenAI exceptions retain response diagnostics
-            if not is_transient_api_error(error):
-                raise EndpointAnnotateError(f"endpoint request failed: {error}") from error
-            last = f"{type(error).__name__}: {error}"
-        if attempt < _RETRIES:
-            time.sleep(2.0 * (attempt + 1))
-    raise EndpointAnnotateError(
-        f"endpoint unreachable after {_RETRIES} transient retries: {last}"
-    )
 
 
 def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
@@ -113,53 +95,25 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
              if profile.provider == "vllm" else None)
 
     t0 = time.time()
-    response = _post(lambda: transport.create(
-        messages=messages, schema=schema, schema_name="annotation", model=model,
-        max_tokens=max_tokens, temperature=temperature, extra_body=extra,
-    ))
+    try:
+        structured = transport.create_structured(
+            messages=messages, schema=schema, schema_name="annotation", model=model,
+            max_tokens=max_tokens, temperature=temperature, extra_body=extra,
+            workload="annotation", call_name="annotation",
+        )
+    except Exception as error:
+        raise EndpointAnnotateError(f"endpoint annotation failed: {error}") from error
     dt = time.time() - t0
+    response = structured.completion.raw_response
     resp = transport.envelope(response)
     choice = response.choices[0]
-    message = choice.message
     # finish_reason is the whole diagnostic when the JSON won't parse - "length" (truncated,
     # never terminated) needs a completely different response than "stop" (model finished but
     # emitted malformed output). The old error threw it away and reported every failure as "not
     # valid JSON", which read as a formatting bug when it was really a max_tokens truncation.
     finish = choice.finish_reason
     usage = resp.get("usage", {})
-    completion = usage.get("completion_tokens")
-    text = message.content
-    if not text:
-        # content=None: the model never reached an answer (e.g. thinking ate max_tokens). A real
-        # outcome, surfaced as a failure so annotate_pass records it and moves on.
-        raise EndpointAnnotateError(
-            f"endpoint returned empty content (finish_reason={finish}, completion={completion}; "
-            "thinking may have hit max_tokens - enable_thinking is off by default for exactly "
-            "this reason)")
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError:
-        # finish_reason splits the two ways this happens; they need opposite fixes.
-        #   * "length": the model never terminated the JSON. On THIS store that is a REPETITION
-        #     LOOP, not an honestly-long shelf - greedy decoding (temperature=0) on a shelf of
-        #     visually near-identical facings (a stack of Pancit Canton cups) makes the model emit
-        #     the same item row over and over until it exhausts max_tokens. MEASURED on cp020
-        #     (2026-07-24): neither raising max_tokens nor a sampling penalty rescues QUALITY -
-        #     repetition_penalty 1.05/1.1 broke the loop but returned items=[] (empty shelf), and
-        #     frequency_penalty 0.5 returned generic/blank names ("Cup Noodles", ""). The loop is a
-        #     qwen weakness on dense repetitive shelves; claude-cli (the baseline) reads cp020 as a
-        #     single item and never loops. Do NOT re-attempt sampling knobs here.
-        #   * anything else: genuinely malformed output - show more of it to diagnose.
-        if finish == "length":
-            raise EndpointAnnotateError(
-                f"endpoint hit max_tokens without terminating the JSON (finish_reason=length, "
-                f"completion={completion}) - the model did not finish its output, on this store "
-                f"typically a repetition loop on a visually repetitive shelf. Raising max_tokens or "
-                f"adding a sampling penalty does NOT fix this (measured 2026-07-24); the claude-cli "
-                f"backend handles this checkpoint.")
-        raise EndpointAnnotateError(
-            f"endpoint output was not valid JSON (finish_reason={finish}): {text[:600]}"
-        )
+    result = structured.value
 
     envelope = {
         "backend": "endpoint",
@@ -169,6 +123,7 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
         "duration_ms": dt * 1000.0,
         "finish_reason": finish,
         "usage": usage,
+        "structured_output_enforcement": structured.enforcement,
     }
     return result, envelope
 

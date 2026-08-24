@@ -156,6 +156,7 @@ def main():
             messages=messages, schema=schema if args.guided else None,
             schema_name=label.replace(":", "_"), model=profile.model,
             max_tokens=args.max_tokens, temperature=args.temperature, extra_body=extra,
+            workload="annotation",
         )
     except Exception as error:  # fail-fast probe with the SDK's full diagnostic
         sys.exit(f"endpoint probe failed: {type(error).__name__}: {error}")

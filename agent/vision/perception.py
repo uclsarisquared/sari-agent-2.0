@@ -21,7 +21,10 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / 'secrets.env')
 # OpenRouter retired on 402). This is the bounding-box/centering client - the endpoint's VL model
 # replaces Gemini here, identically in BOTH A/B arms; bbox quality vs Gemini is unmeasured and
 # shared, so it cannot skew the arms.
-from agent_core.llm import EndpointProfile, MalformedContentError, call_with_api_retries, image_url_part
+from agent_core.llm import (
+    EndpointProfile, MalformedContentError, call_with_api_retries, effective_max_tokens,
+    completion_result_from_response, image_url_part,
+)
 from agent_core.prompt_loader import load_prompt, render_prompt
 # Every LLM call in this module is perception's cost - bbox, centering and OCR-bbox reasoning alike.
 # The role blocks wrap call_with_api_retries, not the lambda inside it, so a flaky call's retries are
@@ -114,13 +117,27 @@ def extract_text_from_image(image_path):
 def find_most_similar_bbox_to_target_name(target_name, ocr_result):
     bboxes = '\n'.join([f'* {box}' for box in ocr_result])
     def request():
-        return CLIENT.chat.completions.create(
+        response = CLIENT.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": f"{FIND_MOST_SIMILAR_OCR_BBOX_PROMPT}\n\ntarget_name={target_name}\n\n{bboxes}"}],
             temperature=0.5,
-            max_tokens=400,
+            max_tokens=effective_max_tokens(
+                _ENDPOINT_PROFILE.provider, 400, "localization",
+                _ENDPOINT_PROFILE.thinking_level,
+            ),
             extra_body=_ENDPOINT_PROFILE.extra_body,
-        ).choices[0].message.content
+        )
+        result = completion_result_from_response(
+            response, provider=_ENDPOINT_PROFILE.provider,
+            thinking_level=_ENDPOINT_PROFILE.thinking_level,
+            workload="localization", requested_max_tokens=400,
+        )
+        if not result.text or result.finish_reason == "length":
+            raise MalformedContentError(
+                f"OCR box-match response was empty or truncated ({result.diagnostic()})",
+                content=result.text, completion_result=result,
+            )
+        return result.text
 
     def validate(content):
         match = re.search(EXTRACTABLE_JSON_PATTERN, content or "")
@@ -288,16 +305,30 @@ def _bbox_dict_px(box_2d):
 
 
 def _bbox_request(image, target_info, prompt, max_tokens, temperature):
-    return CLIENT.chat.completions.create(
+    response = CLIENT.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": [
             _encode_image(image),
             {"type": "text", "text": f"{prompt}\n\ntarget_info={target_info}\n\n"},
         ]}],
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens(
+            _ENDPOINT_PROFILE.provider, max_tokens, "localization",
+            _ENDPOINT_PROFILE.thinking_level,
+        ),
         extra_body=_ENDPOINT_PROFILE.extra_body,
-    ).choices[0].message.content
+    )
+    result = completion_result_from_response(
+        response, provider=_ENDPOINT_PROFILE.provider,
+        thinking_level=_ENDPOINT_PROFILE.thinking_level,
+        workload="localization", requested_max_tokens=max_tokens,
+    )
+    if not result.text or result.finish_reason == "length":
+        raise MalformedContentError(
+            f"bounding-box response was empty or truncated ({result.diagnostic()})",
+            content=result.text, completion_result=result,
+        )
+    return result.text
 
 
 def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):

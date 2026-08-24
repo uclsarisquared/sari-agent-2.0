@@ -9,7 +9,7 @@ import json
 import time
 
 from agent_core import token_meter
-from agent_core.llm import MalformedContentError, call_with_api_retries
+from agent_core.llm import structured_chat_completion
 from agent_core.prompt_loader import load_prompt
 
 
@@ -24,28 +24,28 @@ def _guard_call(client, kwargs, call_name):
     """
     request_client = (client.with_options(max_retries=0)
                       if callable(getattr(client, "with_options", None)) else client)
-    def request():
-        return request_client.chat.completions.create(**kwargs).choices[0].message.content
-
-    def validate(content):
-        try:
-            parsed = json.loads(content)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise MalformedContentError(
-                f"completion guard did not return JSON: {error}", content=content
-            ) from error
-        if (not isinstance(parsed, dict) or set(parsed) != {"match", "reason"}
-                or type(parsed.get("match")) is not bool
-                or not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip()):
-            raise MalformedContentError(
-                "expected a strict boolean match and non-empty string reason", content=content
-            )
-        return parsed
-
     with token_meter.role(token_meter.ROLE_GUARD):
-        return call_with_api_retries(
-            request, call_name=call_name, validator=validate
+        extra_body = kwargs.get("extra_body") or {}
+        provider = "vertex" if "google" in extra_body else "vllm"
+        thinking_level = (
+            extra_body.get("google", {}).get("thinking_config", {}).get("thinking_level")
         )
+        structured = structured_chat_completion(
+            client=request_client,
+            provider=provider,
+            thinking_level=thinking_level,
+            default_extra_body=extra_body,
+            messages=kwargs["messages"],
+            schema=_SCHEMA,
+            schema_name=call_name.replace(".", "_"),
+            model=kwargs["model"],
+            temperature=kwargs.get("temperature", 0),
+            max_tokens=kwargs.get("max_tokens"),
+            workload="guard",
+            call_name=call_name,
+            timeout=kwargs.get("timeout"),
+        )
+        return structured.value
 
 
 GUARD_SYSTEM = load_prompt("orchestrator/pickup_guard")
@@ -104,10 +104,6 @@ def classify_pickup(client, model, config, image_b64, held_sku, target,
         "temperature": getattr(config, "temperature", 0),
         "max_tokens": min(getattr(config, "max_tokens", 256), 256),
         "timeout": 30,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "pickup_guard", "schema": _SCHEMA, "strict": True},
-        },
     }
     extra_body = getattr(config, "extra_body", None)
     if extra_body:
@@ -168,10 +164,6 @@ def classify_inspection(client, model, config, image_b64, query, answer, auxilia
         "temperature": getattr(config, "temperature", 0),
         "max_tokens": min(getattr(config, "max_tokens", 256), 256),
         "timeout": 30,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "inspect_guard", "schema": _SCHEMA, "strict": True},
-        },
     }
     extra_body = getattr(config, "extra_body", None)
     if extra_body:
@@ -211,14 +203,6 @@ def classify_inspection_visibility(client, model, config, image_b64, query,
         "temperature": 0,
         "max_tokens": min(getattr(config, "max_tokens", 256), 256),
         "timeout": 30,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "inspection_visibility",
-                "schema": _SCHEMA,
-                "strict": True,
-            },
-        },
     }
     extra_body = getattr(config, "extra_body", None)
     if extra_body:
@@ -267,14 +251,6 @@ def classify_inspection_label_presence(client, model, config, image_b64, query,
         "temperature": 0,
         "max_tokens": min(getattr(config, "max_tokens", 256), 256),
         "timeout": 30,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "inspection_label_presence",
-                "schema": _SCHEMA,
-                "strict": True,
-            },
-        },
     }
     extra_body = getattr(config, "extra_body", None)
     if extra_body:
@@ -339,10 +315,6 @@ def classify_compare(client, model, config, candidate_frames, criterion, answer,
             "temperature": getattr(config, "temperature", 0),
             "max_tokens": min(getattr(config, "max_tokens", 256), 256),
             "timeout": 30,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "compare_guard", "schema": _SCHEMA, "strict": True},
-            },
         }
         extra_body = getattr(config, "extra_body", None)
         if extra_body:
@@ -381,10 +353,6 @@ def classify_unknown(client, model, config, image_b64, task, claim, auxiliary_co
         "temperature": getattr(config, "temperature", 0),
         "max_tokens": min(getattr(config, "max_tokens", 256), 256),
         "timeout": 30,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "unknown_guard", "schema": _SCHEMA, "strict": True},
-        },
     }
     extra_body = getattr(config, "extra_body", None)
     if extra_body:
