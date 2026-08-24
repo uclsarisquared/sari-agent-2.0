@@ -25,7 +25,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -2590,7 +2590,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         parser.error("--name and --output-dir both name the results directory; pass one")
     output_dir = args.output_dir or (
         REPO_ROOT / "bench_runs"
-        / (datetime.now().strftime("%Y%m%d_%H%M%S") + (f"_{name}" if name else ""))
+        / (datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + (f"_{name}" if name else ""))
     )
 
     runner = BenchmarkRunner(

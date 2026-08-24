@@ -2125,9 +2125,15 @@ document.addEventListener("click", ev => { if (!ev.target.closest("[data-tip]"))
 
 // -- battery picker ------------------------------------------------------------------------
 
-const fmtWhen = ts => !ts ? "" : new Date(ts * 1000).toLocaleString([], {
-  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-});
+// Runs are named `<YYYYMMDD_HHMMSS><sep><label>` with the stamp in UTC. Derive the menu note from
+// that stamp (not the filesystem mtime, which is also UTC but rendered through the viewer's local
+// zone) so the date always agrees with the name no matter what zone the browser is in.
+const fmtRunStamp = id => {
+  const m = String(id || "").match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+  if (!m) return "";
+  return new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]))
+    .toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
 
 // Runners name their directory `<YYYYMMDD_HHMMSS><sep><label>`, and every row in this menu already
 // carries the run's date beside it - so the stamp on the front is the same fact twice, in the harder
@@ -2272,7 +2278,7 @@ function renderPicker(state) {
     // and rendering for the one it started on whatever the page reads - and saying so beside a row
     // whose blinking dot already means "a runner is working here" only reads as a second liveness
     // tag that disagrees with the first.
-    const note = fmtWhen(d.mtime);
+    const note = fmtRunStamp(d.id);
     return `<li class="clip" role="option" data-battery="${esc(d.id)}"`
       + ` aria-selected="${d.id === state.battery_id}">`
       + `<span class="dot${d.live ? " live" : ""}"></span>`
