@@ -14,3 +14,6 @@ context_policy = "baseline-2img"
 map_dir = "../../agent/mapping/output_runs/run_0724_164652"
 leg_retries = 1
 completion_guard = "none"
+
+[discord]
+enable = true
