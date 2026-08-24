@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-08-24)
+
+### Features
+
+- **bench**: Add replan-test run to the comprehensive ablation
+  ([`23ef4fe`](https://github.com/uclsarisquared/sari-agent-2.0/commit/23ef4feb078e950a3a80eabd71c84891eb0aecd2))
+
+
 ## v1.1.0 (2026-08-24)
 
 ### Continuous Integration
