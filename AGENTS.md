@@ -35,3 +35,18 @@ chore(release): 1.0.1 [skip ci]
 
 Do NOT create a new tag or bump the version yourself — the workflow does that automatically.
 Just write conventional commits.
+
+## VLM bounding-box support (read before switching the agent's model)
+
+The agent's per-step VLM emits bounding boxes whose **coordinate order is per-model**, and the
+parser (`agent/vision/perception.py`, `BBOX_YMIN_FIRST`) only understands **two conventions**:
+
+- **Gemini (Vertex)** — ymin-first `[y1, x1, y2, x2]` (provider `vertex`).
+- **Qwen-VL (vLLM)** — xmin-first `[x1, y1, x2, y2]`.
+
+These are trained conventions the models emit regardless of what the prompt asks, so they are not
+negotiable. **Only these two are supported.** Before switching the agent to any other VLM model,
+confirm how that model reports bounding-box coordinates (the axis order and the value range — this
+code assumes normalized 0–1000). If it is neither Gemini's nor Qwen's convention, the parser will
+silently misread every box; the model needs to be added to the `BBOX_YMIN_FIRST` branch and verified
+on an elongated/off-centre box, not just a near-centred one.

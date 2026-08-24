@@ -83,6 +83,14 @@ CWD-relative by `agent_core.agent`; run everything from `agent/`).
   annotator backend) in the repo-root `secrets.env` select what the endpoint is asked for; code
   reads them via `agent_core/models.py`, which holds the ONLY hardcoded default in the tree
   (`Qwen/Qwen3.6-27B`, the measured baseline). Don't reintroduce model literals at call sites.
+- **Only Gemini and Qwen bounding boxes are supported.** The per-step VLM's boxes branch on
+  provider in `agent/vision/perception.py` (`BBOX_YMIN_FIRST`): Gemini/Vertex is ymin-first
+  `[y1,x1,y2,x2]`, Qwen/vLLM is xmin-first `[x1,y1,x2,y2]`. These are trained conventions the models
+  emit regardless of the prompt. If you switch the agent to any other VLM, note the new model's
+  bounding-box coordinate order **and** value range (code assumes normalized 0–1000) before relying
+  on it — anything that isn't Gemini's or Qwen's convention will be silently misread unless added to
+  the `BBOX_YMIN_FIRST` branch. Verify on an elongated/off-centre box, not a near-centred one (see
+  the measured history in `perception.py`). See root `AGENTS.md` for the full note.
 - **Map quality bar:** a good `grid_final.png` has **no grey holes** in the store interior.
 
 ## How to work here — this matters more than it sounds

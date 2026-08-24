@@ -1986,7 +1986,7 @@ wheels = [
 
 [[package]]
 name = "sari-agent"
-version = "1.0.0"
+version = "1.0.3"
 source = { virtual = "." }
 dependencies = [
     { name = "google-auth" },
