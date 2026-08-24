@@ -62,13 +62,20 @@ FOCAL_PX = (ORIGINAL_HEIGHT / 2.0) / math.tan(math.radians(CAMERA_VFOV_DEG / 2.0
 # model above, damped by `gain`. Good-enough-for-tracking, not a precision constant.
 PPD_YAW = 18.1
 PPD_PITCH = 16.4
-# COORDINATE ORDER (measured 2026-07-21): the box is [xmin, ymin, xmax, ymax], NOT the
-# [ymin, xmin, ...] this prompt used to state. These prompts were written for Gemini (ymin-first);
-# the backend is now Qwen-VL, whose native grounding format is xmin-first ([x1,y1,x2,y2]). Qwen
-# emits xmin-first regardless of what the prompt claims - verified: it boxed "Choco Crunchies" at
-# [0,292,249,406], which is the real bottom-left product ONLY read as [xmin,ymin,xmax,ymax]; read
-# ymin-first it lands on the ceiling. The parser (_detect_bbox_px/_detect_boxes_px) reads xmin-first
-# to match, so keep the prompt and parser in agreement.
+# COORDINATE ORDER is PER-BACKEND, not a global fact - both backends ignore whatever order the
+# prompt asks for and emit their own trained convention regardless (measured on both):
+#   - Qwen-VL emits xmin-first ([x1,y1,x2,y2]) - verified 2026-07-21: it boxed "Choco Crunchies" at
+#     [0,292,249,406], which is the real bottom-left product ONLY read as [xmin,ymin,xmax,ymax];
+#     read ymin-first it lands on the ceiling.
+#   - Gemini (Vertex) emits ymin-first ([y1,x1,y2,x2]) - Google's own reference bbox sample
+#     documents box_2d as [y_min, x_min, y_max, x_max]. Verified 2026-08-24: the "nestle gold corn
+#     flakes" miscentring bug (validation/artifacts/calibration/center/0824_172231/) was THIS - the
+#     raw response [371,646,610,849] reads as garbage xmin-first but lands exactly on the real
+#     product read ymin-first. A prior "confirmation" that xmin-first also worked for Gemini was a
+#     false negative: that box happened to be small and near-centered, where an x/y swap barely
+#     moves the computed centre - it only shows up clearly on an elongated/off-centre box.
+# So the parser (_bbox_dict_px) branches on the endpoint provider instead of assuming one order.
+BBOX_YMIN_FIRST = _ENDPOINT_PROFILE.provider == "vertex"
 PERCEPTION_PROMPT = load_prompt("vision/detect_one")
 PERCEPTION_PROMPT_MULTI = load_prompt("vision/detect_many")
 FIND_MOST_SIMILAR_OCR_BBOX_PROMPT = load_prompt("vision/match_ocr_box")
@@ -263,10 +270,16 @@ def _bbox_dict_px(box_2d):
         raise BBoxResponseParseError("bbox entry is missing a four-value box_2d")
     if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in coords):
         raise BBoxResponseParseError("bbox coordinates must be finite numbers")
-    xmin = coords[0] / 1000 * ORIGINAL_WIDTH
-    ymin = coords[1] / 1000 * ORIGINAL_HEIGHT
-    xmax = coords[2] / 1000 * ORIGINAL_WIDTH
-    ymax = coords[3] / 1000 * ORIGINAL_HEIGHT
+    if BBOX_YMIN_FIRST:
+        ymin = coords[0] / 1000 * ORIGINAL_HEIGHT
+        xmin = coords[1] / 1000 * ORIGINAL_WIDTH
+        ymax = coords[2] / 1000 * ORIGINAL_HEIGHT
+        xmax = coords[3] / 1000 * ORIGINAL_WIDTH
+    else:
+        xmin = coords[0] / 1000 * ORIGINAL_WIDTH
+        ymin = coords[1] / 1000 * ORIGINAL_HEIGHT
+        xmax = coords[2] / 1000 * ORIGINAL_WIDTH
+        ymax = coords[3] / 1000 * ORIGINAL_HEIGHT
     if xmin >= xmax or ymin >= ymax:
         raise BBoxResponseParseError("bbox coordinates are empty or reversed")
     return {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax,
