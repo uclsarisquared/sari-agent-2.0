@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import base64
+import copy
 import re
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -21,6 +22,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 from PIL import Image
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout as RequestsTimeout
+from jsonschema import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 
 from agent_core.contracts import JSON_BLOCK_PATTERN
 from agent_core.models import agent_model
@@ -39,6 +42,7 @@ class LLMConfig:
     base_url: str = "https://openrouter.ai/api/v1"
     max_tokens: Optional[int] = None
     extra_body: Optional[dict] = None
+    provider: Literal["vllm", "vertex"] = "vllm"
 
 
 # Compatibility name retained while callers migrate to the transport-neutral spelling.
@@ -82,6 +86,60 @@ def vertex_thinking_level(model: str) -> str:
 
 class EndpointConfigurationError(RuntimeError):
     """The selected OpenAI-compatible endpoint is not completely configured."""
+
+
+Workload = Literal["guard", "localization", "reasoning", "annotation"]
+
+_VERTEX_TOKEN_FLOORS: dict[str, dict[Workload, int]] = {
+    "LOW": {"guard": 1024, "localization": 1536, "reasoning": 4096, "annotation": 4096},
+    "MEDIUM": {"guard": 2048, "localization": 3072, "reasoning": 6144, "annotation": 6144},
+    "HIGH": {"guard": 4096, "localization": 4096, "reasoning": 8192, "annotation": 8192},
+}
+_VERTEX_TOKEN_OVERRIDE = {
+    "guard": "VERTEX_MAX_TOKENS_GUARD",
+    "localization": "VERTEX_MAX_TOKENS_LOCALIZATION",
+    "reasoning": "VERTEX_MAX_TOKENS_REASONING",
+    "annotation": "VERTEX_MAX_TOKENS_ANNOTATION",
+}
+
+
+def effective_max_tokens(
+    provider: str, requested: int | None, workload: Workload, thinking_level: str | None = None,
+) -> int | None:
+    """Apply Vertex's thinking-aware completion floor without changing vLLM caps."""
+    if workload not in _VERTEX_TOKEN_OVERRIDE:
+        raise ValueError(f"unknown completion workload {workload!r}")
+    if requested is not None and (
+        isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0
+    ):
+        raise ValueError("requested max_tokens must be a positive integer or None")
+    if provider != "vertex":
+        return requested
+    override_name = _VERTEX_TOKEN_OVERRIDE[workload]
+    raw_override = os.getenv(override_name)
+    if raw_override is not None:
+        original_override = raw_override
+        try:
+            override = int(raw_override)
+        except ValueError as error:
+            raise EndpointConfigurationError(
+                f"{override_name} must be an exact positive integer, got {raw_override!r}."
+            ) from error
+        if override <= 0 or str(override) != original_override:
+            raise EndpointConfigurationError(
+                f"{override_name} must be an exact positive integer, got {raw_override!r}."
+            )
+        return override
+    level = (thinking_level or "MINIMAL").strip().upper()
+    if level == "MINIMAL":
+        return requested
+    try:
+        floor = _VERTEX_TOKEN_FLOORS[level][workload]
+    except KeyError as error:
+        raise EndpointConfigurationError(
+            f"Unsupported Vertex thinking level {level!r}; expected MINIMAL, LOW, MEDIUM, or HIGH."
+        ) from error
+    return max(requested or 0, floor)
 
 
 class ADCBearerToken:
@@ -146,7 +204,12 @@ class EndpointProfile:
         cls, *, model: str | None = None, base_url: str | None = None,
         api_key: str | None = None, provider: str | None = None,
     ) -> "EndpointProfile":
-        selected = (provider or os.getenv("LLM_PROVIDER") or "vllm").strip().lower()
+        selected = (
+            provider
+            or ("vllm" if base_url or api_key else None)
+            or os.getenv("LLM_PROVIDER")
+            or "vllm"
+        ).strip().lower()
         if selected == "vllm":
             endpoint, fallback_key = endpoint_creds()
             if base_url:
@@ -195,6 +258,92 @@ class EndpointProfile:
     def request_options(self) -> dict[str, Any]:
         return {"extra_body": self.extra_body.copy()}
 
+    @property
+    def thinking_level(self) -> str | None:
+        if self.provider != "vertex":
+            return None
+        return (
+            self.extra_body.get("google", {})
+            .get("thinking_config", {})
+            .get("thinking_level")
+        )
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """Lossless completion data needed by conversational provider protocols."""
+
+    text: str | None
+    assistant_message: dict[str, Any]
+    finish_reason: str | None
+    usage: dict[str, Any]
+    raw_response: Any
+    workload: Workload
+    requested_max_tokens: int | None
+    effective_max_tokens: int | None
+    thinking_level: str | None
+
+    def diagnostic(self) -> str:
+        return (
+            f"workload={self.workload}, requested_max_tokens={self.requested_max_tokens}, "
+            f"effective_max_tokens={self.effective_max_tokens}, "
+            f"thinking_level={self.thinking_level}, finish_reason={self.finish_reason}, "
+            f"usage={self.usage}"
+        )
+
+
+@dataclass(frozen=True)
+class StructuredCompletion:
+    value: Any
+    completion: CompletionResult
+    enforcement: Literal["native", "prompt_fallback"]
+
+
+def _model_dump(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        return {key: item for key, item in value.items() if item is not None}
+    data = getattr(value, "__dict__", None)
+    if isinstance(data, dict):
+        return {key: item for key, item in data.items() if item is not None}
+    raise TypeError(f"Unsupported completion object: {type(value).__name__}")
+
+
+def _completion_result(
+    response: Any, *, workload: Workload, requested: int | None,
+    effective: int | None, thinking_level: str | None,
+) -> CompletionResult:
+    choice = response.choices[0]
+    message = choice.message
+    envelope = ChatEndpoint.envelope(response)
+    assistant = _model_dump(message)
+    assistant.setdefault("role", getattr(message, "role", "assistant"))
+    if "content" not in assistant:
+        assistant["content"] = getattr(message, "content", None)
+    assistant = {key: value for key, value in assistant.items() if value is not None}
+    return CompletionResult(
+        text=getattr(message, "content", None), assistant_message=assistant,
+        finish_reason=getattr(choice, "finish_reason", None),
+        usage=envelope.get("usage", {}) or {}, raw_response=response, workload=workload,
+        requested_max_tokens=requested, effective_max_tokens=effective,
+        thinking_level=thinking_level,
+    )
+
+
+def completion_result_from_response(
+    response: Any, *, provider: str, thinking_level: str | None,
+    workload: Workload, requested_max_tokens: int | None,
+) -> CompletionResult:
+    """Normalize a response from legacy direct-client callers with policy diagnostics."""
+    effective = effective_max_tokens(
+        provider, requested_max_tokens, workload, thinking_level
+    )
+    return _completion_result(
+        response, workload=workload, requested=requested_max_tokens,
+        effective=effective, thinking_level=thinking_level,
+    )
+
 
 def image_url_part(data: bytes, mime_type: str = "image/png") -> dict[str, Any]:
     """Build the OpenAI Chat Completions image part used by every provider."""
@@ -214,8 +363,14 @@ class ChatEndpoint:
         self, *, messages: list[dict[str, Any]], schema: dict | None = None,
         schema_name: str = "response", model: str | None = None,
         temperature: float = 0.0, max_tokens: int | None = None,
-        extra_body: dict | None = None,
+        extra_body: dict | None = None, workload: Workload = "reasoning",
     ):
+        if schema is not None:
+            return self.create_structured(
+                messages=messages, schema=schema, schema_name=schema_name, model=model,
+                temperature=temperature, max_tokens=max_tokens, extra_body=extra_body,
+                workload=workload,
+            ).completion.raw_response
         body = dict(self.profile.extra_body)
         if extra_body:
             body.update(extra_body)
@@ -223,14 +378,45 @@ class ChatEndpoint:
             "model": model or self.profile.model, "messages": messages,
             "temperature": temperature, "extra_body": body,
         }
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        if schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": schema_name, "schema": schema, "strict": True},
-            }
+        budget = effective_max_tokens(
+            self.profile.provider, max_tokens, workload, self.profile.thinking_level
+        )
+        if budget is not None:
+            kwargs["max_tokens"] = budget
         return self.client.chat.completions.create(**kwargs)
+
+    def create_result(
+        self, *, messages: list[dict[str, Any]], model: str | None = None,
+        temperature: float = 0.0, max_tokens: int | None = None,
+        extra_body: dict | None = None, workload: Workload = "reasoning",
+    ) -> CompletionResult:
+        response = self.create(
+            messages=messages, model=model, temperature=temperature, max_tokens=max_tokens,
+            extra_body=extra_body, workload=workload,
+        )
+        effective = effective_max_tokens(
+            self.profile.provider, max_tokens, workload, self.profile.thinking_level
+        )
+        return _completion_result(
+            response, workload=workload, requested=max_tokens, effective=effective,
+            thinking_level=self.profile.thinking_level,
+        )
+
+    def create_structured(
+        self, *, messages: list[dict[str, Any]], schema: dict[str, Any],
+        schema_name: str = "response", model: str | None = None,
+        temperature: float = 0.0, max_tokens: int | None = None,
+        extra_body: dict | None = None, workload: Workload = "reasoning",
+        call_name: str | None = None, timeout: float | None = None,
+    ) -> "StructuredCompletion":
+        return structured_chat_completion(
+            client=self.client, provider=self.profile.provider,
+            thinking_level=self.profile.thinking_level, default_extra_body=self.profile.extra_body,
+            messages=messages, schema=schema, schema_name=schema_name,
+            model=model or self.profile.model, temperature=temperature, max_tokens=max_tokens,
+            extra_body=extra_body, workload=workload, call_name=call_name or schema_name,
+            timeout=timeout,
+        )
 
     @staticmethod
     def envelope(response) -> dict[str, Any]:
@@ -238,7 +424,8 @@ class ChatEndpoint:
             return response.model_dump(mode="json", exclude_none=False)
         if isinstance(response, dict):
             return response
-        raise TypeError(f"Unsupported Chat Completions response: {type(response).__name__}")
+        usage = getattr(response, "usage", None)
+        return {"usage": _model_dump(usage) if usage is not None else {}}
 
 
 def normalize_endpoint_root(raw: str) -> str:
@@ -297,6 +484,7 @@ def agent_vlm_config(temperature: float = 0.5, mode: str = "lean") -> LLMConfig:
         base_url=profile.base_url,
         max_tokens=1536,
         extra_body=profile.extra_body,
+        provider=profile.provider,
     )
 
 
@@ -327,9 +515,13 @@ _api_max_attempts = DEFAULT_API_MAX_ATTEMPTS
 class MalformedContentError(ValueError):
     """A model response arrived successfully but did not satisfy its caller's contract."""
 
-    def __init__(self, message: str, *, content: Any = None) -> None:
+    def __init__(
+        self, message: str, *, content: Any = None,
+        completion_result: CompletionResult | None = None,
+    ) -> None:
         super().__init__(message)
         self.content = content
+        self.completion_result = completion_result
 
 
 def configure_api_retries(max_attempts: int) -> None:
@@ -484,6 +676,200 @@ def call_with_api_retries(
     raise AssertionError("retry loop exhausted without returning or raising")
 
 
+def validate_json_schema(schema: dict[str, Any], *, provider: str) -> Any:
+    """Validate a caller-owned schema without changing its meaning."""
+    if not isinstance(schema, dict):
+        raise ValueError("structured-output schema must be a JSON object")
+    try:
+        validator_cls = validator_for(schema)
+        validator_cls.check_schema(schema)
+    except SchemaError as error:
+        raise ValueError(f"invalid JSON Schema: {error.message}") from error
+
+    if provider == "vertex":
+        def resolve(pointer: str) -> Any:
+            if not pointer.startswith("#/"):
+                return schema if pointer == "#" else None
+            current: Any = schema
+            for part in pointer[2:].split("/"):
+                key = part.replace("~1", "/").replace("~0", "~")
+                if not isinstance(current, dict) or key not in current:
+                    return None
+                current = current[key]
+            return current
+
+        def recursive(node: Any, active: frozenset[int] = frozenset()) -> bool:
+            if not isinstance(node, (dict, list)):
+                return False
+            if id(node) in active:
+                return True
+            active = active | {id(node)}
+            if isinstance(node, list):
+                return any(recursive(item, active) for item in node)
+            if "$recursiveRef" in node or "$dynamicRef" in node:
+                return True
+            ref = node.get("$ref")
+            target = resolve(ref) if isinstance(ref, str) and ref.startswith("#") else None
+            if target is not None and recursive(target, active):
+                return True
+            return any(
+                recursive(value, active) for key, value in node.items() if key != "$ref"
+            )
+
+        if recursive(schema):
+            raise ValueError(
+                "Vertex structured output does not support recursive JSON Schemas; "
+                "replace recursive $ref/$recursiveRef/$dynamicRef links with a bounded shape."
+            )
+    return validator_cls(schema)
+
+
+def _messages_with_schema_prompt(
+    messages: list[dict[str, Any]], schema: dict[str, Any]
+) -> list[dict[str, Any]]:
+    prompted = copy.deepcopy(messages)
+    suffix = "\n\nReply with ONLY a JSON value matching this schema:\n" + json.dumps(
+        schema, ensure_ascii=False, separators=(",", ":")
+    )
+    for message in reversed(prompted):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = content + suffix
+        elif isinstance(content, list):
+            content.append({"type": "text", "text": suffix.lstrip()})
+        else:
+            message["content"] = suffix.lstrip()
+        return prompted
+    raise ValueError("structured completion requires a user message for schema instructions")
+
+
+def _parse_structured(
+    completion: CompletionResult, validator: Any, *, tolerant: bool, call_name: str,
+) -> Any:
+    text = completion.text
+    if not isinstance(text, str) or not text.strip():
+        raise MalformedContentError(
+            f"{call_name} returned empty structured content ({completion.diagnostic()})",
+            content=text,
+        )
+    candidates = [text.strip()]
+    if tolerant:
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        if fenced:
+            candidates.append(fenced.group(1).strip())
+        for left, right in (("{", "}"), ("[", "]")):
+            start, end = text.find(left), text.rfind(right)
+            if start >= 0 and end > start:
+                candidates.append(text[start:end + 1])
+    last_error: Exception | None = None
+    for candidate in dict.fromkeys(candidates):
+        parsers = (json.loads, __import__("ast").literal_eval) if tolerant else (json.loads,)
+        for parser in parsers:
+            try:
+                value = parser(candidate)
+                validator.validate(value)
+                return value
+            except (json.JSONDecodeError, SyntaxError, ValueError, ValidationError) as error:
+                last_error = error
+    detail = getattr(last_error, "message", str(last_error))
+    raise MalformedContentError(
+        f"{call_name} response violated its schema: {detail} ({completion.diagnostic()})",
+        content=text,
+    ) from last_error
+
+
+def _schema_related_bad_request(error: Exception) -> bool:
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    if status != 400:
+        return False
+    body = getattr(error, "body", None)
+    detail = f"{error} {body}".lower()
+    return any(term in detail for term in ("json_schema", "response_format", "schema"))
+
+
+def structured_chat_completion(
+    *, client: Any, provider: Literal["vllm", "vertex"], thinking_level: str | None,
+    default_extra_body: dict[str, Any] | None, messages: list[dict[str, Any]],
+    schema: dict[str, Any], schema_name: str, model: str, temperature: float = 0.0,
+    max_tokens: int | None = None, extra_body: dict[str, Any] | None = None,
+    workload: Workload = "reasoning", call_name: str = "structured_completion",
+    timeout: float | None = None,
+) -> StructuredCompletion:
+    """Execute provider-aware structured output, including Vertex's one fallback phase."""
+    validator = validate_json_schema(schema, provider=provider)
+    effective = effective_max_tokens(provider, max_tokens, workload, thinking_level)
+    body = dict(default_extra_body or {})
+    if extra_body:
+        body.update(extra_body)
+
+    def request(request_messages: list[dict[str, Any]], *, native: bool) -> CompletionResult:
+        kwargs: dict[str, Any] = {
+            "model": model, "messages": request_messages, "temperature": temperature,
+            "extra_body": body,
+        }
+        if effective is not None:
+            kwargs["max_tokens"] = effective
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if native:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+            }
+        response = client.chat.completions.create(**kwargs)
+        return _completion_result(
+            response, workload=workload, requested=max_tokens, effective=effective,
+            thinking_level=thinking_level,
+        )
+
+    if provider == "vllm":
+        prompted = _messages_with_schema_prompt(messages, schema)
+
+        def qwen_attempt() -> StructuredCompletion:
+            completion = request(prompted, native=True)
+            value = _parse_structured(
+                completion, validator, tolerant=True, call_name=call_name
+            )
+            return StructuredCompletion(value, completion, "native")
+
+        return call_with_api_retries(qwen_attempt, call_name=call_name)
+
+    fallback_reason: str
+    try:
+        completion = call_with_api_retries(
+            lambda: request(messages, native=True), call_name=f"{call_name}.native"
+        )
+    except Exception as error:
+        if not _schema_related_bad_request(error):
+            raise
+        fallback_reason = f"schema-related HTTP 400: {error}"
+    else:
+        try:
+            value = _parse_structured(
+                completion, validator, tolerant=False, call_name=call_name
+            )
+            return StructuredCompletion(value, completion, "native")
+        except MalformedContentError as error:
+            fallback_reason = str(error)
+
+    logger.warning(
+        f"[structured-output] call={call_name} provider=vertex enforcement=prompt_fallback "
+        f"reason={fallback_reason}"
+    )
+    prompted = _messages_with_schema_prompt(messages, schema)
+    fallback_completion = call_with_api_retries(
+        lambda: request(prompted, native=False), call_name=f"{call_name}.prompt_fallback"
+    )
+    value = _parse_structured(
+        fallback_completion, validator, tolerant=True, call_name=f"{call_name}.prompt_fallback"
+    )
+    return StructuredCompletion(value, fallback_completion, "prompt_fallback")
+
+
 class BaseAgent(ABC):
     """Shared configuration, reply parsing, and retry support for LLM-backed agents."""
     @abstractmethod
@@ -502,14 +888,59 @@ class BaseAgent(ABC):
         call_name: str = "model_call",
         validator: Callable[[str], Any] | None = None,
     ) -> str:
+        result = BaseAgent._api_call_result_with_retry(
+            self,
+            client, messages, call_name=call_name, validator=validator
+        )
+        return result.text
+
+    def _api_call_result_with_retry(
+        self,
+        client: OpenAI,
+        messages: list,
+        *,
+        call_name: str = "model_call",
+        validator: Callable[[str], Any] | None = None,
+        workload: Workload = "reasoning",
+    ) -> CompletionResult:
+        """Completion-result path used when provider message metadata must survive history."""
+        thinking_level = (
+            (self.config.extra_body or {}).get("google", {})
+            .get("thinking_config", {})
+            .get("thinking_level")
+        )
+        effective = effective_max_tokens(
+            self.config.provider, self.config.max_tokens, workload, thinking_level
+        )
+
         def request():
             response = client.chat.completions.create(
                 model=self.config.model_id,
                 messages=messages,
                 temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
+                max_tokens=effective,
                 extra_body=self.config.extra_body,
             )
-            return response.choices[0].message.content
+            return _completion_result(
+                response, workload=workload, requested=self.config.max_tokens,
+                effective=effective, thinking_level=thinking_level,
+            )
 
-        return call_with_api_retries(request, call_name=call_name, validator=validator)
+        def validate_result(result: CompletionResult) -> CompletionResult:
+            try:
+                if validator is not None:
+                    validator(result.text)
+                elif not isinstance(result.text, str) or not result.text.strip():
+                    raise MalformedContentError(
+                        f"model response was empty ({result.diagnostic()})", content=result.text
+                    )
+            except MalformedContentError as error:
+                error.completion_result = result
+                if "workload=" not in str(error):
+                    error.args = (f"{error} ({result.diagnostic()})",)
+                raise
+            return result
+
+        return call_with_api_retries(
+            request, call_name=call_name, validator=validate_result
+        )

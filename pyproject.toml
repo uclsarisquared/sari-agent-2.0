@@ -15,6 +15,7 @@ dependencies = [
     # --- Agent runtime -----------------------------------------------------------
     "openai>=1.79.0",          # client for the OpenAI API compatible endpoint
     "google-auth>=2.40.0",     # ADC bearer refresh for Vertex's OpenAI-compatible endpoint
+    "jsonschema>=4.23.0",      # application-side validation for every structured completion
     "python-dotenv>=1.1.0",    # secrets.env. NB: not the `dotenv` package — see [tool.uv] note
     "tomli>=2.0.0",            # Python 3.10 TOML reader for runconfig.toml
     "loguru>=0.7.3",
