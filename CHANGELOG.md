@@ -2,6 +2,46 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-08-24)
+
+### Continuous Integration
+
+- Auto-fill GitHub release notes from commits
+  ([`2aba6db`](https://github.com/uclsarisquared/sari-agent-2.0/commit/2aba6dbd9f52df66ec448c644bee69acb91fda45))
+
+- Restore python-semantic-release commit-based release notes
+  ([`902da53`](https://github.com/uclsarisquared/sari-agent-2.0/commit/902da53f8add51311cd882d27ca3aea677d1c71a))
+
+- Skip GitHub release when no new version is published
+  ([`1816af1`](https://github.com/uclsarisquared/sari-agent-2.0/commit/1816af1971d2172df0db3e1db31da9f1f20ac084))
+
+### Documentation
+
+- Deprecate the moondream pointing path
+  ([`0129997`](https://github.com/uclsarisquared/sari-agent-2.0/commit/0129997bdf8f7aed13dd6677a0f4aea2f46315b3))
+
+- Note VLM bbox support is limited to Gemini and Qwen
+  ([`03f4131`](https://github.com/uclsarisquared/sari-agent-2.0/commit/03f4131b71e102c2e7a2cce3a70cac322325b712))
+
+### Features
+
+- Add thinking-aware token budgets and provider-aware structured completion
+  ([`c866dd4`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c866dd4930ced19e68ccb0765431226aa9598355))
+
+- **agent**: Preserve Gemini thought signature across actor history
+  ([`65e34c7`](https://github.com/uclsarisquared/sari-agent-2.0/commit/65e34c77e2bbb9fbf946d3f1285b6e66b36c4763))
+
+### Refactoring
+
+- Route runtime and mapping calls through structured completion
+  ([`48d0036`](https://github.com/uclsarisquared/sari-agent-2.0/commit/48d0036b5cb50d33b5dda9fde08a8c4cd02a7ee6))
+
+### Testing
+
+- Cover thinking-aware budgets, structured fallback, and signature retention
+  ([`6aed012`](https://github.com/uclsarisquared/sari-agent-2.0/commit/6aed012e0dd5fbef1c2127902b8ff4d105c6c3ca))
+
+
 ## v1.0.3 (2026-08-24)
 
 ### Bug Fixes
