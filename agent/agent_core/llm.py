@@ -630,12 +630,17 @@ def call_with_api_retries(
     *,
     call_name: str = "model_call",
     validator: Callable[[Any], Any] | None = None,
+    signal_malformed_content_exhaustion: bool = True,
 ):
     """Retry endpoint and malformed-content failures under one configured budget.
 
     ``validator`` runs before an attempt is considered successful and may return a transformed
     result. It must raise :class:`MalformedContentError` for retryable response-contract failures;
     ordinary exceptions remain programming errors and fail immediately.
+
+    ``signal_malformed_content_exhaustion`` may be disabled by callers that can surface an
+    exhausted response-contract failure as a recoverable tool result. Endpoint/transport failures
+    still signal the supervising runner so it can requeue an attempt whose API is unavailable.
     """
     max_attempts = api_max_attempts()
     for attempt in range(max_attempts):
@@ -653,7 +658,11 @@ def call_with_api_retries(
             failure_kind = api_failure_kind(error)
             remaining = max_attempts - (attempt + 1)
             if failure_kind is None or attempt + 1 == max_attempts:
-                if failure_kind is not None:
+                should_signal = failure_kind is not None and (
+                    failure_kind != "malformed_content"
+                    or signal_malformed_content_exhaustion
+                )
+                if should_signal:
                     _signal_api_retry_exhaustion(
                         error,
                         call_name=call_name,

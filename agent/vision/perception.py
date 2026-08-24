@@ -243,11 +243,38 @@ class BBoxResponseParseError(MalformedContentError):
     """The VLM replied, but its bbox payload was malformed or truncated."""
 
 
+_BBOX_NEGATIVE_PROSE_PATTERNS = (
+    # Common VLM refusal wrapper followed by a genuine visual negative, e.g. "The image provided
+    # does not contain any Ritz Crackers." Keep these patterns deliberately narrow: arbitrary prose
+    # is still malformed and retried rather than silently becoming evidence that the target is gone.
+    re.compile(
+        r"\b(?:the\s+)?image(?:\s+provided)?\s+(?:does\s+not|doesn't)\s+"
+        r"(?:contain|show|include|depict)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:the\s+)?(?:target|requested|specified)\s+(?:object|item)?\s*"
+        r"(?:is|was)\s+not\s+(?:visible|present|found|detected)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+(?:matching\s+)?(?:target|object|item)s?\s+"
+        r"(?:is|are|was|were)\s+(?:visible|present|found|detected)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _is_bbox_negative_prose(text):
+    """Return whether non-JSON prose unambiguously says the target is absent from the image."""
+    return any(pattern.search(text) for pattern in _BBOX_NEGATIVE_PROSE_PATTERNS)
+
+
 def _bbox_payload(content):
     """Parse a complete JSON/Python-literal bbox payload.
 
-    A valid ``[]`` is the only negative detection result. Invalid or truncated output raises so it
-    cannot be confused with "target not visible".
+    A valid ``[]`` or an unambiguous plain-language visual negative is a negative detection result.
+    Invalid or truncated output raises so it cannot be confused with "target not visible".
     """
     if not isinstance(content, str) or not content.strip():
         raise BBoxResponseParseError("empty VLM response")
@@ -263,6 +290,8 @@ def _bbox_payload(content):
         try:
             parsed = ast.literal_eval(text)
         except (ValueError, SyntaxError) as error:
+            if _is_bbox_negative_prose(text):
+                return []
             raise BBoxResponseParseError(
                 f"bbox payload is not complete valid JSON/literal: {error}"
             ) from error
@@ -333,7 +362,16 @@ def _bbox_request(image, target_info, prompt, max_tokens, temperature):
 
 def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):
     def request_and_parse():
-        content = _bbox_request(image, target_info, prompt, max_tokens, temperature)
+        try:
+            content = _bbox_request(image, target_info, prompt, max_tokens, temperature)
+        except MalformedContentError as error:
+            # Normalize request-level empty/truncated completions to the bbox-specific error that
+            # center_object_on_screen converts into a recoverable detection_error tool outcome.
+            raise BBoxResponseParseError(
+                str(error),
+                content=error.content,
+                completion_result=error.completion_result,
+            ) from error
         print(f"[DETECT OBJECT IN FRAME] Response: {content}")
         try:
             return [_bbox_dict_px(entry) for entry in _bbox_payload(content)]
@@ -342,13 +380,15 @@ def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):
 
     with token_meter.role(token_meter.ROLE_PERCEPTION):
         return call_with_api_retries(
-            request_and_parse, call_name="perception.bounding_boxes"
+            request_and_parse,
+            call_name="perception.bounding_boxes",
+            signal_malformed_content_exhaustion=False,
         )
 
 
 def _detect_bbox_px(image, target_info, temperature=0.0):
     """Detect ONE target box and return it in PIXELS as
-    {'xmin','ymin','xmax','ymax','cx','cy','label'}, or None only for a valid [] response.
+    {'xmin','ymin','xmax','ymax','cx','cy','label'}, or None for a negative detection response.
     Malformed/truncated responses are retried, then raise BBoxResponseParseError.
 
     temperature defaults to 0.0 on purpose: this is a LOCALISATION call, not a creative
@@ -364,7 +404,8 @@ def _detect_bbox_px(image, target_info, temperature=0.0):
 
 def _detect_boxes_px(image, target_info, temperature=0.0):
     """ALL matching instances as a list of box dicts (same shape as _detect_bbox_px's return);
-    [] only for a valid empty response. Malformed/truncated responses are retried, then raise
+    [] for a valid structured or plain-language negative response. Malformed/truncated responses
+    are retried, then raise
     BBoxResponseParseError. Lets the centring loop pick and TRACK one instance instead of taking whatever
     single box the model happens to return - the fix for the loop hopping between identical
     items on a dense shelf (measured 2026-07-21). temperature 0.0 for the same reason as

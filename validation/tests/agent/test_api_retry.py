@@ -156,3 +156,40 @@ def test_malformed_content_retries_inside_same_budget(monkeypatch):
     assert call_with_api_retries(
         lambda: next(outcomes), call_name="resolver", validator=validate
     ) == "valid"
+
+
+def test_recoverable_caller_can_suppress_malformed_exhaustion_signal(monkeypatch, tmp_path):
+    configure_api_retries(1)
+    signal_path = tmp_path / "api_retry_exhausted.json"
+    monkeypatch.setenv("SARI_API_RETRY_EXHAUSTED_PATH", str(signal_path))
+
+    def malformed():
+        raise MalformedContentError("invalid bbox JSON")
+
+    with pytest.raises(MalformedContentError):
+        call_with_api_retries(
+            malformed,
+            call_name="perception.bounding_boxes",
+            signal_malformed_content_exhaustion=False,
+        )
+
+    assert not signal_path.exists()
+
+
+def test_suppressing_malformed_signal_does_not_suppress_transport_signal(monkeypatch, tmp_path):
+    configure_api_retries(1)
+    signal_path = tmp_path / "api_retry_exhausted.json"
+    monkeypatch.setenv("SARI_API_RETRY_EXHAUSTED_PATH", str(signal_path))
+
+    def timeout():
+        raise TimeoutError("endpoint unavailable")
+
+    with pytest.raises(TimeoutError):
+        call_with_api_retries(
+            timeout,
+            call_name="perception.bounding_boxes",
+            signal_malformed_content_exhaustion=False,
+        )
+
+    signal = json.loads(signal_path.read_text(encoding="utf-8"))
+    assert signal["failure_kind"] == "timeout"

@@ -135,9 +135,11 @@ class GraphNavigator:
             )
             note = (
                 f"## ARRIVED VIA NAVIGATOR: checkpoint {end_checkpoint}{stopped}, facing a shelf "
-                f"holding {holds}. {info['summary'] or ''} If the target is not visible here, "
-                "choose *navigation* mode again and you will be taken to the next candidate "
-                "location.\n"
+                f"holding {holds}. {info['summary'] or ''} If the target is not immediately "
+                "visible, search this checkpoint before leaving: scan the shelf with pan/tilt "
+                "and, when useful, move a short distance left or right along its face. Only "
+                "choose *navigation* mode for the next candidate after checking the nearby shelf "
+                "area and still not finding the target. Do not spin or search indefinitely.\n"
             )
         return NavigationResult(note, fresh)
 

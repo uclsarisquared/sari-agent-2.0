@@ -12,7 +12,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from vision import perception as p
-from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, configure_api_retries
+from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, MalformedContentError, configure_api_retries
 
 
 def _png_bytes():
@@ -32,6 +32,56 @@ def test_valid_empty_bbox_is_a_real_negative_without_retry():
     with patch.object(p, "_bbox_request", request):
         assert p._detect_boxes_px(object(), "target") == []
     assert len(calls) == 1
+
+
+def test_plain_language_absence_is_a_real_negative_without_retry():
+    reply = (
+        "I am sorry, but I cannot fulfill this request. The image provided does not contain "
+        "any Ritz Crackers."
+    )
+    calls = []
+
+    def request(*args):
+        calls.append(args)
+        return reply
+
+    with patch.object(p, "_bbox_request", request):
+        assert p._detect_boxes_px(object(), "Ritz Crackers") == []
+    assert len(calls) == 1
+
+
+def test_unrelated_plain_language_response_remains_malformed():
+    configure_api_retries(2)
+    calls = []
+
+    def request(*args):
+        calls.append(args)
+        return "I am sorry, but I cannot fulfill this request."
+
+    with (patch.object(p, "_bbox_request", request),
+          patch("agent_core.llm.time.sleep", return_value=None)):
+        try:
+            p._detect_boxes_px(object(), "target")
+        except p.BBoxResponseParseError:
+            pass
+        else:
+            raise AssertionError("ambiguous prose was treated as a negative detection")
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
+    assert len(calls) == 2
+
+
+def test_empty_or_truncated_completion_is_normalized_to_bbox_parse_error():
+    configure_api_retries(1)
+    request_error = MalformedContentError("bounding-box response was empty or truncated")
+
+    with patch.object(p, "_bbox_request", side_effect=request_error):
+        try:
+            p._detect_boxes_px(object(), "target")
+        except p.BBoxResponseParseError as error:
+            assert "empty or truncated" in str(error)
+        else:
+            raise AssertionError("request-level malformed content escaped the bbox error contract")
+    configure_api_retries(DEFAULT_API_MAX_ATTEMPTS)
 
 
 def test_malformed_bbox_is_retried_then_succeeds():
