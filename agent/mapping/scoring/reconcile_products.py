@@ -42,7 +42,7 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from sim import sim_paths  # noqa: E402
-CATALOG_DIR = sim_paths.data_dir()   # $SARI_SANDBOX_DIR/Assets/Resources/Data (config.env)
+CATALOG_DIR = sim_paths.data_dir()   # $SARI_SANDBOX_DIR/Assets/Resources/Data (secrets.env)
 
 # Tokens that carry no identity: grammar, packaging, and the filler words annotators add.
 STOPWORDS = {"the", "a", "an", "in", "with", "of", "and", "flavored", "flavor", "pack",

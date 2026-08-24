@@ -141,7 +141,7 @@ def _tokens(text: str) -> list:
 # Two catalog sources, both LAZY + FAILURE-SILENT by design (a machine without them degrades to the
 # plain substring check, keeping this module sim-free and import-cheap):
 #   1. Categories.json - the full category->SKU index (all ~250 SKUs). Path comes from
-#      $SARI_SANDBOX_DIR (config.env; see sim.sim_paths) - there is no path to the separate sim repo
+#      $SARI_SANDBOX_DIR (secrets.env; see sim.sim_paths) - there is no path to the separate sim repo
 #      that works across machines, so it is read as a setting rather than hardcoded per-developer
 #      (the previous absolute broke on every machine but the one it was written on, silently, into
 #      this same failure-silent fallback - see agent/CLAUDE.md open thread on catalog grounding).

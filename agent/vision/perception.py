@@ -13,11 +13,11 @@ import ast
 import re
 import math
 from .ocr_client import OcrUnavailable, ocr_lines
-# Repo-root config.env (agent/vision/ -> repo root is three parents up), resolved from __file__
+# Repo-root secrets.env (agent/vision/ -> repo root is three parents up), resolved from __file__
 # so it loads regardless of CWD.
-load_dotenv(Path(__file__).resolve().parent.parent.parent / 'config.env')
+load_dotenv(Path(__file__).resolve().parent.parent.parent / 'secrets.env')
 
-# Agent runtime = the OpenAI-compatible endpoint from config.env (user directive 2026-07-19;
+# Agent runtime = the OpenAI-compatible endpoint from secrets.env (user directive 2026-07-19;
 # OpenRouter retired on 402). This is the bounding-box/centering client - the endpoint's VL model
 # replaces Gemini here, identically in BOTH A/B arms; bbox quality vs Gemini is unmeasured and
 # shared, so it cannot skew the arms.

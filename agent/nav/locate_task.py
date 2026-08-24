@@ -34,10 +34,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Repo-root config.env (agent/ -> repo root is two parents up), resolved from __file__ so the
+# Repo-root secrets.env (agent/ -> repo root is two parents up), resolved from __file__ so the
 # qwen backend's endpoint creds load when this is run standalone (agent.py loads its own copy when
 # it imports this module for graph-nav, so this is a harmless no-op in that path).
-load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent / "secrets.env")
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _AGENT_DIR = os.path.dirname(_THIS_DIR)  # agent/ — packages + mapping live under here
@@ -166,7 +166,7 @@ def endpoint_json(system, prompt, schema, image_paths=(), model=None, timeout=18
     guided_json before - the schema is stated in the prompt AND parsed defensively, never
     trusted to be enforced server-side. The endpoint requires a bearer key
     (verified 2026-07-19: /v1/models returns 401 without it) - $OPENAI_API_KEY, alongside
-    $OPENAI_API_URL in the repo-root config.env."""
+    $OPENAI_API_URL in the repo-root secrets.env."""
     from agent_core.llm import (
         ChatEndpoint,
         EndpointProfile,

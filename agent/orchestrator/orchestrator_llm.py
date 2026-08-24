@@ -12,13 +12,13 @@ from agent_core.context_policy import ContextPolicy
 from agent_core.prompt_loader import load_prompt
 from orchestrator.subtask_completion import TYPED_DECOMPOSER_SYSTEM, parse_decomposition
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent / "secrets.env")
 
 
 _ENDPOINT_PROFILE = EndpointProfile.from_env()
 ORCHESTRATOR_MODEL = _ENDPOINT_PROFILE.model
 
-# Every reasoner runs on the OpenAI API compatible endpoint from config.env (OpenRouter fully
+# Every reasoner runs on the OpenAI API compatible endpoint from secrets.env (OpenRouter fully
 # retired 2026-07-21). agent_vlm_config carries the load-bearing enable_thinking=False +
 # max_tokens cap - see agent.agent_vlm_config. Mirrors the pickup navigation evaluation. The
 # orchestrator LLM below (_llm_client) already targets the same endpoint.

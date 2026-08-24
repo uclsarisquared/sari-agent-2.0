@@ -14,7 +14,7 @@ from loguru import logger
 
 from reference import SYSTEM_INSTRUCTIONS_REF, BASE_SEMANTIC_MEMORY
 
-load_dotenv('config.env')
+load_dotenv('secrets.env')
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "tank"
 

@@ -7,7 +7,7 @@ checkpoint graph where each shelf node knows what products are on it, so an agen
 and pick up Pepero"* without a VLM ever doing spatial reasoning.
 
 The Unity project is a **separate repo** (e.g. `SariSandboxV2`) at a path that differs per machine —
-set `SARI_SANDBOX_DIR` in `config.env` to point at it (see `agent/sim/sim_paths.py`; catalog
+set `SARI_SANDBOX_DIR` in `secrets.env` to point at it (see `agent/sim/sim_paths.py`; catalog
 grounding and the offline scoring/reconciliation scripts under `mapping/scoring/` read it). It is
 the sim and the ground-truth product catalog; this repo is the agent/mapping side.
 
@@ -80,7 +80,7 @@ CWD-relative by `agent_core.agent`; run everything from `agent/`).
   runs against an **OpenAI API compatible endpoint** selected by `$LLM_PROVIDER` (`vllm` uses
   `$OPENAI_API_URL`/`$OPENAI_API_KEY`; `vertex` uses ADC and `$GOOGLE_CLOUD_PROJECT`).
 - **Model ids are config, not code.** `$OPENAI_MODEL` (and `$OPENAI_ANNOTATOR_MODEL` for the endpoint
-  annotator backend) in the repo-root `config.env` select what the endpoint is asked for; code
+  annotator backend) in the repo-root `secrets.env` select what the endpoint is asked for; code
   reads them via `agent_core/models.py`, which holds the ONLY hardcoded default in the tree
   (`Qwen/Qwen3.6-27B`, the measured baseline). Don't reintroduce model literals at call sites.
 - **Map quality bar:** a good `grid_final.png` has **no grey holes** in the store interior.

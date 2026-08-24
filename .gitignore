@@ -1,4 +1,4 @@
-config.env
+secrets.env
 qwen-config.env
 api.env
 .venv/

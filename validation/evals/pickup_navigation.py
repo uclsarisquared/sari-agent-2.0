@@ -247,7 +247,7 @@ def main():
         todo = [(args.task, kw)]
     else:
         todo = [TASKS[i] for i in args.tasks] if args.tasks else TASKS
-    # Agent runtime = the OpenAI-compatible endpoint from config.env
+    # Agent runtime = the OpenAI-compatible endpoint from secrets.env
     # (user directive 2026-07-19; OpenRouter retired on 402).
     agent = EmbodiedAgent(
         vlm_config=agent_vlm_config(temperature=0.5),

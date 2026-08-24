@@ -25,7 +25,7 @@ from agent_core.contracts import JSON_BLOCK_PATTERN
 from agent_core.models import agent_model
 
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent / "config.env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent / "secrets.env")
 
 
 @dataclass

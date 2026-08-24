@@ -74,7 +74,7 @@ print("=" * 100)
 from agent_core.llm import agent_vlm_config
 from agent_core.runtime import EmbodiedAgent
 
-# Agent runtime = the OpenAI API compatible endpoint from config.env
+# Agent runtime = the OpenAI API compatible endpoint from secrets.env
 # (user directive 2026-07-19; OpenRouter retired on 402).
 # The ANNOTATOR is unaffected: always `claude -p` sonnet/medium (see CLAUDE.md).
 vlm_config = agent_vlm_config(temperature=0.5)

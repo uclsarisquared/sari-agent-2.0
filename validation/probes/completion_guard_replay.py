@@ -33,7 +33,7 @@ from orchestrator.subtask_completion import completion_predicate
 from agent_core.models import agent_model
 from agent_core.llm import normalize_endpoint_root
 
-load_dotenv(_ROOT.parent / "config.env")
+load_dotenv(_ROOT.parent / "secrets.env")
 
 
 def _load_manifest(path):

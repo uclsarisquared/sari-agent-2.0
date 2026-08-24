@@ -35,7 +35,7 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
 # Reused verbatim so the batch path and the probe path share ONE set of measured server facts
 # (data-URI block shape, OPENAI_API_URL -> /v1, OPENAI_API_KEY bearer resolution). These
-# also trigger annotate_probe's module-level load_dotenv(repo-root config.env), so creds are present.
+# also trigger annotate_probe's module-level load_dotenv(repo-root secrets.env), so creds are present.
 from agent_core.llm import (  # noqa: E402
     ChatEndpoint, EndpointProfile, image_url_part, is_transient_api_error,
 )
@@ -45,7 +45,7 @@ from annotator_sys_inst import (  # noqa: E402
     build_annotation_instructions, schema_for, effective_kind,
 )
 
-DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in config.env
+DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in secrets.env
 DEFAULT_TIMEOUT_S = 300.0
 _MAX_TOKENS = 4096
 _RETRIES = 2

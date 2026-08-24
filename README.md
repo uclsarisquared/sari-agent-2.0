@@ -19,7 +19,7 @@ vision models for local perception, manipulation, and task reasoning. The Unity 
 
 ```bash
 uv sync
-cp config.env.example config.env
+cp secrets.env.example secrets.env
 ```
 
 The default `LLM_PROVIDER=vllm` uses `OPENAI_API_URL` (scheme, host, and port; for example
@@ -50,8 +50,8 @@ The simulator WebSocket defaults to `ws://localhost:8080/commands`; override `ws
 
 - `runconfig.toml` controls the shared API retry policy, agent, limits, map, outputs, and benchmark.
   CLI flags override it.
-- `config.env` holds credentials and machine-specific paths and is gitignored.
-- `config.env.example` documents every supported environment variable.
+- `secrets.env` holds credentials and machine-specific paths and is gitignored.
+- `secrets.env.example` documents every supported environment variable.
 - `--help` on the agent or `python -m sari_bench <command> --help` is the authoritative flag list.
 
 ## Distributed benchmark

@@ -31,7 +31,7 @@ navigation_strategy = "graph"
 context_policy = "baseline"
 
 # Backend VLM used to resolve a target to map checkpoints.
-#   "endpoint"   - the OpenAI-compatible endpoint from config.env, asked for $OPENAI_MODEL: the same
+#   "endpoint"   - the OpenAI-compatible endpoint from secrets.env, asked for $OPENAI_MODEL: the same
 #                  model every other reasoner in the run uses (decomposer, actor, memory, ...).
 #   "claude-cli" - a `claude -p` subprocess, independent of the endpoint and of $OPENAI_MODEL.
 # "qwen" is the old name for "endpoint": still accepted, warns on load, and will be removed.
@@ -137,8 +137,12 @@ completion_guard = "vlm"
 refusal_cap_action = "continue"
 
 [discord]
-# Settings for the dashboard watcher's Discord notifications (sari_bench/watch, started with
-# --discord; needs SARI_BENCH_DISCORD_WEBHOOK in config.env).
+# Settings for the dashboard watcher's Discord notifications (sari_bench/watch).
+#
+# enable turns on Discord notifications without needing the --discord CLI flag. The two are
+# OR'ed together, so either is enough. It requires SARI_BENCH_DISCORD_WEBHOOK to be set in
+# secrets.env; notifications are skipped if that key is missing.
+# enable = true
 #
 # Collapse alerts post a still frame when an in-flight attempt's health score crosses into
 # "possible collapse" (stalled progress, spatial loop, repeated identical action, refusal spiral,

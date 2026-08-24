@@ -586,7 +586,7 @@ def test_category_grounding_absent_degrades_to_substring():
 
 
 def test_category_real_catalog_if_present():
-    # Integration against the live Unity catalog (SARI_SANDBOX_DIR in config.env); a no-op (with a
+    # Integration against the live Unity catalog (SARI_SANDBOX_DIR in secrets.env); a no-op (with a
     # note) where the sim repo is absent. Checks _CATALOG_LOADED, NOT lexicon truthiness -
     # _CATEGORY_ALIASES always merges in 5 pseudo-categories, so the lexicon is truthy even with
     # zero sim repo access; that used to make this "skip if absent" guard never actually skip.

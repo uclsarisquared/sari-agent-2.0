@@ -9,7 +9,7 @@ summary carried forward between legs.
 
 - The Unity sim must be in **Play mode**.
 - The OpenAI API compatible endpoint must be reachable (credentials and `$OPENAI_MODEL` are loaded
-  from `config.env` at the repository root).
+  from `secrets.env` at the repository root).
 - Run from the `agent` directory:
 
 ```bash

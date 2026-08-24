@@ -78,6 +78,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "sandbox_command_timeout": (int, float),
     },
     "discord": {
+        "enable": bool,
         "collapse_alerts": bool,
     },
 }

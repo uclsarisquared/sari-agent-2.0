@@ -19,7 +19,7 @@ and the two most informative inputs are already on disk from the capture walk:
            Stage 1 exists for; ~40% of shelf checkpoints look like this.
 
 Endpoint: vLLM at <OPENAI_API_URL>/v1 or Vertex's /endpoints/openapi compatibility API.
-Model id comes from $OPENAI_ANNOTATOR_MODEL (falling back to $OPENAI_MODEL) in the repo-root config.env.
+Model id comes from $OPENAI_ANNOTATOR_MODEL (falling back to $OPENAI_MODEL) in the repo-root secrets.env.
 """
 import argparse
 import base64
@@ -32,11 +32,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Repo-root config.env (agent/mapping/annotate/ -> repo root is four parents up), resolved from
+# Repo-root secrets.env (agent/mapping/annotate/ -> repo root is four parents up), resolved from
 # __file__ so the endpoint creds load regardless of CWD - this module is the shared endpoint
 # resolver for the mapping tools (vlm_planner, explore_vlm import resolve_api_key/resolve_base_url
 # from here), and several of them are run standalone without agent.py's loader ever executing.
-load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / "config.env")
+load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / "secrets.env")
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/annotate
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -53,7 +53,7 @@ from agent_core.llm import (  # noqa: E402
     ChatEndpoint, EndpointProfile, image_url_part, normalize_endpoint_root,
 )
 
-DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in config.env
+DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in secrets.env
 
 
 def image_content_block(model, mime_type, base64_data):

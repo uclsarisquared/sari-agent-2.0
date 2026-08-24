@@ -1964,16 +1964,19 @@ def serve(argv: list[str] | None = None) -> int:
     _load_api_env()
 
     collapse_alerts = False
+    discord_enabled = args.discord
     if args.config.is_file():
         try:
             run_config = load_run_config(args.config)
         except RunConfigError as error:
             parser.error(str(error))
         collapse_alerts = bool(run_config.get("discord", "collapse_alerts", False))
+        discord_enabled = discord_enabled or bool(run_config.get("discord", "enable", False))
 
-    discord = notify.Discord(enabled=args.discord, collapse_alerts=collapse_alerts)
-    if args.discord and not discord.enabled:
-        _log(f"--discord given but {notify.WEBHOOK_ENV} is unset; notifications are OFF")
+    discord = notify.Discord(enabled=discord_enabled, collapse_alerts=collapse_alerts)
+    if discord_enabled and not discord.enabled:
+        _log(f"Discord enabled via --discord or [discord].enable but {notify.WEBHOOK_ENV} is unset; "
+             "notifications are OFF")
 
     replay = replay_mod.ReplayNotifier(
         discord,
@@ -2032,12 +2035,12 @@ def serve(argv: list[str] | None = None) -> int:
 
 
 def _load_api_env() -> None:
-    """Loads config.env from the repo root, the same file every other module reads."""
+    """Loads secrets.env from the repo root, the same file every other module reads."""
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
-    env_path = REPO_ROOT / "config.env"
+    env_path = REPO_ROOT / "secrets.env"
     if env_path.exists():
         load_dotenv(env_path)
 

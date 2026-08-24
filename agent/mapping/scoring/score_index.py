@@ -33,8 +33,8 @@ if _MAPPING_DIR not in sys.path:
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from sim import sim_paths  # noqa: E402
 
-CATALOG_DIR = sim_paths.data_dir()          # $SARI_SANDBOX_DIR/Assets/Resources/Data (config.env)
-STORE_JSON = sim_paths.store_save_json()    # $SARI_STORE_SAVE_JSON (config.env)
+CATALOG_DIR = sim_paths.data_dir()          # $SARI_SANDBOX_DIR/Assets/Resources/Data (secrets.env)
+STORE_JSON = sim_paths.store_save_json()    # $SARI_STORE_SAVE_JSON (secrets.env)
 
 # Fridge shelves span (x_min, x_max) at z=6.0, face at z ~= 5.5; a checkpoint "faces" one if
 # its x lies within the span +- slack and it sits on the approach line z ~= 4.55.

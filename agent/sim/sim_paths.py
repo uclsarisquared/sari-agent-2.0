@@ -1,8 +1,8 @@
 """Resolves paths into the Unity sim repo — a SEPARATE repo from this one (see agent/CLAUDE.md).
 No single filesystem path works across machines: every prior hardcode here named one specific
 person's disk layout (``C:\\Sari\\SariSandboxMY\\SariSandboxV2``, ``C:\\Users\\Tristan
-Baclor\\AppData\\...``) and broke on everyone else's. Set these in config.env instead of editing
-code — see config.env.example for the full field docs.
+Baclor\\AppData\\...``) and broke on everyone else's. Set these in secrets.env instead of editing
+code — see secrets.env.example for the full field docs.
 """
 import os
 
@@ -17,7 +17,7 @@ def sandbox_dir(required=True):
     if not root and required:
         raise RuntimeError(
             "SARI_SANDBOX_DIR is not set. Point it at your Unity sim repo root (the folder "
-            "containing Assets/Resources/Data/Categories.json) in config.env."
+            "containing Assets/Resources/Data/Categories.json) in secrets.env."
         )
     return root
 
@@ -45,6 +45,6 @@ def store_save_json():
         raise RuntimeError(
             "SARI_STORE_SAVE_JSON is not set. Point it at the Unity save file (under Unity's "
             "persistentDataPath, e.g. '.../AppData/LocalLow/Sari Sandbox/Sari Sandbox V2/"
-            "Store 2 v2.json') in config.env."
+            "Store 2 v2.json') in secrets.env."
         )
     return path
