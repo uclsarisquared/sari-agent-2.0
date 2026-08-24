@@ -94,13 +94,20 @@ class VLMAgent(BaseAgent):
 
         try:
             with token_meter.role(token_meter.ROLE_ACTOR):
-                reply = self._api_call_with_retry(
+                completion = self._api_call_result_with_retry(
                     self.client, messages, call_name="actor_reasoning", validator=validate
                 )
+                reply = completion.text or ""
+                assistant_message = completion.assistant_message
         except MalformedContentError as error:
             # Preserve the existing actor-step error path after the shared budget is exhausted.
             reply = str(error.content or "")
-        self.history.append({"role": "assistant", "content": reply})
+            completion = error.completion_result
+            assistant_message = (
+                completion.assistant_message if completion is not None
+                else {"role": "assistant", "content": reply}
+            )
+        self.history.append(assistant_message)
         return reply
 
     def _outbound_history(self) -> list[dict[str, Any]]:
