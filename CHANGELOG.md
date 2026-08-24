@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-08-24)
+
+### Bug Fixes
+
+- **agent**: Branch bbox coord order on Vertex backend
+  ([`4946302`](https://github.com/uclsarisquared/sari-agent-2.0/commit/4946302b6587e5c30aa3cda2738477fda1d66144))
+
+- **agent**: Support Pro-tier Vertex thinking levels
+  ([`51532f3`](https://github.com/uclsarisquared/sari-agent-2.0/commit/51532f309ee8cb9eacd762b4d69ab61a22290012))
+
+
 ## v1.0.1 (2026-08-24)
 
 ### Bug Fixes
