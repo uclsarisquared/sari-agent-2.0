@@ -34,6 +34,34 @@ def test_vertex_profile_builds_exact_openapi_url(monkeypatch):
     assert profile.extra_body["google"]["thinking_config"]["thinking_level"] == "MINIMAL"
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("google/gemini-3.1-flash-lite", "MINIMAL"),
+        ("google/gemini-3.5-flash", "MINIMAL"),
+        ("gemini-3.6-flash", "MINIMAL"),
+        ("google/gemini-3.7-flash", "LOW"),
+        ("gemini-3.10-flash-preview", "LOW"),
+        ("gemini-3.7-flash-video-understanding-eap", "LOW"),
+        ("gemini-flash-latest", "LOW"),
+        ("gemini-3.5-flash-lite", "MINIMAL"),
+        ("publishers/google/models/gemini-3.7-flash", "LOW"),
+        ("google/gemini-3.1-pro-preview", "LOW"),
+        ("gemini-3-pro-preview", "LOW"),
+        ("gemini-3-pro-image", "HIGH"),
+        ("publishers/google/models/gemini-3.1-pro-preview", "LOW"),
+    ],
+)
+def test_vertex_thinking_level_follows_model(monkeypatch, model, expected):
+    monkeypatch.delenv("VERTEX_THINKING_LEVEL", raising=False)
+    assert llm.vertex_thinking_level(model) == expected
+
+
+def test_vertex_thinking_level_env_overrides(monkeypatch):
+    monkeypatch.setenv("VERTEX_THINKING_LEVEL", "high")
+    assert llm.vertex_thinking_level("google/gemini-3.1-flash-lite") == "HIGH"
+
+
 @pytest.mark.parametrize("provider", ["unknown", "gemini"])
 def test_unknown_provider_is_actionable(monkeypatch, provider):
     monkeypatch.setenv("LLM_PROVIDER", provider)

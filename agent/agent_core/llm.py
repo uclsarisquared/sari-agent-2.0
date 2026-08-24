@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import base64
+import re
 from dataclasses import dataclass, field
 from io import BytesIO
 import json
@@ -45,6 +46,38 @@ OpenRouterConfig = LLMConfig
 
 VERTEX_MODEL = "google/gemini-3.1-flash-lite"
 VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+_FLASH_RE = re.compile(r"gemini-(\d+)(?:\.(\d+))?-flash(?!-lite)")
+_PRO_RE = re.compile(r"gemini-(\d+)(?:\.(\d+))?-pro")
+
+
+def vertex_thinking_level(model: str) -> str:
+    """Pick the lowest thinking level the model accepts.
+
+    Full-Flash >= 3.7 (and the ``gemini-flash-latest`` alias) dropped the MINIMAL
+    tier and return 400 "Thinking level is unsupported: THINKING_LEVEL_MINIMAL";
+    their floor is LOW. Measured on models where MINIMAL exists it returns ~8x
+    fewer output tokens than LOW, so it stays the default elsewhere.
+
+    Pro-tier models (measured: gemini-3.1-pro-preview 400s the same way) can't
+    disable thinking at all - per Google's model-reference table, every Pro
+    variant rejects MINIMAL, and only the Image variant is HIGH-only (LOW/MEDIUM
+    both rejected there too); every other Pro variant accepts LOW.
+
+    VERTEX_THINKING_LEVEL overrides for any model this heuristic misjudges.
+    """
+    override = (os.getenv("VERTEX_THINKING_LEVEL") or "").strip().upper()
+    if override:
+        return override
+    normalized = model.rsplit("/", 1)[-1].lower()
+    if normalized == "gemini-flash-latest":
+        return "LOW"
+    if _PRO_RE.search(normalized):
+        return "HIGH" if "image" in normalized else "LOW"
+    match = _FLASH_RE.search(normalized)
+    if match and (int(match.group(1)), int(match.group(2) or 0)) >= (3, 7):
+        return "LOW"
+    return "MINIMAL"
 
 
 class EndpointConfigurationError(RuntimeError):
@@ -148,10 +181,12 @@ class EndpointProfile:
                     else f"{location}-aiplatform.googleapis.com")
             url = (f"https://{host}/v1/projects/{project}/locations/{location}"
                    "/endpoints/openapi")
+            selected_model = model or os.getenv("OPENAI_MODEL") or VERTEX_MODEL
             return cls(
                 provider="vertex", base_url=url, api_key=ADCBearerToken(),
-                model=model or os.getenv("OPENAI_MODEL") or VERTEX_MODEL,
-                extra_body={"google": {"thinking_config": {"thinking_level": "MINIMAL"}}},
+                model=selected_model,
+                extra_body={"google": {"thinking_config": {
+                    "thinking_level": vertex_thinking_level(selected_model)}}},
             )
         raise EndpointConfigurationError(
             f"Unknown LLM_PROVIDER={selected!r}; expected 'vllm' or 'vertex'."
