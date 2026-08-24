@@ -96,30 +96,23 @@ def test_decomposer_retries_malformed_content_before_using_contract_parser():
 
 
 def test_resolver_retries_malformed_schema_response(monkeypatch):
-    bodies = iter([
-        {"choices": [{"message": {"content": '{"target_name": "chips"}'}}]},
-        {"choices": [{"message": {"content": (
+    client = _Client([
+        '{"target_name": "chips"}',
+        (
             '{"target_name":"chips","target_appearance":"bag","candidates":[1],'
             '"tier":"name","reasoning":"index match"}'
-        )}}]},
+        ),
     ])
-
-    calls = []
-
-    def create(*_args, **_kwargs):
-        calls.append(1)
-        body = next(bodies)
-        content = body["choices"][0]["message"]["content"]
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-            model_dump=lambda **_kwargs: body,
-        )
-
-    monkeypatch.setattr("agent_core.llm.ChatEndpoint.create", create)
+    monkeypatch.setattr(
+        "agent_core.llm.ChatEndpoint.__init__",
+        lambda self, profile, timeout=180.0: (
+            setattr(self, "profile", profile), setattr(self, "client", client)
+        )[-1],
+    )
     result, _body = endpoint_json(
         "system", "prompt", RESOLVE_SCHEMA,
         base_url="http://127.0.0.1:8000", api_key="test",
     )
 
     assert result["candidates"] == [1]
-    assert len(calls) == 2
+    assert client.completions.calls == 2

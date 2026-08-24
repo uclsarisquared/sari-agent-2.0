@@ -173,9 +173,10 @@ def test_inspection_without_evidence_keeps_the_single_image_request_shape():
         client, "m", CONFIG, "current-frame", "How many?", "Three.", {},
         evidence_frames=[{"label": "no frame captured", "image_b64": ""}])
     content = client.completions.calls[0]["messages"][1]["content"]
-    assert len(content) == 2
+    assert len(content) == 3
     assert content[0]["image_url"]["url"].endswith("current-frame")
     assert "How many?" in content[1]["text"]
+    assert "additionalProperties" in content[2]["text"]
 
 
 def test_inspect_guard_replays_its_bound_evidence_frames_on_every_call():
