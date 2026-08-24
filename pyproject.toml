@@ -59,6 +59,18 @@ dependencies = [
 # try to build and install the project itself and fail (no package layout).
 package = false
 
+[tool.semantic_release]
+# Version is derived from conventional commits since the last tag (see AGENTS.md).
+# package = false above means there is nothing to build — we only bump + tag, never build a wheel.
+build_command = ""
+commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "v{version}"
+version_toml = ["pyproject.toml:project.version"]
+
+[tool.semantic_release.branches.main]
+match = "main"
+
 [tool.pytest.ini_options]
 testpaths = ["validation/tests"]
 pythonpath = [".", "agent", "agent/mapping"]
@@ -71,6 +83,7 @@ pythonpath = [".", "agent", "agent/mapping"]
 dev = [
     "poethepoet>=0.37.0",
     "pytest>=8.3",
+    "python-semantic-release>=9.0.0",
 ]
 
 [tool.poe.tasks]
