@@ -18,6 +18,29 @@ def test_leg_artifacts_write_timestamped_json_without_mutating_input(tmp_path):
     assert record == {"event": "step", "step": 1}
 
 
+def test_leg_artifacts_never_serialize_binary_primitive_or_debug_payloads(tmp_path):
+    log_path = tmp_path / "leg.jsonl"
+    record = {
+        "event": "inspection",
+        "frame_b64": "A" * 2_000_000,
+        "steps": [{"action": "rotate"}],
+        "debug_payload": {"raw": "B" * 2_000_000},
+        "inspection": {"label_legible": True},
+    }
+
+    with leg_artifacts.LegArtifacts(log_path) as artifacts:
+        artifacts.log(record)
+
+    text = log_path.read_text(encoding="utf-8")
+    row = json.loads(text)
+    assert len(text) < 1_000
+    assert "frame_b64" not in row
+    assert "steps" not in row
+    assert "debug_payload" not in row
+    assert row["inspection"] == {"label_legible": True}
+    assert record["frame_b64"].startswith("AAAA")
+
+
 def test_leg_artifacts_close_the_log_when_execution_raises(tmp_path):
     artifacts = leg_artifacts.LegArtifacts(tmp_path / "leg.jsonl")
 

@@ -5,6 +5,7 @@ import os
 import time
 
 from sim.env import downscale_for_storage_jpeg
+from agent_core.artifact_sanitize import semantic_artifact_view
 
 
 def write_step_output(out_dir, step, response, stamp=""):
@@ -61,7 +62,9 @@ class LegArtifacts:
             raise ValueError("leg log records require a non-empty 'event' field")
         if not self._log_fh:
             return
-        row = {**record, "wall": round(time.time() - self.started_at, 1)}
+        row = semantic_artifact_view(
+            {**record, "wall": round(time.time() - self.started_at, 1)}
+        )
         self._log_fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         self._log_fh.flush()
 

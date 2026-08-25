@@ -347,6 +347,43 @@ def test_a4_findings_prompt_caps_the_retained_handoff(monkeypatch) -> None:
     assert "concise factual handoff" in captured["system"]
 
 
+def test_findings_input_drops_artifacts_and_keeps_newest_semantic_tail(monkeypatch) -> None:
+    from orchestrator import orchestrator_llm
+
+    captured: dict[str, str] = {}
+
+    def fake_call(_client, _system, user, _role):
+        captured["user"] = user
+        return "baseline output remains uncapped"
+
+    monkeypatch.setattr(orchestrator_llm, "_llm_call", fake_call)
+    old = "OLDEST-MARKER\n" + ("middle semantic detail\n" * 20_000)
+    newest = "NEWEST-SEMANTIC-ENTRY"
+    result = orchestrator_llm.generate_findings_summary(
+        object(),
+        "inspect held item",
+        {
+            "location": "checkout",
+            "last_inspection": {
+                "frame_b64": "A" * 2_000_000,
+                "steps": [{"primitive": "rotate", "debug_payload": "B" * 2_000_000}],
+                "label_legible": True,
+            },
+            "debug_payload": "C" * 2_000_000,
+        },
+        old + newest,
+    )
+
+    assert result == "baseline output remains uncapped"
+    assert len(captured["user"]) <= orchestrator_llm.FINDINGS_INPUT_MAX_CHARS
+    assert newest in captured["user"]
+    assert "OLDEST-MARKER" not in captured["user"]
+    assert "frame_b64" not in captured["user"]
+    assert "debug_payload" not in captured["user"]
+    assert '"steps"' not in captured["user"]
+    assert '"label_legible": true' in captured["user"]
+
+
 def test_a3_does_not_make_a_findings_call(monkeypatch) -> None:
     from orchestrator import orchestrator_llm
 

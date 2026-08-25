@@ -12,6 +12,7 @@ from agent_core.llm import (
     effective_max_tokens,
 )
 from agent_core.context_policy import ContextPolicy
+from agent_core.artifact_sanitize import semantic_artifact_view
 from agent_core.prompt_loader import load_prompt
 from orchestrator.subtask_completion import TYPED_DECOMPOSER_SYSTEM, parse_decomposition
 
@@ -27,6 +28,9 @@ ORCHESTRATOR_MODEL = _ENDPOINT_PROFILE.model
 # orchestrator LLM below (_llm_client) already targets the same endpoint.
 VLM_CONFIG = agent_vlm_config(temperature=0.5)
 ASSOCIATIVE_CONFIG = agent_vlm_config(temperature=0.3)
+
+FINDINGS_INPUT_MAX_CHARS = 200_000
+FINDINGS_STATE_MAX_CHARS = 40_000
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +135,21 @@ def generate_findings_summary(
         system = load_prompt("orchestrator/findings_full")
     else:
         system = load_prompt("orchestrator/findings_compact")
-    user = (
-        f"Completed subtask: {completed_subtask}\n\n"
-        f"Final agent state:\n{json.dumps(final_state, indent=2, default=str)}\n\n"
-        f"New semantic memory entries learned during this subtask:\n{new_semantic_entries}"
+    # Findings are a semantic handoff, not an artifact transport. Inspection frames and primitive
+    # traces can be multi-megabyte and are already persisted separately; state gets a fixed share,
+    # while semantic memory keeps its newest tail because later entries supersede older beliefs.
+    task_text = str(completed_subtask)[:4_000]
+    state_text = json.dumps(
+        semantic_artifact_view(final_state), indent=2, default=str, ensure_ascii=False,
+    )[:FINDINGS_STATE_MAX_CHARS]
+    prefix = (
+        f"Completed subtask: {task_text}\n\n"
+        f"Final agent state:\n{state_text}\n\n"
+        "New semantic memory entries learned during this subtask:\n"
     )
+    semantic_budget = max(0, FINDINGS_INPUT_MAX_CHARS - len(prefix))
+    semantic_text = str(new_semantic_entries or "")[-semantic_budget:]
+    user = prefix + semantic_text
     findings = _llm_call(client, system, user, token_meter.ROLE_FINDINGS)
     if context_policy.findings_max_chars is not None:
         findings = findings[: context_policy.findings_max_chars]
