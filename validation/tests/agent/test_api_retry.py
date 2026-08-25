@@ -14,7 +14,9 @@ if _ROOT not in sys.path:
 from agent_core.agent import BaseAgent, OpenRouterConfig
 from agent_core.llm import (
     DEFAULT_API_MAX_ATTEMPTS,
+    EndpointConfigurationError,
     MalformedContentError,
+    api_failure_kind,
     agent_vlm_config,
     call_with_api_retries,
     configure_api_retries,
@@ -55,6 +57,7 @@ class _Agent(BaseAgent):
 
 
 def test_endpoint_url_owns_port_and_clients_append_only_v1(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "vllm")
     monkeypatch.setenv("OPENAI_API_URL", "endpoint.example:9123")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
@@ -193,3 +196,29 @@ def test_suppressing_malformed_signal_does_not_suppress_transport_signal(monkeyp
 
     signal = json.loads(signal_path.read_text(encoding="utf-8"))
     assert signal["failure_kind"] == "timeout"
+
+
+def test_nested_refresh_timeout_is_retryable_and_signals_cause(monkeypatch, tmp_path):
+    configure_api_retries(1)
+    signal_path = tmp_path / "api_retry_exhausted.json"
+    monkeypatch.setenv("SARI_API_RETRY_EXHAUSTED_PATH", str(signal_path))
+
+    def refresh_failure():
+        try:
+            raise TimeoutError("metadata server timed out")
+        except TimeoutError as cause:
+            raise EndpointConfigurationError("ADC refresh failed") from cause
+
+    with pytest.raises(EndpointConfigurationError):
+        call_with_api_retries(refresh_failure, call_name="vertex.auth")
+
+    signal = json.loads(signal_path.read_text(encoding="utf-8"))
+    assert signal["failure_kind"] == "timeout"
+    assert signal["error"] == "ADC refresh failed"
+    assert signal["cause_type"] == "TimeoutError"
+    assert signal["cause"] == "metadata server timed out"
+
+
+def test_permanent_credential_error_remains_non_retryable():
+    error = EndpointConfigurationError("credential file is invalid")
+    assert api_failure_kind(error) is None

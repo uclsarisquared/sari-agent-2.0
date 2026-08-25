@@ -23,7 +23,7 @@ def test_vertex_profile_builds_exact_openapi_url(monkeypatch):
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     token = object()
-    monkeypatch.setattr(llm, "ADCBearerToken", lambda: token)
+    monkeypatch.setattr(llm, "_adc_bearer_token", token)
     profile = llm.EndpointProfile.from_env()
     assert profile.base_url == (
         "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/"
@@ -110,3 +110,81 @@ def test_adc_refresh_failure_is_actionable():
     provider = llm.ADCBearerToken(BrokenCredentials(), object())
     with pytest.raises(llm.EndpointConfigurationError, match="refresh Vertex"):
         provider()
+
+
+def test_adc_proactive_refresh_failure_uses_valid_token_during_cooldown(monkeypatch):
+    class Credentials:
+        token = "still-valid"
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=30)
+        refreshes = 0
+
+        def refresh(self, _request):
+            self.refreshes += 1
+            raise TimeoutError("metadata timeout")
+
+    now = [100.0]
+    monkeypatch.setattr(llm.time, "monotonic", lambda: now[0])
+    credentials = Credentials()
+    provider = llm.ADCBearerToken(credentials, object())
+    assert provider() == "still-valid"
+    assert provider() == "still-valid"
+    assert credentials.refreshes == 1
+    now[0] += 61
+    assert provider() == "still-valid"
+    assert credentials.refreshes == 2
+
+
+def test_adc_refresh_recovers_after_proactive_failure(monkeypatch):
+    class Credentials:
+        token = "old"
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=30)
+        refreshes = 0
+
+        def refresh(self, _request):
+            self.refreshes += 1
+            if self.refreshes == 1:
+                raise TimeoutError("metadata timeout")
+            self.token = "new"
+            self.expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    now = [100.0]
+    monkeypatch.setattr(llm.time, "monotonic", lambda: now[0])
+    provider = llm.ADCBearerToken(Credentials(), object())
+    assert provider() == "old"
+    now[0] += 61
+    assert provider() == "new"
+
+
+def test_adc_expired_token_does_not_hide_refresh_failure():
+    class Credentials:
+        token = "expired"
+        expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+        def refresh(self, _request):
+            raise TimeoutError("metadata timeout")
+
+    provider = llm.ADCBearerToken(Credentials(), object())
+    with pytest.raises(llm.EndpointConfigurationError) as raised:
+        provider()
+    assert isinstance(raised.value.__cause__, TimeoutError)
+
+
+def test_adc_refresh_request_has_twenty_second_timeout():
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    llm._BoundedGoogleAuthRequest(request)("url", timeout=999)
+    assert calls[0][1]["timeout"] == 20
+
+
+def test_adc_provider_is_process_wide(monkeypatch):
+    created = []
+    token = object()
+    monkeypatch.setattr(llm, "_adc_bearer_token", None)
+    monkeypatch.setattr(llm, "ADCBearerToken", lambda: created.append(token) or token)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        providers = list(pool.map(lambda _: llm.shared_adc_bearer_token(), range(20)))
+    assert all(provider is token for provider in providers)
+    assert created == [token]

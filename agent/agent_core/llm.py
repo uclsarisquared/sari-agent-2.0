@@ -50,6 +50,8 @@ OpenRouterConfig = LLMConfig
 
 VERTEX_MODEL = "google/gemini-3.1-flash-lite"
 VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+VERTEX_REFRESH_TIMEOUT_S = 20
+VERTEX_REFRESH_COOLDOWN_S = 60
 
 _FLASH_RE = re.compile(r"gemini-(\d+)(?:\.(\d+))?-flash(?!-lite)")
 _PRO_RE = re.compile(r"gemini-(\d+)(?:\.(\d+))?-pro")
@@ -145,13 +147,16 @@ def effective_max_tokens(
 class ADCBearerToken:
     """Thread-safe callable bearer token for the OpenAI client's ``api_key`` hook."""
 
-    def __init__(self, credentials=None, request=None, *, refresh_margin_s: int = 300):
+    def __init__(
+        self, credentials=None, request=None, *, refresh_margin_s: int = 300,
+        refresh_cooldown_s: int = VERTEX_REFRESH_COOLDOWN_S,
+    ):
         if credentials is None:
             try:
                 import google.auth
                 from google.auth.transport.requests import Request
                 credentials, _ = google.auth.default(scopes=[VERTEX_SCOPE])
-                request = request or Request()
+                request = request or _BoundedGoogleAuthRequest(Request())
             except Exception as error:  # noqa: BLE001
                 raise EndpointConfigurationError(
                     "Vertex authentication failed. Configure Application Default Credentials "
@@ -160,6 +165,8 @@ class ADCBearerToken:
         self._credentials = credentials
         self._request = request
         self._refresh_margin_s = refresh_margin_s
+        self._refresh_cooldown_s = refresh_cooldown_s
+        self._refresh_retry_at = 0.0
         self._lock = threading.Lock()
 
     def _needs_refresh(self) -> bool:
@@ -173,20 +180,67 @@ class ADCBearerToken:
             expiry = expiry.replace(tzinfo=timezone.utc)
         return expiry <= datetime.now(timezone.utc) + timedelta(seconds=self._refresh_margin_s)
 
+    def _token_is_valid(self) -> bool:
+        from datetime import datetime, timezone
+        if not getattr(self._credentials, "token", None):
+            return False
+        expiry = getattr(self._credentials, "expiry", None)
+        if expiry is None:
+            return True
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry > datetime.now(timezone.utc)
+
     def __call__(self) -> str:
         if self._needs_refresh():
             with self._lock:
                 if self._needs_refresh():
+                    if self._token_is_valid() and time.monotonic() < self._refresh_retry_at:
+                        return self._credentials.token
                     try:
                         self._credentials.refresh(self._request)
                     except Exception as error:  # noqa: BLE001
+                        if self._token_is_valid():
+                            self._refresh_retry_at = time.monotonic() + self._refresh_cooldown_s
+                            logger.warning(
+                                "Vertex token refresh failed; using the still-valid token and "
+                                f"retrying refresh after {self._refresh_cooldown_s}s "
+                                f"({type(error).__name__}: {error})"
+                            )
+                            return self._credentials.token
                         raise EndpointConfigurationError(
                             "Could not refresh Vertex Application Default Credentials."
                         ) from error
+                    self._refresh_retry_at = 0.0
         token = getattr(self._credentials, "token", None)
         if not token:
             raise EndpointConfigurationError("Vertex credentials refreshed without an access token.")
         return token
+
+
+class _BoundedGoogleAuthRequest:
+    """Force google-auth refresh traffic to use the authentication timeout budget."""
+
+    def __init__(self, request):
+        self._request = request
+
+    def __call__(self, *args, **kwargs):
+        kwargs["timeout"] = VERTEX_REFRESH_TIMEOUT_S
+        return self._request(*args, **kwargs)
+
+
+_adc_bearer_token: ADCBearerToken | None = None
+_adc_bearer_lock = threading.Lock()
+
+
+def shared_adc_bearer_token() -> ADCBearerToken:
+    """Return the one ADC credential/token provider shared by this process."""
+    global _adc_bearer_token
+    if _adc_bearer_token is None:
+        with _adc_bearer_lock:
+            if _adc_bearer_token is None:
+                _adc_bearer_token = ADCBearerToken()
+    return _adc_bearer_token
 
 
 @dataclass(frozen=True)
@@ -246,7 +300,7 @@ class EndpointProfile:
                    "/endpoints/openapi")
             selected_model = model or os.getenv("OPENAI_MODEL") or VERTEX_MODEL
             return cls(
-                provider="vertex", base_url=url, api_key=ADCBearerToken(),
+                provider="vertex", base_url=url, api_key=shared_adc_bearer_token(),
                 model=selected_model,
                 extra_body={"google": {"thinking_config": {
                     "thinking_level": vertex_thinking_level(selected_model)}}},
@@ -562,12 +616,15 @@ def _signal_api_retry_exhaustion(
     temporary = signal_path.with_name(
         f".{signal_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     )
+    cause = _transient_error_in_chain(error)
     payload = {
         "attempts": attempts,
         "call_name": call_name,
         "failure_kind": failure_kind,
         "error_type": type(error).__name__,
         "error": str(error),
+        "cause_type": type(cause).__name__,
+        "cause": str(cause),
         "signaled_at": time.time(),
     }
     try:
@@ -578,32 +635,17 @@ def _signal_api_retry_exhaustion(
         logger.error(f"[api-retry] could not write exhaustion signal: {signal_error}")
 
 
-def is_transient_api_error(error: Exception) -> bool:
-    if isinstance(
-        error,
-        (
-            APIConnectionError,
-            RateLimitError,
-            RequestsConnectionError,
-            RequestsTimeout,
-            TimeoutError,
-            ConnectionError,
-        ),
-    ):
-        return True
-    if isinstance(error, APIStatusError):
-        return error.status_code in (408, 409, 429) or error.status_code >= 500
-    # Raw requests callers raise HTTPError, whose status lives on its response rather than the
-    # exception. Keep this structural so the shared retry helper is not tied to one HTTP client.
-    response = getattr(error, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int):
-        return status_code in (408, 409, 429) or status_code >= 500
-    return False
+def _exception_chain(error: Exception):
+    """Yield an exception and its explicit/implicit causes without looping."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
-def api_failure_kind(error: Exception) -> str | None:
-    """Normalize retryable failures for logs and Bench exhaustion diagnostics."""
+def _direct_api_failure_kind(error: BaseException) -> str | None:
     if isinstance(error, MalformedContentError):
         return "malformed_content"
     if isinstance(error, (APITimeoutError, RequestsTimeout, TimeoutError)):
@@ -623,6 +665,27 @@ def api_failure_kind(error: Exception) -> str | None:
     ):
         return "rate_limit" if status_code == 429 else "http_status"
     return None
+
+
+def _transient_error_in_chain(error: Exception) -> BaseException:
+    return next(
+        (candidate for candidate in _exception_chain(error)
+         if _direct_api_failure_kind(candidate) is not None),
+        error,
+    )
+
+
+def is_transient_api_error(error: Exception) -> bool:
+    return any(_direct_api_failure_kind(candidate) for candidate in _exception_chain(error))
+
+
+def api_failure_kind(error: Exception) -> str | None:
+    """Normalize retryable failures for logs and Bench exhaustion diagnostics."""
+    return next(
+        (kind for candidate in _exception_chain(error)
+         if (kind := _direct_api_failure_kind(candidate)) is not None),
+        None,
+    )
 
 
 def call_with_api_retries(
