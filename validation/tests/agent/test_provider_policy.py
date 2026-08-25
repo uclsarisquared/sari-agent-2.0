@@ -186,18 +186,24 @@ def test_vertex_transient_and_quota_retries_do_not_enter_fallback(monkeypatch):
         llm.configure_api_retries(previous)
 
 
-def test_vertex_malformed_fallback_candidate_ends_logical_call():
+def test_vertex_malformed_fallback_candidate_retries_without_repair(monkeypatch):
+    previous = llm.api_max_attempts()
+    llm.configure_api_retries(2)
+    monkeypatch.setattr(llm.time, "sleep", lambda _delay: None)
     client = _client(
         _Response("bad native"), _Response("bad fallback"),
         _Response('{"answer":"must not be consumed"}'),
     )
-    with pytest.raises(llm.MalformedContentError, match="prompt_fallback"):
-        llm.structured_chat_completion(
+    try:
+        result = llm.structured_chat_completion(
             client=client, provider="vertex", thinking_level="LOW", default_extra_body={},
             messages=[{"role": "user", "content": "answer"}], schema=SCHEMA,
             schema_name="answer", model="gemini",
         )
-    assert len(client.completions.calls) == 2
+    finally:
+        llm.configure_api_retries(previous)
+    assert result.value == {"answer": "must not be consumed"}
+    assert len(client.completions.calls) == 3
 
 
 def test_invalid_and_recursive_schemas_fail_before_transport():

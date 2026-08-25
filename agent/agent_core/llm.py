@@ -869,7 +869,7 @@ def structured_chat_completion(
     schema: dict[str, Any], schema_name: str, model: str, temperature: float = 0.0,
     max_tokens: int | None = None, extra_body: dict[str, Any] | None = None,
     workload: Workload = "reasoning", call_name: str = "structured_completion",
-    timeout: float | None = None,
+    timeout: float | None = None, signal_malformed_content_exhaustion: bool = True,
 ) -> StructuredCompletion:
     """Execute provider-aware structured output, including Vertex's one fallback phase."""
     validator = validate_json_schema(schema, provider=provider)
@@ -908,12 +908,16 @@ def structured_chat_completion(
             )
             return StructuredCompletion(value, completion, "native")
 
-        return call_with_api_retries(qwen_attempt, call_name=call_name)
+        return call_with_api_retries(
+            qwen_attempt, call_name=call_name,
+            signal_malformed_content_exhaustion=signal_malformed_content_exhaustion,
+        )
 
     fallback_reason: str
     try:
         completion = call_with_api_retries(
-            lambda: request(messages, native=True), call_name=f"{call_name}.native"
+            lambda: request(messages, native=True), call_name=f"{call_name}.native",
+            signal_malformed_content_exhaustion=signal_malformed_content_exhaustion,
         )
     except Exception as error:
         if not _schema_related_bad_request(error):
@@ -933,13 +937,18 @@ def structured_chat_completion(
         f"reason={fallback_reason}"
     )
     prompted = _messages_with_schema_prompt(messages, schema)
-    fallback_completion = call_with_api_retries(
-        lambda: request(prompted, native=False), call_name=f"{call_name}.prompt_fallback"
+    def prompted_attempt() -> StructuredCompletion:
+        fallback_completion = request(prompted, native=False)
+        value = _parse_structured(
+            fallback_completion, validator, tolerant=True,
+            call_name=f"{call_name}.prompt_fallback",
+        )
+        return StructuredCompletion(value, fallback_completion, "prompt_fallback")
+
+    return call_with_api_retries(
+        prompted_attempt, call_name=f"{call_name}.prompt_fallback",
+        signal_malformed_content_exhaustion=signal_malformed_content_exhaustion,
     )
-    value = _parse_structured(
-        fallback_completion, validator, tolerant=True, call_name=f"{call_name}.prompt_fallback"
-    )
-    return StructuredCompletion(value, fallback_completion, "prompt_fallback")
 
 
 class BaseAgent(ABC):

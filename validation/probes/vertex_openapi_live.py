@@ -5,6 +5,7 @@ Without that explicit opt-in or configuration this script exits successfully wit
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -12,10 +13,13 @@ _AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
 if str(_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENT_DIR))
 
-from agent_core.llm import ChatEndpoint, EndpointConfigurationError, EndpointProfile
+from agent_core.llm import (
+    ChatEndpoint, EndpointConfigurationError, EndpointProfile, image_url_part,
+)
 from nav.locate_task import RESOLVE_SCHEMA
 from annotator_sys_inst import SHELF_ANNOTATION_SCHEMA
 from orchestrator.pickup_vlm_guard import _SCHEMA as GUARD_SCHEMA
+from vision.perception import _bbox_schema
 
 
 SCHEMA = {
@@ -44,6 +48,15 @@ def main() -> int:
         messages=[{"role": "user", "content": "Remember the word sari."}],
         max_tokens=256, workload="reasoning",
     )
+    # Force the already-initialized bearer down the expiry path so this probe covers an actual ADC
+    # refresh as well as ordinary token reuse. This process is disposable; no credential file or
+    # external state is changed.
+    bearer = endpoint.profile.api_key
+    credentials = getattr(bearer, "_credentials", None)
+    if credentials is None:
+        raise AssertionError("Vertex profile did not expose the shared ADC bearer provider")
+    credentials.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert bearer(), "forced ADC refresh returned no access token"
     vision = endpoint.create_structured(
         messages=[{"role": "user", "content": [
             {"type": "text", "text": "What food is visible?"},
@@ -68,6 +81,27 @@ def main() -> int:
                 "annotation" if name == "annotation" else "reasoning"
             ),
         )
+    probe_frames = [
+        (_AGENT_DIR.parent / "validation/evidence/hand_pose/0722_192358/005_grab_piattos.png",
+         "the visible Piattos bag"),
+        (_AGENT_DIR.parent / "validation/evidence/carry/0722_195705/route1_leg1_cp3.png",
+         "a visible packaged store product"),
+    ]
+    for frame, target in probe_frames:
+        image = image_url_part(frame.read_bytes(), "image/png")
+        replies = []
+        for repeat in range(3):
+            bbox = endpoint.create_structured(
+                messages=[{"role": "user", "content": [image, {"type": "text", "text": (
+                    f"Detect {target}. Return every matching box in normalized 0-1000 "
+                    "Gemini [ymin,xmin,ymax,xmax] order."
+                )}]}],
+                schema=_bbox_schema(12), schema_name=f"probe_bbox_{frame.stem}_{repeat}",
+                workload="localization", temperature=0.0,
+            )
+            replies.append(bbox.value)
+        assert replies[0], f"no bbox found in representative frame {frame}"
+        assert replies.count(replies[0]) == len(replies), f"unstable bbox replies for {frame}"
     usage = endpoint.envelope(vision.completion.raw_response).get("usage")
     assert vision.completion.text and usage, "missing structured content or usage"
     assert "sari" in (history.choices[0].message.content or "").lower(), "history was not retained"

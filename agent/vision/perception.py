@@ -23,7 +23,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / 'secrets.env')
 # shared, so it cannot skew the arms.
 from agent_core.llm import (
     EndpointProfile, MalformedContentError, call_with_api_retries, effective_max_tokens,
-    completion_result_from_response, image_url_part,
+    completion_result_from_response, image_url_part, structured_chat_completion,
 )
 from agent_core.prompt_loader import load_prompt, render_prompt
 # Every LLM call in this module is perception's cost - bbox, centering and OCR-bbox reasoning alike.
@@ -84,6 +84,26 @@ PERCEPTION_PROMPT_MULTI = load_prompt("vision/detect_many")
 FIND_MOST_SIMILAR_OCR_BBOX_PROMPT = load_prompt("vision/match_ocr_box")
 
 EXTRACTABLE_JSON_PATTERN = re.compile(r'```\s*json\s*([\s\S]*?)\s*```', re.DOTALL)
+
+BBOX_ENTRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "minLength": 1},
+        "box_2d": {
+            "type": "array", "minItems": 4, "maxItems": 4,
+            "items": {"type": "number", "minimum": 0, "maximum": 1000},
+        },
+    },
+    "required": ["label", "box_2d"],
+    "additionalProperties": False,
+}
+
+
+def _bbox_schema(max_entries):
+    return {
+        "type": "array", "minItems": 0, "maxItems": max_entries,
+        "items": BBOX_ENTRY_SCHEMA,
+    }
 
 from sim.env import *
 from manip.manipulation import *
@@ -276,6 +296,10 @@ def _bbox_payload(content):
     A valid ``[]`` or an unambiguous plain-language visual negative is a negative detection result.
     Invalid or truncated output raises so it cannot be confused with "target not visible".
     """
+    if isinstance(content, dict):
+        return [content]
+    if isinstance(content, list):
+        return content
     if not isinstance(content, str) or not content.strip():
         raise BBoxResponseParseError("empty VLM response")
     text = content.strip()
@@ -316,6 +340,8 @@ def _bbox_dict_px(box_2d):
         raise BBoxResponseParseError("bbox entry is missing a four-value box_2d")
     if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in coords):
         raise BBoxResponseParseError("bbox coordinates must be finite numbers")
+    if any(value < 0 or value > 1000 for value in coords):
+        raise BBoxResponseParseError("bbox coordinates must be between 0 and 1000")
     if BBOX_YMIN_FIRST:
         ymin = coords[0] / 1000 * ORIGINAL_HEIGHT
         xmin = coords[1] / 1000 * ORIGINAL_WIDTH
@@ -334,56 +360,59 @@ def _bbox_dict_px(box_2d):
 
 
 def _bbox_request(image, target_info, prompt, max_tokens, temperature):
-    response = CLIENT.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": [
-            _encode_image(image),
-            {"type": "text", "text": f"{prompt}\n\ntarget_info={target_info}\n\n"},
-        ]}],
-        temperature=temperature,
-        max_tokens=effective_max_tokens(
-            _ENDPOINT_PROFILE.provider, max_tokens, "localization",
-            _ENDPOINT_PROFILE.thinking_level,
-        ),
-        extra_body=_ENDPOINT_PROFILE.extra_body,
-    )
-    result = completion_result_from_response(
-        response, provider=_ENDPOINT_PROFILE.provider,
-        thinking_level=_ENDPOINT_PROFILE.thinking_level,
-        workload="localization", requested_max_tokens=max_tokens,
-    )
-    if not result.text or result.finish_reason == "length":
-        raise MalformedContentError(
-            f"bounding-box response was empty or truncated ({result.diagnostic()})",
-            content=result.text, completion_result=result,
-        )
-    return result.text
-
-
-def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):
-    def request_and_parse():
-        try:
-            content = _bbox_request(image, target_info, prompt, max_tokens, temperature)
-        except MalformedContentError as error:
-            # Normalize request-level empty/truncated completions to the bbox-specific error that
-            # center_object_on_screen converts into a recoverable detection_error tool outcome.
-            raise BBoxResponseParseError(
-                str(error),
-                content=error.content,
-                completion_result=error.completion_result,
-            ) from error
-        print(f"[DETECT OBJECT IN FRAME] Response: {content}")
-        try:
-            return [_bbox_dict_px(entry) for entry in _bbox_payload(content)]
-        except BBoxResponseParseError as error:
-            raise BBoxResponseParseError(str(error), content=content) from error
-
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        return call_with_api_retries(
-            request_and_parse,
+    messages = [{"role": "user", "content": [
+        _encode_image(image),
+        {"type": "text", "text": f"{prompt}\n\ntarget_info={target_info}\n\n"},
+    ]}]
+    max_entries = 1 if prompt == PERCEPTION_PROMPT else 12
+    try:
+        structured = structured_chat_completion(
+            client=CLIENT,
+            provider=_ENDPOINT_PROFILE.provider,
+            thinking_level=_ENDPOINT_PROFILE.thinking_level,
+            default_extra_body=_ENDPOINT_PROFILE.extra_body,
+            messages=messages,
+            schema=_bbox_schema(max_entries),
+            schema_name=f"bounding_boxes_{max_entries}",
+            model=MODEL_NAME,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workload="localization",
             call_name="perception.bounding_boxes",
             signal_malformed_content_exhaustion=False,
         )
+    except MalformedContentError as error:
+        if isinstance(error.content, str) and _is_bbox_negative_prose(error.content):
+            return []
+        raise
+    print(
+        "[DETECT OBJECT IN FRAME] "
+        f"response_source={structured.enforcement} Response: {structured.completion.text}"
+    )
+    return structured.value
+
+
+def _parsed_bbox_response(image, target_info, prompt, max_tokens, temperature):
+    with token_meter.role(token_meter.ROLE_PERCEPTION):
+        try:
+            content = _bbox_request(image, target_info, prompt, max_tokens, temperature)
+            return [_bbox_dict_px(entry) for entry in _bbox_payload(content)]
+        except BBoxResponseParseError as error:
+            detail = str(error).lower()
+            category = "truncated" if "never closed" in detail else "schema_or_syntax"
+            print(f"[BBOX MALFORMED] category={category} error={error}")
+            raise
+        except MalformedContentError as error:
+            content = error.content
+            category = (
+                "empty" if not content else
+                "truncated" if "truncated" in str(error).lower() else
+                "schema_or_syntax"
+            )
+            print(f"[BBOX MALFORMED] category={category} error={error}")
+            raise BBoxResponseParseError(
+                str(error), content=content, completion_result=error.completion_result,
+            ) from error
 
 
 def _detect_bbox_px(image, target_info, temperature=0.0):
