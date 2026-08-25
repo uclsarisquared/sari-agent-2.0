@@ -51,7 +51,16 @@
                   border: 1px solid var(--accent); border-radius: 4px; }
   .menu .m-edit:focus { outline: none; border-color: var(--accent); }
   .menu li.m-editing { cursor: text; }
-  .menu .m-note { margin-left: auto; color: var(--dim); font-size: 11.5px; }
+  /* Straight after the name's fixed clip box, NOT pushed to the row's right edge: the two row
+     buttons are not always both there - the pencil is hidden on a live run, since the server will
+     not rename a battery a runner still holds - and an `auto` margin here handed that missing button
+     to the date, which then sat a few pixels right of every other row's. */
+  .menu .m-note { color: var(--dim); font-size: 11.5px; }
+  /* The buttons take the spare space instead, as one group, so the row's right end is what absorbs
+     a hidden pencil. */
+  .menu .m-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+  /* A queue row carries no buttons and no fixed-width name box, so its own note keeps the far edge. */
+  .menu li.q-row .m-note { margin-left: auto; }
   .menu .m-empty { color: var(--dim); cursor: default; }
   .menu .m-empty:hover { background: none; }
   /* Renaming and copying are deliberate acts on a row whose whole surface already means "switch to
@@ -206,56 +215,38 @@
   .mismatch { background: rgba(224,162,63,.12); color: #e8c48d; }
 
   /* -- tabs --------------------------------------------------------------------------------- */
-  /* Folder tabs, not a segmented control: they sit on the rule that divides them from what they
-     switch, and the selected one breaks through that rule so the tab and the view below it read as
-     one surface. Everything here serves that single join - the negative bottom margin that lets the
-     tab overlap the strip's border, and the transparent bottom edge that opens the seam. */
-  /* The strip is its own surface, a step DARKER than the page the front tab opens onto - the same
-     recess a browser's tab bar sits in. Sharing the header's fill made the two read as one bar and
-     left the tabs looking like part of the title, which is what moving them down here undid. */
-  .tabstrip { display: flex; align-items: flex-end; gap: 4px; padding: 8px 18px 0;
+  /* Square panes butted straight onto the title bar, not folder tabs: no radius, no gap, no flares
+     out to a baseline. The strip is stuck under the header for the whole page rather than only at
+     the top of it, so which view you are in is still on screen after scrolling a long battery -
+     that is what the shape is in service of, since a rounded tab hanging off a sticky bar reads as
+     a floating control rather than as part of the bar it is attached to.
+
+     `--header-h` is measured from the header itself in script: it wraps, so its height is a fact
+     about the current window rather than a constant that could be written here. */
+  .tabstrip { position: sticky; top: var(--header-h, 0px); z-index: 4;
+              display: flex; align-items: stretch; gap: 0; padding: 0 18px;
               border-bottom: 1px solid var(--line); background: #0e1013; }
-  /* Two colours drive the whole shape - the fill and the outline - so the flares below can be
-     written once and inherit whatever state the tab is in. A tab that is neither hovered nor
-     selected sets both to transparent, which makes its outline and its flares vanish without a
-     second rule: only the front tab is drawn as a tab, the rest are just their labels. */
+  /* Two colours drive the whole shape - the fill and the outline - so a tab that is neither hovered
+     nor selected sets both to transparent and vanishes down to its label, and only the front tab is
+     drawn as a pane. Its bottom edge is painted with its own fill rather than its outline, which is
+     what opens the seam between the front tab and the view below it. */
   button.tab { --tab-fill: transparent; --tab-line: transparent;
-               position: relative; margin-bottom: -1px; padding: 6px 16px 7px; font-size: 12.5px;
-               /* The tab hangs 1px into the strip's rule, and its bottom edge is painted with its
-                  own fill rather than its outline: that is what opens the seam on the front tab,
-                  and on the others the fill is transparent so the rule shows straight through. */
+               position: relative; margin-bottom: -1px; padding: 8px 16px; font-size: 12.5px;
                border: 1px solid var(--tab-line); border-bottom-color: var(--tab-fill);
-               border-radius: 9px 9px 0 0; background: var(--tab-fill); color: var(--dim); }
+               border-radius: 0; background: var(--tab-fill); color: var(--dim); }
   button.tab:hover { --tab-fill: #262b33; color: var(--ink); }
   button.tab.on { --tab-fill: var(--bg); --tab-line: var(--line); color: var(--ink); }
-  /* The curve out to the baseline, which is what makes these read as tabs rather than as boxes with
-     their corners filed off. Each bottom corner gets a square of its own, sitting outside the tab,
-     filled everywhere EXCEPT a quarter-disc centred on the corner nearest the tab's top - so what
-     is left is a concave sweep from the tab's side down to the rule. The two gradient stops at the
-     radius paint that sweep's 1px of outline before the fill, so the tab's border follows the curve
-     instead of stopping where the straight edge does. */
-  button.tab::before, button.tab::after {
-    content: ""; position: absolute; bottom: -1px; width: 9px; height: 9px; pointer-events: none;
-  }
-  button.tab::before {
-    left: -9px;
-    background: radial-gradient(circle at top left, transparent 9px,
-                var(--tab-line) 9px, var(--tab-line) 10px, var(--tab-fill) 10px);
-  }
-  button.tab::after {
-    right: -9px;
-    background: radial-gradient(circle at top right, transparent 9px,
-                var(--tab-line) 9px, var(--tab-line) 10px, var(--tab-fill) 10px);
-  }
+  /* Adjacent panes share one rule instead of drawing two side by side. */
+  button.tab + button.tab { margin-left: -1px; }
 
   /* -- overview ----------------------------------------------------------------------------- */
   #overview { padding: 16px; }
   .ov-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-  /* A round info mark at the far end of the bar: equal width and height with a radius past half of
-     either, so it is a circle rather than a very short pill, and it never stretches on the flex row
-     the way the export links do. The `i` is set in a serif, which is what keeps a single lowercase
-     letter reading as the info glyph rather than as a stray character in the UI font. */
-  .ov-help { margin-left: auto; flex: none; width: 22px; height: 22px; padding: 0;
+  /* A round info mark sitting with the export buttons: equal width and height with a radius past
+     half of either, so it is a circle rather than a very short pill, and it never stretches on the
+     flex row the way the export links do. The `i` is set in a serif, which is what keeps a single
+     lowercase letter reading as the info glyph rather than as a stray character in the UI font. */
+  .ov-help { flex: none; width: 22px; height: 22px; padding: 0;
              border: 1px solid var(--line); border-radius: 999px; background: none;
              color: var(--dim); line-height: 1; font-family: Georgia, "Times New Roman", serif;
              font-style: italic; font-size: 13px; }
@@ -266,6 +257,9 @@
   table.ov { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
   table.ov th, table.ov td { padding: 5px 10px; text-align: left; white-space: nowrap;
                              border-bottom: 1px solid var(--line); }
+  /* `top: 0` and nothing else. The scroll box around this table is its own scrollport (it sets
+     overflow-x), so the head sticks against THAT box, not against the page - offsetting it by the
+     height of the page's sticky bars pushed it down over the first body rows. */
   table.ov thead th { position: sticky; top: 0; z-index: 2; background: #22262e;
                       color: var(--dim); font-weight: 600; }
   /* The task id follows the reader across a battery wide enough to scroll. Its own z-index sits
@@ -454,20 +448,44 @@
   #fleet-rows .st.busy { color: #e8c48d; }
   #fleet-rows .st.bad { color: #f0a596; }
 
-  table.ov tfoot td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600;
-                      background: #1a1d23; }
-  table.ov tfoot .lbl { color: var(--dim); font-weight: 500; }
+  /* -- the battery's own numbers ------------------------------------------------------------- */
+  /* Out of the grid's tfoot and into two panels alongside it: the summary reads down the left, the
+     role split down the right. In the tfoot every label had to span a row of try cells, which left
+     each number stranded at the far edge of the table with a hand's width of nothing in front of it
+     - so the labels grew explanatory tails to fill it. The tails are now in the hover card and the
+     panels are only as wide as they need to be.
 
-  /* The per-role token breakdown. Hairline rules and no top border, so the block reads as a
-     breakdown OF the total tokens line above it rather than as more totals beside it. */
-  table.ov tfoot tr.role td { border-top: 1px solid var(--line); font-weight: 500; }
-  table.ov tfoot tr.role .lbl { padding-left: 1.6em; }
-  table.ov tfoot tr.role .share { color: var(--dim); font-weight: 500; }
-  /* The share bar: a background gradient on the cell, so no extra element is needed per row and
-     nothing can wrap away from the number it belongs to. */
-  table.ov tfoot tr.role .lbl span.bar { display: inline-block; height: .55em; margin-left: .6em;
-                                         background: var(--accent, #4b8bd6); border-radius: 2px;
-                                         vertical-align: baseline; min-width: 1px; }
+     `flex-basis` is the breakpoint: two panels fit side by side while there is room for both at
+     their natural width, and below roughly 900px they wrap to the stacked full-width layout a phone
+     wants. No media query, because the number that matters is how wide THESE panels need to be. */
+  .ov-foot { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-top: 12px; }
+  .ov-foot > .ov-panel { flex: 1 1 420px; min-width: 0; overflow-x: auto;
+                         border: 1px solid var(--line); border-radius: 10px;
+                         background: var(--panel); }
+  .ov-foot > .ov-panel[hidden] { display: none; }
+  /* The role rows are the longest lines here - a name, a bar, two token counts, a share and a call
+     count - so when there is slack to hand out that panel takes the larger share of it. */
+  #ov-roles-panel { flex-grow: 1.35; }
+  table.ovsum { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+  table.ovsum td { padding: 6px 10px; white-space: nowrap; font-weight: 600;
+                   border-bottom: 1px solid var(--line); }
+  table.ovsum tr:last-child td { border-bottom: 0; }
+  table.ovsum tr:hover td { background: #21252c; }
+  table.ovsum .lbl { color: var(--dim); font-weight: 500; }
+  /* The value column takes all the slack, so its number sits just past the longest label rather
+     than out at the panel's right edge. */
+  table.ovsum .val { width: 100%; padding-left: 18px; }
+
+  /* The per-role breakdown. Hairline rules and an indent, so the block reads as a breakdown OF the
+     total on its heading row rather than as more totals beside it. */
+  table.ovsum tr.head .lbl { color: var(--ink); font-weight: 650; }
+  table.ovsum tr.role td { font-weight: 500; }
+  table.ovsum tr.role .lbl { padding-left: 1.6em; }
+  table.ovsum tr.role .share { color: var(--dim); font-weight: 500; }
+  /* The share bar sits in the label cell, so nothing can wrap it away from the name it belongs to. */
+  table.ovsum tr.role .lbl span.bar { display: inline-block; height: .55em; margin-left: .6em;
+                                      background: var(--accent, #4b8bd6); border-radius: 2px;
+                                      vertical-align: baseline; min-width: 1px; }
 
   /* The hover card. pointer-events off so it can sit under the cursor without stealing the
      mouseover that keeps it alive. */
@@ -679,16 +697,23 @@
     <a class="btn" href="/api/report.csv" download>export to CSV</a>
     <a class="btn" href="/api/report.csv?grain=roles" data-grain="roles" download
        title="one row per attempt per reasoner — tokens, calls and share of the attempt's spend">export tokens by role</a>
-    <span class="muted" id="ov-note"></span>
     <!-- What a cell means and what a key does are the same question asked twice, so they are one
          button: the bar keeps only the shape of the grid, and the glyphs and shortcuts move into a
-         panel that can show each cell as it actually looks. It is the help for this view rather
-         than a fourth thing to do with it, so it sits off at the far end as a mark, not a label. -->
+         panel that can show each cell as it actually looks. It sits with the buttons it belongs
+         beside rather than off at the far end, so the bar reads left to right as one group of
+         controls followed by the readout. -->
     <button class="ov-help" id="legend-open" data-act="legend-open" aria-haspopup="dialog"
             title="legend &amp; controls — what each cell means and what the keys do"
             aria-label="Legend and controls">i</button>
+    <span class="muted" id="ov-note"></span>
   </div>
   <div class="ov-scroll"><table class="ov" id="ov-table"></table></div>
+  <div class="ov-foot">
+    <div class="ov-panel"><table class="ovsum" id="ov-summary"><tbody></tbody></table></div>
+    <div class="ov-panel" id="ov-roles-panel" hidden>
+      <table class="ovsum" id="ov-roles"><tbody></tbody></table>
+    </div>
+  </div>
 </section>
 
 <div id="notifications" aria-live="polite" aria-atomic="false"></div>
@@ -787,6 +812,7 @@ const INLINE_LOG_LINES = 40;     // bootstrap depth for a card terminal - a litt
 const MODAL_LOG_LINES = 800;     // the fullscreen view is for reading, so it starts much deeper
 const TERM_BUFFER_LINES = 1000;  // client-side cap; trimmed only while the reader sits at the bottom
 const AT_BOTTOM_SLOP = 8;        // px of rounding error still counted as "at the bottom"
+const CLOCK_CARRY_MAX_SECONDS = 15;  // how far the battery clock may run past its last saved stamp
 
 // One entry per attempt key, built once and patched thereafter. Nothing in here is recreated on a
 // refresh, which is what lets the <img> keep its decoded frame and the terminal keep its scroll.
@@ -934,6 +960,12 @@ function toggleSettings() {
 
 const fmtMin = s => (s === null || s === undefined) ? "—"
   : (s < 0 ? "-" : "") + Math.floor(Math.abs(s) / 60) + "m" + String(Math.floor(Math.abs(s) % 60)).padStart(2, "0") + "s";
+// A battery runs for hours, so its total is not the same shape as an attempt's: fmtMin would
+// report a long one as "374m12s", which nobody can read as "six and a quarter hours".
+const fmtDur = s => (s === null || s === undefined || !Number.isFinite(Number(s))) ? "—"
+  : (h => h ? `${h}h${String(Math.floor((Math.abs(s) % 3600) / 60)).padStart(2, "0")}m`
+            : `${Math.floor(Math.abs(s) / 60)}m${String(Math.floor(Math.abs(s) % 60)).padStart(2, "0")}s`
+    )(Math.floor(Math.abs(s) / 3600));
 const fmtNum = n => Number(n || 0).toLocaleString();
 const fmtTok = a => `${fmtNum(a.tokens_in)} in / ${fmtNum(a.tokens_out)} out`;
 const hasApiCalls = a => !!a && a.api_calls !== null && a.api_calls !== undefined;
@@ -1102,9 +1134,10 @@ const VERDICT_TIPS = {
 };
 
 // data-tip / data-tip-term / data-tip-meta, escaped, for interpolation into a badge's markup.
-function tipAttrs(term, text, meta = "") {
+function tipAttrs(term, text, meta = "", follow = false) {
   return `data-tip-term="${esc(term)}" data-tip="${esc(text)}"`
-    + (meta ? ` data-tip-meta="${esc(meta)}"` : "");
+    + (meta ? ` data-tip-meta="${esc(meta)}"` : "")
+    + (follow ? " data-tip-follow" : "");
 }
 
 function classOf(a) {
@@ -1654,7 +1687,9 @@ function ovBuildTable(tries) {
   heads.push("<th>success?</th>", '<th class="num">success time</th>',
     '<th class="num">tokens in / out</th>',
     '<th class="num">API calls<br>pass only / pass+fail</th>');
-  table.innerHTML = `<thead><tr>${heads.join("")}</tr></thead><tbody></tbody><tfoot></tfoot>`;
+  // No tfoot: the battery's own numbers live in the panels below the grid, where their labels do
+  // not have to span a row of try columns.
+  table.innerHTML = `<thead><tr>${heads.join("")}</tr></thead><tbody></tbody>`;
   ovRows.clear();
   return table;
 }
@@ -1682,6 +1717,35 @@ function ovBuildRow(prompt, tries) {
   return entry;
 }
 
+// The manifest's elapsed clock, restamped by the runner every few seconds. Between stamps the
+// readout is carried forward with local time so a live battery's total does not sit still for whole
+// seconds at a time; a stopped one has nothing to carry and shows exactly what was saved.
+let ovClock = { id: null, seconds: null, seenAt: 0 };
+
+function batteryElapsed(state, live) {
+  const battery = state.battery || {};
+  const saved = Number(battery.wall_seconds);
+  if (Number.isFinite(saved)) {
+    if (ovClock.id !== state.battery_id || ovClock.seconds !== saved) {
+      ovClock = { id: state.battery_id, seconds: saved, seenAt: Date.now() };
+    }
+    // Carried forward only as far as a stamp is actually overdue. A watcher-launched retry runner
+    // holds the battery without owning its manifest, so the saved clock can stay put while the page
+    // still reads as live - and unbounded interpolation would then invent hours it never ran.
+    const carried = live
+      ? saved + Math.min((Date.now() - ovClock.seenAt) / 1000, CLOCK_CARRY_MAX_SECONDS) : saved;
+    return { seconds: carried, wallClock: false };
+  }
+  // A battery whose runner predates that clock still knows when it began, so a RUNNING one falls
+  // back to plain wall time since then, off the server's clock rather than the browser's. It counts
+  // any hours the battery spent stopped, which is why it is the fallback and not the measure - and
+  // why a stopped battery gets a dash instead: `now - started` on one that ended weeks ago is not
+  // its runtime, it is how long ago it ran.
+  const start = Number(battery.started_epoch);
+  if (!live || !Number.isFinite(start) || !Number.isFinite(Number(state.now))) return null;
+  return { seconds: Math.max(0, Number(state.now) - start), wallClock: true };
+}
+
 function renderOverview(state) {
   const battery = state.battery || {};
   const prompts = battery.prompts || [];
@@ -1691,7 +1755,11 @@ function renderOverview(state) {
   document.getElementById("ov-note").textContent = prompts.length
     ? `${prompts.length} prompt(s) × ${tries} tr${tries === 1 ? "y" : "ies"}`
     : (state.error || "no battery loaded");
-  if (!prompts.length) { table.innerHTML = ""; ovRows.clear(); ovShape = ""; return; }
+  if (!prompts.length) {
+    table.innerHTML = ""; ovRows.clear(); ovShape = "";
+    ovFootPanels([], []);   // no battery, no numbers: the panels empty out with the grid
+    return;
+  }
 
   const shape = `${state.battery_id}#${tries}`;
   if (shape !== ovShape) { ovBuildTable(tries); ovShape = shape; }
@@ -1833,79 +1901,123 @@ function renderOverview(state) {
     if (!prompts.some(p => p.id === id)) { entry.tr.remove(); ovRows.delete(id); }
   }
 
-  const span = tries + 2;  // task id + prompt + every try column fold into the label
   const pct = prompts.length ? Math.round((solved / prompts.length) * 100) : 0;
   const rel = reliabilityN ? Math.round((reliabilitySum / reliabilityN) * 100) : 0;
+  const live = (state.discovered || []).some(d => d.id === state.battery_id && d.live);
+  const elapsed = batteryElapsed(state, live);
 
-  // The ablation line: which reasoner the battery's tokens went to. Shares are of the ROLE rows'
+  // The battery's own numbers. Each row is a label, a value, and the explanation that used to be
+  // spelled out after an em dash in the label itself - now in the hover card, where a dynamic
+  // denominator ("over 27 dispatched prompt(s)") reads as the footnote it always was.
+  const statRows = [
+    { term: "model", label: "model", value: battery.model ? esc(battery.model) : "—",
+      meta: battery.llm_provider ? `via ${battery.llm_provider}` : "",
+      tip: "The model id every reasoner in this battery asked the endpoint for ($OPENAI_MODEL at "
+        + "launch), recorded per battery so an ablation read months later can still say which model "
+        + "produced it. A battery run before this was recorded shows a dash." },
+    { term: "elapsed", label: "elapsed",
+      value: `${fmtDur(elapsed && elapsed.seconds)}${live ? " · running" : ""}`,
+      meta: [battery.started_at ? `started ${battery.started_at.replace("T", " ")}` : "",
+             Number(battery.resume_count) ? `${Number(battery.resume_count)} resume(s)` : ""]
+        .filter(Boolean).join(" · "),
+      tip: (elapsed && elapsed.wallClock
+        ? "Wall time since this battery started - the fallback for a battery whose runner predates "
+          + "the manifest's own clock, so it counts any hours the battery spent stopped. "
+        : "Time a runner has actually been working on this battery, carried across resumes: a night "
+          + "the battery spent stopped is not counted. ")
+        + "It ticks while a runner holds the battery and freezes at its final value once none does." },
+    { term: "success rate", label: "success rate", value: `${solved} / ${prompts.length} · ${pct}%`,
+      tip: "Prompts with at least one human-verified pass, over every prompt in the battery. A pass "
+        + "the agent claimed but nobody has reviewed does not count here." },
+    { term: "avg success time", label: "avg success time",
+      value: winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—",
+      meta: `over ${winTimeN} solved prompt(s)`,
+      tip: "Mean elapsed of the first passing try. A winner whose elapsed was never recorded is left "
+        + "out of the mean rather than counted as an instant win." },
+    { term: "avg time per run", label: "avg time per run",
+      value: allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—",
+      meta: `${allTimeTries === ranTries ? `all ${ranTries}` : `${allTimeTries} of ${ranTries}`} `
+        + `dispatched tr(ies) that finished · ${fmtMin(Math.round(allTime))} in total`,
+      tip: "What one run costs, as against the line above it which only ever sees the winners: the "
+        + "mean elapsed of every dispatched try that FINISHED, passing or not. A live try is still "
+        + "ticking and an orphaned or requeued one reports time against now, so neither is counted." },
+    { term: "reliability", label: "reliability", value: reliabilityN ? rel + "%" : "—",
+      meta: `over ${reliabilityN} dispatched prompt(s)`,
+      tip: "Mean of (passing tries / tries counted) per prompt, invalid tries excluded. A prompt with "
+        + "nothing dequeued is absent from the mean rather than a zero in it, or a battery only half "
+        + "dispatched would read as half broken." },
+    { term: "avg tokens per solved prompt", label: "avg tokens per solved prompt",
+      value: solved
+        ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out`
+        : "—",
+      tip: "Per solved prompt, across all of its tries - the failed and invalid ones included, "
+        + "because they were paid for too." },
+    { term: "total tokens", label: "total tokens",
+      value: `${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out`,
+      tip: "What the battery has cost outright: every try in it, failed and invalid ones included. "
+        + "The averages above exclude things; this line excludes nothing." },
+    { term: "API calls", label: "API calls",
+      value: `${fmtApiAggregate(apiAggregate(batteryPassApi))} / ${
+        fmtApiAggregate(apiAggregate(batteryJudgedApi))}`,
+      tip: "Actual OpenAI-compatible HTTP sends: human-verified pass only, then pass+fail. Tries that "
+        + "predate request metering are reported as coverage rather than folded into the sum." },
+  ];
+
+  // The ablation panel: which reasoner the battery's tokens went to. Shares are of the ROLE rows'
   // own sum, not of totalIn/totalOut, so they add to 100% even on a battery where some tries carry
   // no role block - a bar chart that quietly failed to reach 100% would read as a bug in the meter
-  // rather than as the coverage gap the caption already names.
+  // rather than as the coverage gap the heading's tip names.
   const roleNames = sortRoles([...roleTotals.keys()]);
   const roleSum = roleNames.reduce((sum, name) =>
     sum + roleTotals.get(name).in + roleTotals.get(name).out, 0);
-  const roleFoot = !roleNames.length ? "" : `
-    <tr ${tipAttrs("tokens by role",
-      "One row per reasoner agent_core.token_meter bills calls to, in the order a task moves "
-      + "through them. Shares are of these rows' own sum rather than of the total above, so they "
-      + "add to 100% even when some tries carry no role block. Hover a row for what that reasoner "
-      + "does; the same split per prompt is on each row's token cell.")}>
-      <td class="lbl" colspan="${span}">tokens by role — where the spend went${
-        roleTries < ranTries
-          ? `, over the ${roleTries} of ${ranTries} dispatched tr(ies) that recorded roles`
-          : ""}</td>
-      <td colspan="4">${fmtNum(roleSum)} total</td>
-    </tr>` + roleNames.map(name => {
+  const roleRows = !roleNames.length ? [] : [
+    { cls: "head", term: "tokens by role", label: "tokens by role",
+      value: `${fmtNum(roleSum)} total`,
+      meta: roleTries < ranTries
+        ? `over the ${roleTries} of ${ranTries} dispatched tr(ies) that recorded roles`
+        : `over all ${ranTries} dispatched tr(ies)`,
+      tip: "One row per reasoner agent_core.token_meter bills calls to, in the order a task moves "
+        + "through them. Shares are of these rows' own sum rather than of the battery total, so they "
+        + "add to 100% even when some tries carry no role block. Hover a row for what that reasoner "
+        + "does; the same split per prompt is on each grid row's token cell." },
+    ...roleNames.map(name => {
       const row = roleTotals.get(name);
       const share = roleSum ? (row.in + row.out) / roleSum : 0;
-      // The whole row explains itself, not just the name: a reader's cursor is on the bar or the
-      // share when the question "what is `episodic`?" occurs to them.
-      // Own-property only: role names come off the agent's own tokens.json, and one that happened
-      // to be "constructor" would otherwise pull an inherited member into the card.
-      const tip = tipAttrs(name,
-        Object.prototype.hasOwnProperty.call(ROLE_TIPS, name) ? ROLE_TIPS[name]
+      return {
+        cls: "role", term: name,
+        // The whole row explains itself, not just the name: a reader's cursor is on the bar or the
+        // share when the question "what is `episodic`?" occurs to them.
+        // Own-property only: role names come off the agent's own tokens.json, and one that happened
+        // to be "constructor" would otherwise pull an inherited member into the card.
+        tip: Object.prototype.hasOwnProperty.call(ROLE_TIPS, name) ? ROLE_TIPS[name]
           : "A reasoner the agent bills calls to that this dashboard has not been told about yet.",
-        `${fmtNum(row.calls)} call(s) across the battery`);
-      return `
-    <tr class="role" ${tip}>
-      <td class="lbl" colspan="${span}">${esc(name)}<span class="bar" style="width:${
-        (share * 22).toFixed(2)}em"></span></td>
-      <td colspan="4">${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
-        (share * 100).toFixed(1)}% · ${fmtNum(row.calls)} call(s)</span></td>
-    </tr>`;
-    }).join("");
-  setHTML(table.querySelector("tfoot"), `
-    <tr>
-      <td class="lbl" colspan="${span}">success rate — prompts with at least one human-verified pass</td>
-      <td colspan="4">${solved} / ${prompts.length} · ${pct}%</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">avg success time — mean elapsed of the first passing try over ${winTimeN} solved prompt(s)</td>
-      <td colspan="4">${winTimeN ? fmtMin(Math.round(winTime / winTimeN)) : "—"}</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">avg time per run — mean elapsed over ${
-        allTimeTries === ranTries ? `all ${ranTries}` : `the ${allTimeTries} of ${ranTries}`
-      } dispatched tr(ies) that finished, passing or not · ${fmtMin(Math.round(allTime))} in total</td>
-      <td colspan="4">${allTimeTries ? fmtMin(Math.round(allTime / allTimeTries)) : "—"}</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">reliability — mean of (passing tries / tries counted, invalid excluded) over ${reliabilityN} dispatched prompt(s)</td>
-      <td colspan="4">${reliabilityN ? rel + "%" : "—"}</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">avg tokens per solved prompt — all its tries, failed and invalid ones included</td>
-      <td colspan="4">${solved ? `${fmtNum(Math.round(winIn / solved))} in / ${fmtNum(Math.round(winOut / solved))} out` : "—"}</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">total tokens — every try in this battery, failed and invalid ones included</td>
-      <td colspan="4">${fmtNum(totalIn)} in / ${fmtNum(totalOut)} out</td>
-    </tr>
-    <tr>
-      <td class="lbl" colspan="${span}">API calls — human-verified pass only / pass+fail</td>
-      <td colspan="4">${fmtApiAggregate(apiAggregate(batteryPassApi))} / ${
-        fmtApiAggregate(apiAggregate(batteryJudgedApi))}</td>
-    </tr>${roleFoot}`);
+        meta: `${fmtNum(row.calls)} call(s) across the battery`,
+        label: `${esc(name)}<span class="bar" style="width:${(share * 12).toFixed(2)}em"></span>`,
+        value: `${fmtNum(row.in)} in / ${fmtNum(row.out)} out <span class="share">· ${
+          (share * 100).toFixed(1)}% · ${fmtNum(row.calls)} call(s)</span>`,
+      };
+    }),
+  ];
+
+  ovFootPanels(statRows, roleRows);
+}
+
+// One row per fact, in whichever panel it belongs to. Every row carries its explanation on the
+// shared hover card, and asks for the cursor-following placement: a row is the full width of its
+// panel, so anchoring the card to the row's own corner would put it somewhere else entirely.
+function ovFootRows(rows) {
+  return rows.map(row => `
+    <tr class="${row.cls || ""}" ${tipAttrs(row.term, row.tip, row.meta || "", true)}>
+      <td class="lbl">${row.label}</td><td class="val">${row.value}</td>
+    </tr>`).join("");
+}
+
+function ovFootPanels(statRows, roleRows) {
+  setHTML(document.querySelector("#ov-summary tbody"), ovFootRows(statRows));
+  setHTML(document.querySelector("#ov-roles tbody"), ovFootRows(roleRows));
+  // An empty panel is not an empty box on the page: a battery whose tries recorded no roles at all
+  // has nothing to break down, so the summary simply takes the full width.
+  document.getElementById("ov-roles-panel").hidden = !roleRows.length;
 }
 
 // -- hover card ----------------------------------------------------------------------------
@@ -2064,14 +2176,21 @@ function showHelp(el) {
   placeHelp(el);
 }
 
-// Anchored under the tag, not to the cursor: these read as definitions of a fixed thing on the
-// page, and one that jitters with the mouse is harder to read than one that simply appears.
+// Anchored under the tag by default: a tag's explainer reads as the definition of a fixed thing on
+// the page, and one that jitters with the mouse is harder to read than one that simply appears.
+//
+// `data-tip-follow` opts out, for the footer's rows. A row is the full width of its panel, so its
+// top-left corner is nowhere near the cursor - and a reader running down nine role rows is moving,
+// not settling on one tag, so the card is better off travelling with them.
 function placeHelp(el) {
   const box = el.getBoundingClientRect();
   const w = help.offsetWidth, h = help.offsetHeight;
-  const x = Math.min(Math.max(8, box.left), Math.max(8, window.innerWidth - w - 8));
-  const below = box.bottom + 8;
-  const y = below + h > window.innerHeight - 8 ? Math.max(8, box.top - 8 - h) : below;
+  const follow = el.hasAttribute("data-tip-follow");
+  const left = follow ? cursorX + 14 : box.left;
+  const x = Math.min(Math.max(8, left), Math.max(8, window.innerWidth - w - 8));
+  const below = follow ? cursorY + 16 : box.bottom + 8;
+  const above = follow ? cursorY - 16 - h : box.top - 8 - h;
+  const y = below + h > window.innerHeight - 8 ? Math.max(8, above) : below;
   help.style.left = x + "px";
   help.style.top = y + "px";
 }
@@ -2084,7 +2203,12 @@ function hideHelp() {
 // Where the cursor is, so a card patched under a stationary mouse can be asked what is beneath it
 // now. Nothing here reads the position until something actually replaces an element.
 let cursorX = 0, cursorY = 0;
-document.addEventListener("mousemove", ev => { cursorX = ev.clientX; cursorY = ev.clientY; });
+document.addEventListener("mousemove", ev => {
+  cursorX = ev.clientX;
+  cursorY = ev.clientY;
+  // Only the rows that asked to be followed pay for this; every other tip stays where it was put.
+  if (helpTarget && helpTarget.hasAttribute("data-tip-follow")) placeHelp(helpTarget);
+});
 
 document.addEventListener("mouseover", ev => {
   const el = ev.target.closest("[data-tip]");
@@ -2290,13 +2414,14 @@ function renderPicker(state) {
       + `<span class="m-note">${esc(note)}</span>`
       // Copying stays available on a live run: the name is just as useful to paste while the
       // runner is still working as it is afterwards.
+      + `<span class="m-acts">`
       + `<button class="m-act" data-act="battery-copy" data-battery="${esc(d.id)}"`
       + ` title="copy this run's name" aria-label="copy ${esc(d.id)}">⧉</button>`
       // Hidden rather than merely refused while a runner works: the server will not rename a live
       // battery, and an affordance that is always going to fail is worse than no affordance.
       + `<button class="m-act" data-act="battery-rename" data-battery="${esc(d.id)}"`
       + ` title="rename this bench run" aria-label="rename ${esc(d.id)}"`
-      + `${d.live ? " disabled" : ""}>✎</button></li>`;
+      + `${d.live ? " disabled" : ""}>✎</button></span></li>`;
   });
   // Against the last markup this function GENERATED, not against the menu's current innerHTML: a row
   // whose name overruns its box has had a separator and a second copy injected into it since, so the
@@ -2509,6 +2634,21 @@ function selectBattery(choice) {
   refresh();
 }
 
+// How far down the tab strip has to stick. The header wraps and the battery name it carries changes
+// length, so its height is a fact about the current window rather than a constant the stylesheet
+// could carry.
+function measureStickyStack() {
+  const header = document.querySelector("header");
+  if (!header) return;
+  document.documentElement.style.setProperty(
+    "--header-h", Math.round(header.getBoundingClientRect().height) + "px");
+}
+
+measureStickyStack();
+addEventListener("resize", measureStickyStack);
+if (window.ResizeObserver) new ResizeObserver(measureStickyStack)
+  .observe(document.querySelector("header"));
+
 function setTab(tab) {
   if (tab === activeTab) return;
   activeTab = tab;
@@ -2561,17 +2701,33 @@ async function refresh() {
   const done = atts.filter(a => a.state === "finished").length;
   const live = atts.filter(isLive).length;
   const c = state.counts || {};
-  const review = c.verified
-    ? ` · ${c.verified} reviewed (${c.verified_success || 0}✓/${c.verified_fail || 0}✗`
-      + `${c.verified_invalid ? "/" + c.verified_invalid + "⊘" : ""}`
-      + `${c.verified_already_successful ? "/" + c.verified_already_successful + "A" : ""}`
-      + `${c.disagree ? ", " + c.disagree + " disagree" : ""})`
-    : "";
+  // Review progress counted in PROMPTS, which is the unit the work is actually done in: a reviewer
+  // goes down the overview a prompt at a time. The old attempt-grained count read as far more
+  // progress than it was - "26 reviewed" on a battery of 54 prompts x 3 tries is not half of it.
+  // A prompt is reviewed once nothing of it is still waiting on a human: every try that can take a
+  // verdict has one. The verdict breakdown that used to be spelled out here is on hover instead.
+  const perPrompt = new Map();
+  for (const a of atts) {
+    if (!a.verifiable) continue;
+    const row = perPrompt.get(a.prompt_id) || { done: 0, pending: 0 };
+    if (a.verified) row.done += 1; else row.pending += 1;
+    perPrompt.set(a.prompt_id, row);
+  }
+  const reviewed = [...perPrompt.values()].filter(row => row.done && !row.pending).length;
+  const promptTotal = (b.prompts || []).length;
+  const review = promptTotal ? ` · ${reviewed}/${promptTotal} prompts reviewed` : "";
   const waiting = c.awaiting_verdict ? ` · ${c.awaiting_verdict} awaiting review` : "";
   const retryWaiting = c.pending_retry ? ` · ${c.pending_retry} waiting to retry` : "";
-  document.getElementById("progress").textContent =
+  const progress = document.getElementById("progress");
+  progress.textContent =
     (b.planned_attempts ? `${done}/${b.planned_attempts} done · ${live} live` : `${atts.length} attempt(s)`)
     + review + waiting + retryWaiting;
+  progress.title = !c.verified ? "no verdicts recorded yet"
+    : `${c.verified} try(s) reviewed: ${c.verified_success || 0} pass, ${c.verified_fail || 0} fail`
+      + `${c.verified_invalid ? `, ${c.verified_invalid} invalid` : ""}`
+      + `${c.verified_already_successful
+          ? `, ${c.verified_already_successful} already successful` : ""}`
+      + `${c.disagree ? ` · ${c.disagree} disagree with the harness` : ""}`;
   setText(document.getElementById("pool"), state.pool_error
     ? "pool: coordinator unreachable"
     : `pool: ${(state.pool || []).length} sandbox(es)`);
