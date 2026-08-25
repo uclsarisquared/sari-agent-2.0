@@ -60,6 +60,23 @@ def _metrics(*, success, reason, held=None):
     }
 
 
+def test_summary_records_nullable_runtime_error(tmp_path):
+    state = _state(tmp_path)
+    state.policy = orchestration.resolve_context_policy("baseline")
+    state.started_at = orchestration.time.time()
+    state.legs = []
+    state.error = None
+    summary = orchestration._build_summary(state, "done", "model")
+    assert summary["runtime_error"] is None
+    assert summary["response_source"] == "model"
+
+    state.error = RuntimeError("simulator disconnected")
+    summary = orchestration._build_summary(state, "fallback", "deterministic_fallback")
+    assert summary["runtime_error"] == {
+        "type": "RuntimeError", "message": "simulator disconnected",
+    }
+
+
 def test_leg_retry_uses_failure_context_and_separate_log(monkeypatch, tmp_path):
     state = _state(tmp_path)
     leg = {"type": "pickup", "text": "Pick up the chips"}

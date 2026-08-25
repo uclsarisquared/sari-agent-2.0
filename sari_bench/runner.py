@@ -190,6 +190,7 @@ class AttemptResult:
     api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS
     max_api_requeues: int = DEFAULT_MAX_API_REQUEUES
     error: str = ""
+    response_source: str = ""
     winning_attempt_key: str = ""
     legs: dict[str, Any] = field(default_factory=dict)
     # Token cost of the attempt: prompt tokens in, completion tokens out, across every reasoner the
@@ -1837,13 +1838,18 @@ class BenchmarkRunner:
         failure_kind = payload.get("failure_kind") or "unknown"
         error_type = payload.get("error_type") or "API error"
         error = payload.get("error") or "transient endpoint failure"
+        cause_type = payload.get("cause_type")
+        cause = payload.get("cause")
         prefix = f"transient API retry budget exhausted after {attempts} attempts" if attempts else (
             "transient API retry budget exhausted"
         )
-        return (
+        message = (
             f"{prefix} (call={call_name}, failure_kind={failure_kind}, "
             f"{error_type}: {error})"
         )
+        if cause and (cause_type, cause) != (error_type, error):
+            message += f"; caused by {cause_type or 'error'}: {cause}"
+        return message
 
     @staticmethod
     def _sandbox_fault_payload(path: Path) -> dict[str, Any]:
@@ -2173,6 +2179,10 @@ class BenchmarkRunner:
             outcome=outcome,
             context_policy=self.context_policy,
             exit_code=exit_code,
+            error=(
+                f"agent process exited with code {exit_code}"
+                if outcome == "agent_error" else ""
+            ),
         )
 
         summary_path = run_dir / "summary.json"
@@ -2193,6 +2203,12 @@ class BenchmarkRunner:
         # written before a later teardown crash, so copying it onto `agent_error` would produce the
         # contradictory and score-corrupting `agent_error (success=True)`.
         result.success = bool(summary.get("success")) if outcome == "completed" else False
+        result.response_source = str(summary.get("response_source") or "")
+        runtime_error = summary.get("runtime_error")
+        if outcome == "agent_error" and isinstance(runtime_error, dict):
+            error_type = str(runtime_error.get("type") or "RuntimeError")
+            message = str(runtime_error.get("message") or "agent runtime failed")
+            result.error = f"{error_type}: {message}"
         result.llm_calls = int(summary.get("llm_calls") or 0)
         self._apply_tokens(result, run_dir, summary=summary)
         legs = summary.get("legs") or []

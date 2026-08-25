@@ -639,6 +639,10 @@ def _build_summary(state, response, response_source):
             "max_api_requeues": config.max_api_requeues,
         },
         "success": state.success,
+        "runtime_error": (
+            {"type": type(state.error).__name__, "message": str(state.error)}
+            if state.error is not None else None
+        ),
         "response": response,
         "response_source": response_source,
         "legs_planned": controller.initial_plan_size if enabled else len(state.legs),

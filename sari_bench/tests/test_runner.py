@@ -79,7 +79,8 @@ if mode == "api_retry_exhausted":
     with open(os.environ["SARI_API_RETRY_EXHAUSTED_PATH"], "w") as f:
         json.dump({"attempts": 10, "error_type": "TimeoutError",
                    "error": "server stayed down", "call_name": "semantic_reasoning",
-                   "failure_kind": "timeout"}, f)
+                   "failure_kind": "timeout", "cause_type": "ReadTimeout",
+                   "cause": "metadata endpoint did not answer"}, f)
     time.sleep(600)
 if mode == "sandbox_fault" and "51001" in os.environ.get("SARI_WS_URI", ""):
     with open(os.environ["SARI_SANDBOX_FAULT_PATH"], "w") as f:
@@ -149,6 +150,27 @@ def _runner(url: str, prompts: list[Prompt], workspace: Path, **kwargs) -> Bench
         agent_cwd=workspace,
         **options,
     )
+
+
+def test_agent_error_folds_runtime_error_and_response_source() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        prompt = Prompt(id="p", prompt="fail during teardown")
+        runner = _runner("ws://127.0.0.1:1", [prompt], workspace)
+        run_dir = workspace / "runs" / "p" / "try01"
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(json.dumps({
+            "success": True,
+            "response_source": "deterministic_fallback",
+            "runtime_error": {"type": "RuntimeError", "message": "teardown disconnected"},
+            "legs": [],
+        }), encoding="utf-8")
+        result = runner._result_from_run_dir(
+            prompt, 1, run_dir, exit_code=4, outcome="agent_error"
+        )
+        assert result.success is False
+        assert result.error == "RuntimeError: teardown disconnected"
+        assert result.response_source == "deterministic_fallback"
 
 
 def test_load_prompts_accepts_the_battery_schema() -> None:
@@ -646,6 +668,10 @@ async def test_crashed_agent_still_releases_its_sandbox() -> None:
             assert summary["total_attempts"] == 2
             assert all(row["outcome"] == "agent_error" for row in summary["attempts"])
             assert all(row["exit_code"] == 3 for row in summary["attempts"])
+            assert all(
+                row["error"] == "agent process exited with code 3"
+                for row in summary["attempts"]
+            )
             assert summary["total_successes"] == 0
             assert all(row["success"] is False for row in summary["attempts"])
             manifests = [
@@ -686,6 +712,7 @@ async def test_api_retry_exhaustion_requeues_the_logical_attempt() -> None:
             assert attempt["outcome"] == "api_retry_exhausted", attempt
             assert attempt["requeues"] == 3, attempt
             assert attempt["success"] is False
+            assert "metadata endpoint did not answer" in attempt["error"]
             run_parent = workspace / "runs" / "p1"
             assert all(
                 (run_parent / f"try01.requeue{index:02d}").is_dir()
@@ -1296,6 +1323,7 @@ async def test_token_usage_is_recorded_per_attempt() -> None:
             assert (attempt["tokens_in"], attempt["tokens_out"]) == (2000, 500), attempt
             assert attempt["llm_calls"] == 6, attempt
             assert attempt["api_calls"] == 8, attempt
+            assert attempt["response_source"] == "model", attempt
             assert summary["tokens_in"] == 2000 and summary["tokens_out"] == 500, summary
             assert summary["tokens_total"] == 2500, summary
             assert summary["api_calls"] == 8, summary
@@ -1747,6 +1775,7 @@ async def test_resume_stops_an_orphan_before_pid_publication() -> None:
 
 
 async def main() -> int:
+    test_agent_error_folds_runtime_error_and_response_source()
     test_load_prompts_accepts_the_battery_schema()
     test_automatic_retries_outrank_fresh_work_fifo()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
