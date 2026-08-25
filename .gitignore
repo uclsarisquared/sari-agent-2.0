@@ -24,6 +24,8 @@ agent/mapping/plans/phase6/*
 validation/artifacts/
 agent/subtask_run_outputs
 .DS_Store
+.idea/
+.vscode/
 agent/depth_image.png
 # Distributed Sari Bench results (one dir per battery, screenshots + JSONL inside)
 bench_runs/
