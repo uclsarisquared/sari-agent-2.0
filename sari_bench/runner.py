@@ -51,6 +51,7 @@ from sari_bench.storage import (
 from agent.vision.ocr_client import OcrUnavailable, check_ocr_health, resolve_ocr_url
 from sari_runconfig import RunConfigError, load_run_config
 from agent.agent_core.context_policy import CONTEXT_POLICY_NAMES, resolve_context_policy
+from agent.agent_core.models import agent_model
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OVERHAUL_DIR = REPO_ROOT / "agent"
@@ -112,6 +113,10 @@ class PromptAlreadySuccessful(RuntimeError):
 ATTEMPT_MANIFEST = "attempt.json"
 # Battery-level manifest at the output-dir root.
 BATTERY_MANIFEST = "battery.json"
+# How often a running battery restamps its own elapsed clock in battery.json. Short enough that the
+# dashboard's readout looks live, and one small locked write is far cheaper than an attempt's own
+# per-step bookkeeping.
+BATTERY_HEARTBEAT_SECONDS = 5.0
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -510,9 +515,16 @@ class BenchmarkRunner:
             worker_count = min(self.concurrency, total)
             workers.extend(asyncio.create_task(self._worker(i)) for i in range(worker_count))
             self._record_worker_count(worker_count)
+        heartbeat = asyncio.create_task(self._heartbeat_battery_clock())
         try:
             await self._queue.join()
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            # Last stamp before the process leaves, so the manifest's clock closes on the real end
+            # rather than up to one heartbeat short of it.
+            with contextlib.suppress(OSError, ValueError):
+                self._touch_battery_clock()
             if scaler is not None:
                 scaler.cancel()
                 await asyncio.gather(scaler, return_exceptions=True)
@@ -578,7 +590,12 @@ class BenchmarkRunner:
         self._validate_resume_config(battery)
         self._peak_workers = int(battery.get("peak_workers") or 0)
         previous_summary = self._read_manifest(self.output_dir / "summary.json")
-        self._prior_wall_seconds = float(previous_summary.get("wall_seconds") or 0.0)
+        # summary.json only exists for a run that got as far as writing one; battery.json's
+        # heartbeat survives a killed runner, so the longer of the two is the time already spent.
+        self._prior_wall_seconds = max(
+            float(previous_summary.get("wall_seconds") or 0.0),
+            float(battery.get("wall_seconds") or 0.0),
+        )
 
         try:
             rows = canonical_attempt_rows(self.output_dir, strict=True, rewrite=True)
@@ -642,6 +659,9 @@ class BenchmarkRunner:
         with edit_json_locked(battery_manifest_path) as current:
             current["resume_count"] = int(current.get("resume_count") or 0) + 1
             current["last_resumed_at"] = now
+            # A resume can be pointed at a different endpoint than the original launch, so the model
+            # is re-read rather than inherited: the manifest names what is running now.
+            current.update(self._model_identity())
             current["coordinator"] = self.coordinator_url
             current["concurrency"] = self.concurrency if self.concurrency is not None else "auto"
             current["concurrency_mode"] = "fixed" if self.concurrency is not None else "auto"
@@ -1252,6 +1272,12 @@ class BenchmarkRunner:
                 "battery_id": self.output_dir.name,
                 "output_dir": str(self.output_dir),
                 "started_at": datetime.now().isoformat(timespec="seconds"),
+                # Epoch alongside the human-readable stamp so a reader can do arithmetic on the
+                # start without reparsing a local-time string, and the clock below can be resumed.
+                "started_epoch": time.time(),
+                "wall_seconds": 0.0,
+                "heartbeat_at": datetime.now().isoformat(timespec="seconds"),
+                **self._model_identity(),
                 "coordinator": self.coordinator_url,
                 "tries": self.tries,
                 "concurrency": self.concurrency if self.concurrency is not None else "auto",
@@ -1283,6 +1309,44 @@ class BenchmarkRunner:
                 "resume_count": 0,
                 }
             )
+
+    @staticmethod
+    def _model_identity() -> dict[str, Any]:
+        """Which model this battery's reasoners actually asked for.
+
+        The model id is configuration ($OPENAI_MODEL in secrets.env), not a runner flag, so every
+        attempt in a battery is spent on whatever that env said at launch - and nothing on disk used
+        to record it. An ablation read months later then cannot say which model produced it, which is
+        the one fact its numbers are about. Resolved through the same helper the agent runtime uses,
+        so what is written here is exactly what the subprocesses will send.
+        """
+        return {
+            "model": agent_model(),
+            "llm_provider": (os.getenv("LLM_PROVIDER") or "vllm").strip().lower(),
+        }
+
+    def _touch_battery_clock(self) -> None:
+        """Publish the battery's elapsed time so a reader does not have to infer it.
+
+        `wall_seconds` counts time a runner was actually working, carried across resumes the same
+        way summary.json's does - `now - started_at` would keep climbing across a night the battery
+        spent stopped. Written on a heartbeat rather than only at the end so an interrupted battery
+        still records how long it ran for.
+        """
+        if not self.initialize_battery or not (self.output_dir / BATTERY_MANIFEST).exists():
+            return
+        elapsed = round(self._prior_wall_seconds + time.monotonic() - self._started_at, 1)
+        with edit_json_locked(self.output_dir / BATTERY_MANIFEST) as battery:
+            battery["wall_seconds"] = elapsed
+            battery["heartbeat_at"] = datetime.now().isoformat(timespec="seconds")
+            battery.setdefault("started_epoch", time.time() - elapsed)
+            battery.update(self._model_identity())
+
+    async def _heartbeat_battery_clock(self) -> None:
+        while True:
+            await asyncio.sleep(BATTERY_HEARTBEAT_SECONDS)
+            with contextlib.suppress(OSError, ValueError):
+                self._touch_battery_clock()
 
     @staticmethod
     def _rotate_run_dir(run_dir: Path) -> None:
@@ -2353,6 +2417,7 @@ class BenchmarkRunner:
                 self._prior_wall_seconds + time.monotonic() - self._started_at,
                 1,
             ),
+            **self._model_identity(),
             "coordinator": self.coordinator_url,
             "tries": self.tries,
             "concurrency": self.concurrency if self.concurrency is not None else "auto",
