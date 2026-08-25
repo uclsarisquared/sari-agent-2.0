@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v1.3.1 (2026-08-25)
+
+### Bug Fixes
+
+- **auth**: Harden Vertex credential refresh
+  ([`3ec5f4c`](https://github.com/uclsarisquared/sari-agent-2.0/commit/3ec5f4cf772dfc05d077b74686b753ad843be793))
+
+- **bench**: Preserve runtime failure diagnostics
+  ([`7e5c55a`](https://github.com/uclsarisquared/sari-agent-2.0/commit/7e5c55a57ae9b7998f3456910ce7cdd6d2cdbb2f))
+
+- **context**: Bound findings and event artifacts
+  ([`e90cd53`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e90cd530c43cb9120039af0502211ec4bf9f30a4))
+
+- **vision**: Enforce structured bounding boxes
+  ([`88f00d5`](https://github.com/uclsarisquared/sari-agent-2.0/commit/88f00d5b9882a92630953fcfad0e90c175bf4c8a))
+
+
 ## v1.3.0 (2026-08-24)
 
 ### Features
