@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-08-25)
+
+### Chores
+
+- Sync lockfile version
+  ([`3968cb1`](https://github.com/uclsarisquared/sari-agent-2.0/commit/3968cb1cdf0a1684fa83b7a5363a342fe578a927))
+
+### Features
+
+- **bench**: Record battery elapsed clock and model identity
+  ([`b02ae7e`](https://github.com/uclsarisquared/sari-agent-2.0/commit/b02ae7ef283eeb7dcb5ab953bc387e01f3ee2c20))
+
+- **watch**: Move battery totals into overview panels
+  ([`1943775`](https://github.com/uclsarisquared/sari-agent-2.0/commit/1943775a05207b7b7dac52c028741c2cca89f07f))
+
+
 ## v1.3.1 (2026-08-25)
 
 ### Bug Fixes

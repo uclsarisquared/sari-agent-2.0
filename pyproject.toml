@@ -1,6 +1,6 @@
 [project]
 name = "sari-agent"
-version = "1.3.1"
+version = "1.4.0"
 description = "Virtual embodied agent operating in a 3D convenience store environment"
 readme = "README.md"
 # Pinned by .python-version (3.10.13). numpy<2 and the measured runtime were both established
