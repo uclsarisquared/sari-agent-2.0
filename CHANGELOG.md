@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-08-26)
+
+### Features
+
+- **ablation**: Add time-limited run script for a5, a7 and replan-test policies
+  ([`967bc5e`](https://github.com/uclsarisquared/sari-agent-2.0/commit/967bc5e98c70c8c25b434ee2b8456995ddf279ac))
+
+
 ## v1.5.0 (2026-08-26)
 
 ### Bug Fixes
