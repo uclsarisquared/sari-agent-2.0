@@ -26,6 +26,10 @@ from typing import Any
 
 WEBHOOK_ENV = "SARI_BENCH_DISCORD_WEBHOOK"
 
+# Discord's Cloudflare front-end 403s (error code 1010) the default urllib User-Agent on POST,
+# even though the same URL works fine as a browser GET. Any plausible client string clears it.
+_USER_AGENT = "sari-bench-watch/1.0 (+https://github.com)"
+
 # One alert per (attempt, kind); a flapping collapse score must not spam the channel.
 COOLDOWN_SECONDS = 900.0
 
@@ -92,7 +96,10 @@ class Discord:
                 body, content_type = json.dumps(payload).encode("utf-8"), "application/json"
                 timeout = POST_TIMEOUT_SECONDS
             request = urllib.request.Request(
-                self.webhook_url, data=body, headers={"Content-Type": content_type}, method="POST"
+                self.webhook_url,
+                data=body,
+                headers={"Content-Type": content_type, "User-Agent": _USER_AGENT},
+                method="POST",
             )
             self._send(request, timeout, retry=True)
         except (urllib.error.URLError, OSError, ValueError) as error:  # noqa: BLE001
