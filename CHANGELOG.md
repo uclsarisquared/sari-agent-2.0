@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-08-26)
+
+### Bug Fixes
+
+- **release**: Pin GitPython below 3.1.46 to avoid psr breakage
+  ([`3ac667e`](https://github.com/uclsarisquared/sari-agent-2.0/commit/3ac667e95209fd47a27329fdd63ebff24cabae6e))
+
+- **release**: Pin python-semantic-release version to fix GitPython incompatibility
+  ([`6851109`](https://github.com/uclsarisquared/sari-agent-2.0/commit/68511094fa24e708df91ea99f9b4ef4454afbb74))
+
+- **watch**: Send custom User-Agent to Discord webhook
+  ([`02c0c41`](https://github.com/uclsarisquared/sari-agent-2.0/commit/02c0c414a844492e0b993b51b05f58017c20f9f3))
+
+### Chores
+
+- Untrack editor directories
+  ([`593d74b`](https://github.com/uclsarisquared/sari-agent-2.0/commit/593d74b95827a5f1ef7ceceb924acd093d72cc4c))
+
+### Features
+
+- **bench**: Add prompt-first queueing mode
+  ([`33f2266`](https://github.com/uclsarisquared/sari-agent-2.0/commit/33f226641d7094548620a474b0e4d2cded40058f))
+
+
 ## v1.4.0 (2026-08-25)
 
 ### Chores
