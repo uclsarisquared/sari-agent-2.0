@@ -115,6 +115,58 @@ def test_default_agent_entry_uses_the_public_launcher() -> None:
     assert ORCHESTRATOR_ENTRY == "run_agent.py"
 
 
+def test_queue_modes_order_attempts_and_persist_in_battery_config() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        prompts = [Prompt(id=value, prompt=value) for value in ("a", "b", "c")]
+
+        default_runner = _runner("ws://127.0.0.1:1", prompts, workspace, tries=3)
+        assert default_runner.queue_mode == "prompt-first"
+        assert default_runner._planned_work_items()[:3] == [("a", 1), ("b", 1), ("c", 1)]
+
+        historical = _runner(
+            "ws://127.0.0.1:1", prompts, workspace, tries=3, queue_mode="try-first"
+        )
+        assert historical._planned_work_items() == [
+            ("a", 1), ("a", 2), ("a", 3),
+            ("b", 1), ("b", 2), ("b", 3),
+            ("c", 1), ("c", 2), ("c", 3),
+        ]
+
+        interleaved = _runner(
+            "ws://127.0.0.1:1", prompts, workspace, tries=3, queue_mode="prompt-first"
+        )
+        assert interleaved._planned_work_items() == [
+            ("a", 1), ("b", 1), ("c", 1),
+            ("a", 2), ("b", 2), ("c", 2),
+            ("a", 3), ("b", 3), ("c", 3),
+        ]
+        assert interleaved._semantic_config()["queue_mode"] == "prompt-first"
+
+        interleaved.output_dir.mkdir(parents=True)
+        interleaved._write_battery_manifest(9)
+        battery = json.loads((interleaved.output_dir / "battery.json").read_text())
+        assert battery["queue_mode"] == "prompt-first"
+
+        legacy = interleaved._semantic_config()
+        legacy.pop("queue_mode")
+        interleaved._validate_resume_config(legacy)
+
+        try:
+            historical._validate_resume_config(battery)
+        except ResumeError:
+            pass
+        else:
+            raise AssertionError("a battery resumed with a different queue mode")
+
+        try:
+            _runner("ws://127.0.0.1:1", prompts, workspace, queue_mode="attempt-first")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unsupported queue mode was accepted")
+
+
 async def _start_coordinator() -> tuple[Coordinator, str]:
     coordinator = Coordinator(host="127.0.0.1", port=0, log=lambda _m: None)
     await coordinator.start()
@@ -1777,6 +1829,7 @@ async def test_resume_stops_an_orphan_before_pid_publication() -> None:
 async def main() -> int:
     test_agent_error_folds_runtime_error_and_response_source()
     test_load_prompts_accepts_the_battery_schema()
+    test_queue_modes_order_attempts_and_persist_in_battery_config()
     test_automatic_retries_outrank_fresh_work_fifo()
     test_completion_guard_is_threaded_into_agent_command_and_battery_config()
     test_refusal_cap_action_is_threaded_and_resume_checked()

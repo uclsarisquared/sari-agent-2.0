@@ -55,6 +55,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "bench": {
         "prompts": str,
         "tries": int,
+        "queue_mode": {"try-first", "prompt-first"},
         "time_limit": (int, float),
         "per_leg_minutes": (int, float),
         "coordinator": str,

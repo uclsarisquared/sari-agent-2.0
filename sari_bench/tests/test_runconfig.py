@@ -156,6 +156,7 @@ def test_deprecated_agent_arm_key_loads_and_warns(tmp_path: Path, capsys) -> Non
         ('[agent]\nresolver_backend = "gpt"\n', "agent.resolver_backend must be one of"),
         ("[limits]\nmax_steps = true\n", "limits.max_steps must be an integer"),
         ("[bench]\ntries = 0\n", "bench.tries must be at least 1"),
+        ('[bench]\nqueue_mode = "random"\n', "bench.queue_mode must be one of"),
         ("[api_retry]\nmax_attempts = 0\n", "api_retry.max_attempts must be at least 1"),
         ("[bench]\nmax_api_requeues = -1\n", "bench.max_api_requeues cannot be negative"),
         ("[bench]\nlease_acquire_timeout = 0\n",
@@ -187,6 +188,7 @@ def test_bench_uses_config_and_explicit_cli_flags_win(tmp_path: Path) -> None:
 [bench]
 prompts = "prompts.json"
 tries = 2
+queue_mode = "prompt-first"
 time_limit = 90.0
 per_leg_minutes = 12.0
 max_steps = 77
@@ -212,6 +214,7 @@ max_attempts = 7
     async def fake_run(runner: BenchmarkRunner) -> dict:
         seen.update(
             tries=runner.tries,
+            queue_mode=runner.queue_mode,
             time_limit=runner.time_limit_minutes,
             per_leg_minutes=runner.per_leg_minutes,
             max_steps=runner.max_steps,
@@ -234,6 +237,8 @@ max_attempts = 7
                     str(config_path),
                     "--tries",
                     "4",
+                    "--queue-mode",
+                    "try-first",
                     "--arm",
                     "graph",
                     "--context-policy",
@@ -254,6 +259,7 @@ max_attempts = 7
     assert result == 0
     assert seen == {
         "tries": 4,
+        "queue_mode": "try-first",
         "time_limit": 90.0,
         "per_leg_minutes": 12.0,
         "max_steps": 77,

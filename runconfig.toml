@@ -87,9 +87,12 @@ sandbox_command_timeout = 10.0
 # permit four launches in total; the next exhaustion is recorded as api_retry_exhausted.
 max_api_requeues = 3
 
-# Prompt battery and attempts per prompt.
+# Prompt battery, attempts per prompt, and initial dispatch order. "try-first" preserves the
+# historical a1, a2, a3, b1... order; "prompt-first" dispatches a1, b1, c1, a2... so every prompt
+# gets coverage earlier and human-reviewed successes can prevent more queued tries from running.
 prompts = "sari_bench/prompts/context_window_ablation.json"
 tries = 3
+queue_mode = "prompt-first"
 
 # Whole-attempt harness timeout and the agent's independent per-leg timeout, in minutes.
 time_limit = 120.0

@@ -343,6 +343,7 @@ class BenchmarkRunner:
         leg_retries: int,
         completion_guard: str = "deterministic",
         refusal_cap_action: str = "continue",
+        queue_mode: str = "prompt-first",
         adaptive_leg_replanning: bool = False,
         api_max_attempts: int = DEFAULT_API_MAX_ATTEMPTS,
         max_api_requeues: int = DEFAULT_MAX_API_REQUEUES,
@@ -371,6 +372,9 @@ class BenchmarkRunner:
         # absolute so --run-dir and the harness manifests always name the same directory.
         self.output_dir = output_dir.resolve()
         self.tries = tries
+        if queue_mode not in {"try-first", "prompt-first"}:
+            raise ValueError(f"unsupported queue mode: {queue_mode!r}")
+        self.queue_mode = queue_mode
         self.time_limit_minutes = time_limit_minutes
         # The agent's --max-minutes is a PER-LEG cap; time_limit_minutes bounds the whole attempt.
         # Defaulting one to the other preserves the old single-knob behaviour, but they are not the
@@ -462,11 +466,7 @@ class BenchmarkRunner:
         if self.initialize_battery:
             work_items = await self._prepare_battery()
         elif self.work_items is None:
-            work_items = [
-                (prompt.id, attempt)
-                for prompt in self.prompts.values()
-                for attempt in range(1, self.tries + 1)
-            ]
+            work_items = self._planned_work_items()
         else:
             work_items = list(self.work_items)
         for prompt_id, attempt in work_items:
@@ -560,6 +560,20 @@ class BenchmarkRunner:
         control = {RUNNER_LOCK, ".attempts.lock", ".battery.lock"}
         return [entry for entry in path.iterdir() if entry.name not in control]
 
+    def _planned_work_items(self) -> list[tuple[str, int]]:
+        """Return the prompt/attempt cross product in the configured dispatch order."""
+        if self.queue_mode == "prompt-first":
+            return [
+                (prompt.id, attempt)
+                for attempt in range(1, self.tries + 1)
+                for prompt in self.prompts.values()
+            ]
+        return [
+            (prompt.id, attempt)
+            for prompt in self.prompts.values()
+            for attempt in range(1, self.tries + 1)
+        ]
+
     async def _prepare_battery(self) -> list[tuple[str, int]]:
         """Apply the fresh/resume directory contract and return only unfinished work."""
         entries = self._payload_entries(self.output_dir)
@@ -570,11 +584,7 @@ class BenchmarkRunner:
                     "or choose a new --output-dir"
                 )
             _log(f"new output dir {self.output_dir}")
-            return [
-                (prompt.id, attempt)
-                for prompt in self.prompts.values()
-                for attempt in range(1, self.tries + 1)
-            ]
+            return self._planned_work_items()
 
         battery_manifest_path = self.output_dir / BATTERY_MANIFEST
         if not battery_manifest_path.is_file():
@@ -602,11 +612,8 @@ class BenchmarkRunner:
         except ValueError as error:
             raise ResumeError(str(error)) from error
 
-        planned_keys = {
-            (prompt.id, attempt)
-            for prompt in self.prompts.values()
-            for attempt in range(1, self.tries + 1)
-        }
+        planned_items = self._planned_work_items()
+        planned_keys = set(planned_items)
         completed: set[tuple[str, int]] = set()
         rows_by_key: dict[tuple[str, int], dict[str, Any]] = {}
         for row in rows:
@@ -667,17 +674,16 @@ class BenchmarkRunner:
             current["concurrency_mode"] = "fixed" if self.concurrency is not None else "auto"
             current["concurrency_limit"] = self.concurrency
 
-        pending = [key for key in planned_keys if key not in completed]
+        pending = [key for key in planned_items if key not in completed]
         _log(
             f"resuming {self.output_dir}: {len(completed)} finished, {len(pending)} pending"
         )
-        prompt_order = {prompt_id: index for index, prompt_id in enumerate(self.prompts)}
-        pending.sort(key=lambda key: (prompt_order[key[0]], key[1]))
         return pending
 
     def _semantic_config(self) -> dict[str, Any]:
         return {
             "tries": self.tries,
+            "queue_mode": self.queue_mode,
             "time_limit_minutes": self.time_limit_minutes,
             "per_leg_minutes": self.per_leg_minutes,
             "max_steps": self.max_steps,
@@ -705,6 +711,8 @@ class BenchmarkRunner:
         # backend. Treat an absent legacy field as that default, while still refusing a resume that
         # would silently switch an old deterministic battery to VLM.
         def existing_value(key: str) -> Any:
+            if key == "queue_mode" and key not in battery:
+                return "prompt-first"
             if key == "completion_guard" and key not in battery:
                 return "deterministic"
             if key == "context_policy" and key not in battery:
@@ -1280,6 +1288,7 @@ class BenchmarkRunner:
                 **self._model_identity(),
                 "coordinator": self.coordinator_url,
                 "tries": self.tries,
+                "queue_mode": self.queue_mode,
                 "concurrency": self.concurrency if self.concurrency is not None else "auto",
                 "concurrency_mode": "fixed" if self.concurrency is not None else "auto",
                 "concurrency_limit": self.concurrency,
@@ -2420,6 +2429,7 @@ class BenchmarkRunner:
             **self._model_identity(),
             "coordinator": self.coordinator_url,
             "tries": self.tries,
+            "queue_mode": self.queue_mode,
             "concurrency": self.concurrency if self.concurrency is not None else "auto",
             "concurrency_mode": "fixed" if self.concurrency is not None else "auto",
             "concurrency_limit": self.concurrency,
@@ -2489,6 +2499,13 @@ async def async_main(argv: list[str] | None = None) -> int:
                         help="Prompt battery JSON.")
     parser.add_argument("--tries", type=int, default=configured("tries", 3),
                         help="Attempts per prompt.")
+    parser.add_argument(
+        "--queue-mode",
+        choices=["try-first", "prompt-first"],
+        default=configured("queue_mode", "prompt-first"),
+        help="Initial dispatch order: try-first runs every try of one prompt before the next; "
+             "prompt-first runs one try of every prompt before starting the next round.",
+    )
     parser.add_argument(
         "--time-limit",
         type=float,
@@ -2679,6 +2696,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         coordinator_url=args.coordinator,
         output_dir=output_dir,
         tries=args.tries,
+        queue_mode=args.queue_mode,
         time_limit_minutes=args.time_limit,
         per_leg_minutes=args.per_leg_minutes,
         concurrency=args.concurrency,

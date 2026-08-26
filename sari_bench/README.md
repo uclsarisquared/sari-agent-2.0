@@ -48,6 +48,22 @@ be leased again. The watch server exposes the same backend at `GET /api/fleet/st
 The runner fills all ready sandboxes by default. Set `concurrency` in `runconfig.toml` to cap it.
 Command-line flags override the config file.
 
+## Queue order
+
+`[bench].queue_mode` controls the order in which prompt attempts enter the sandbox fleet. Given
+prompts `a`, `b`, and `c` with three tries each:
+
+- `prompt-first` (default) runs `a1, b1, c1, a2, b2, c2, a3, b3, c3`. Every prompt receives one
+  attempt before any prompt receives its second. This exposes broad first-pass results sooner, so
+  a human can mark a successful prompt as done and prevent its later queued tries from spending
+  tokens.
+- `try-first` runs `a1, a2, a3, b1, b2, b3, c1, c2, c3`. All tries for one prompt are dispatched
+  before moving to the next prompt. This preserves the bench's historical behavior.
+
+The mode determines dispatch order; with multiple sandboxes, adjacent entries can run in parallel.
+Set `queue_mode = "prompt-first"` or `queue_mode = "try-first"` under `[bench]`, or override the
+configured value with `--queue-mode prompt-first` or `--queue-mode try-first`.
+
 ## Results
 
 Runs are written to `bench_runs/<timestamp>[_<name>]/`. The main files are:
