@@ -123,6 +123,20 @@ adaptive_leg_replanning = true
         load_run_config(config_path)
 
 
+def test_loader_accepts_ocr_accelerator_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "run.toml"
+    config_path.write_text('[ocr]\nbackend = "cuda"\ndevice_id = 2\n', encoding="utf-8")
+
+    config = load_run_config(config_path)
+
+    assert config.get("ocr", "backend") == "cuda"
+    assert config.get("ocr", "device_id") == 2
+
+    config_path.write_text('[ocr]\nbackend = "metal"\n', encoding="utf-8")
+    with pytest.raises(RunConfigError, match=r"ocr\.backend must be one of"):
+        load_run_config(config_path)
+
+
 def test_deprecated_resolver_backend_alias_loads_and_warns(tmp_path: Path, capsys) -> None:
     """The pre-2026-08-05 spelling still runs: it is rewritten to the current value, so nothing
     downstream ever sees 'qwen', and the deprecation is announced rather than silent."""

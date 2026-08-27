@@ -52,6 +52,10 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "experimental": {
         "adaptive_leg_replanning": bool,
     },
+    "ocr": {
+        "backend": {"auto", "cpu", "directml", "cuda"},
+        "device_id": int,
+    },
     "bench": {
         "prompts": str,
         "tries": int,
@@ -161,7 +165,7 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
         not math.isfinite(value) or value <= 0
     ):
         raise RunConfigError(f"{path}: {label} must be a positive finite number")
-    if key in {"leg_retries", "max_api_requeues"} and value < 0:
+    if key in {"leg_retries", "max_api_requeues", "device_id"} and value < 0:
         raise RunConfigError(f"{path}: {label} cannot be negative")
     if key in {
         "max_minutes",

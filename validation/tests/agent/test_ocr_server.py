@@ -70,12 +70,66 @@ def test_directml_backend_builds_onnx_engine_with_required_session_options(monke
     assert build_paddle_engine("directml", directml_device_id=2) is engine
     assert captured["engine"] == "onnxruntime"
     assert captured["device"] == "cpu"
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["use_doc_unwarping"] is False
     assert captured["engine_config"] == {
         "providers": ["DmlExecutionProvider"],
         "provider_options": {"device_id": 2},
         "execution_mode": "sequential",
         "enable_mem_pattern": False,
     }
+
+
+def test_cuda_backend_builds_verified_onnx_engine(monkeypatch):
+    captured = {}
+    engine = object()
+    preloaded = []
+
+    def fake_paddle_ocr(**kwargs):
+        captured.update(kwargs)
+        return engine
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        SimpleNamespace(PaddleOCR=fake_paddle_ocr),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(preload_dlls=lambda **kwargs: preloaded.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        ocr_server,
+        "_verify_onnx_provider",
+        lambda required: [[required, "CPUExecutionProvider"]],
+    )
+
+    assert build_paddle_engine("cuda", device_id=3) is engine
+    assert captured["engine"] == "onnxruntime"
+    assert captured["device"] == "gpu:3"
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["use_doc_unwarping"] is False
+    assert captured["engine_config"] == {
+        "providers": ["CUDAExecutionProvider"],
+        "provider_options": {"device_id": 3},
+    }
+    assert preloaded == [{"directory": ""}]
+
+
+def test_cpu_backend_forces_cpu_even_when_a_gpu_is_present(monkeypatch):
+    captured = {}
+    engine = object()
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        SimpleNamespace(PaddleOCR=lambda **kwargs: captured.update(kwargs) or engine),
+    )
+
+    assert build_paddle_engine("cpu") is engine
+    assert captured["device"] == "cpu"
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["use_doc_unwarping"] is False
 
 
 def test_auto_backend_selects_directml_only_on_windows_when_available(monkeypatch):
@@ -88,7 +142,14 @@ def test_auto_backend_selects_directml_only_on_windows_when_available(monkeypatc
     assert resolve_ocr_backend("auto") == "directml"
 
     monkeypatch.setattr(ocr_server.sys, "platform", "linux")
-    assert resolve_ocr_backend("auto") == "paddle"
+    assert resolve_ocr_backend("auto") == "cpu"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CUDAExecutionProvider"]),
+    )
+    assert resolve_ocr_backend("auto") == "cuda"
 
 
 def test_health_reports_accelerator_identity_when_configured():
@@ -105,6 +166,45 @@ def test_health_reports_accelerator_identity_when_configured():
         "backend": "directml",
         "execution_provider": "DmlExecutionProvider",
     }
+
+
+def test_main_reads_cuda_backend_and_device_from_runconfig(monkeypatch, tmp_path):
+    config_path = tmp_path / "runconfig.toml"
+    config_path.write_text('[ocr]\nbackend = "cuda"\ndevice_id = 4\n', encoding="utf-8")
+    captured = {}
+
+    class Server:
+        server_address = ("127.0.0.1", 9100)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            captured["closed"] = True
+
+    def fake_create_server(*args, **kwargs):
+        captured.update(kwargs)
+        return Server()
+
+    monkeypatch.delenv(ocr_server.OCR_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(ocr_server, "create_server", fake_create_server)
+
+    assert ocr_server.main(["--config", str(config_path)]) == 0
+    assert captured["backend"] == "cuda"
+    assert captured["execution_provider"] == "CUDAExecutionProvider"
+    assert "cuda" in captured["model"]
+    assert captured["closed"] is True
+
+    captured_engine = {}
+    monkeypatch.setattr(
+        ocr_server,
+        "build_paddle_engine",
+        lambda backend, *, device_id: captured_engine.update(
+            backend=backend, device_id=device_id
+        ),
+    )
+    captured["engine_factory"]()
+    assert captured_engine == {"backend": "cuda", "device_id": 4}
 
 
 def test_windows_server_uses_exclusive_address_ownership(monkeypatch):

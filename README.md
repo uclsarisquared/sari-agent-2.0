@@ -35,7 +35,7 @@ The checked-in [`runconfig.toml`](runconfig.toml) already points at the complete
 Start these in separate terminals:
 
 ```bash
-# Terminal 1: required shared OCR service (auto-selects DirectML on this Windows/WSL host)
+# Terminal 1: required shared OCR service ([ocr].backend selects cpu/directml/cuda/auto)
 uv run poe ocr-server
 
 # Terminal 2: run one task
@@ -43,12 +43,23 @@ uv run python agent/run_agent.py \
   --config runconfig.toml --task "find and pick up Pepero"
 ```
 
+For NVIDIA CUDA OCR, set `[ocr].backend = "cuda"` (and optionally `device_id`) in
+`runconfig.toml`, install the accelerator runtime once, and include the extra when launching:
+
+```bash
+uv sync --extra ocr-cuda
+uv run --extra ocr-cuda poe ocr-server
+```
+
+The CUDA extra includes CUDA 12 and cuDNN runtime libraries. Its cuDNN version is capped below
+9.11 on Linux x86-64 so Pascal GPUs such as the GTX 1080 retain kernel support.
+
 The simulator WebSocket defaults to `ws://localhost:8080/commands`; override `ws_uri` in
 `runconfig.toml` when needed. Run artifacts default to `agent/subtask_run_outputs/`.
 
 ## Configuration
 
-- `runconfig.toml` controls the shared API retry policy, agent, limits, map, outputs, and benchmark.
+- `runconfig.toml` controls the OCR backend, shared API retry policy, agent, limits, map, outputs, and benchmark.
   CLI flags override it.
 - `secrets.env` holds credentials and machine-specific paths and is gitignored.
 - `secrets.env.example` documents every supported environment variable.

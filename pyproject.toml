@@ -52,6 +52,16 @@ dependencies = [
     "pynput>=1.7",             # keyboard_control.py, mapping/manual_map.py
 ]
 
+[project.optional-dependencies]
+# NVIDIA CUDA 12.x OCR via PaddleOCR's ONNX Runtime engine. Keep this optional because
+# onnxruntime-gpu conflicts with the native Windows onnxruntime-directml package.
+ocr-cuda = [
+    # 1.27+ defaults to CUDA 13, which no longer supports Pascal GPUs.
+    "onnxruntime-gpu[cuda,cudnn]>=1.23.0,<1.27",
+    # 9.10.2 is the newest release verified here on Pascal (GTX 1080).
+    "nvidia-cudnn-cu12>=9.0,<9.11; platform_system == 'Linux' and platform_machine == 'x86_64'",
+]
+
 # NB: there is deliberately no `ocr` extra any more (removed 2026-07-28). paddleocr/paddlepaddle
 # moved into the base dependencies above — `uv sync` alone now installs them, no `--extra ocr`.
 

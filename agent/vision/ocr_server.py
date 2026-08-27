@@ -13,6 +13,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image, UnidentifiedImageError
@@ -25,9 +26,10 @@ DEFAULT_MAX_REQUEST_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_IN_FLIGHT = 32
 MODEL_IDENTITY = "paddleocr:en:text-line-orientation"
 OCR_BACKEND_ENV = "SARI_OCR_BACKEND"
-OCR_BACKENDS = ("auto", "paddle", "onnx-cpu", "directml")
+OCR_BACKENDS = ("auto", "cpu", "directml", "cuda", "paddle", "onnx-cpu")
 DEFAULT_OCR_BACKEND = "auto"
-DEFAULT_DIRECTML_DEVICE_ID = 0
+DEFAULT_DEVICE_ID = 0
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "runconfig.toml"
 
 
 class OcrHttpServer(ThreadingHTTPServer):
@@ -48,23 +50,24 @@ class OcrHttpServer(ThreadingHTTPServer):
 
 
 def resolve_ocr_backend(requested: str) -> str:
-    """Resolve ``auto`` without importing ONNX Runtime on the normal Paddle path."""
+    """Normalize legacy names and resolve ``auto`` to an available accelerator."""
     backend = requested.strip().lower()
     if backend not in OCR_BACKENDS:
         raise ValueError(f"unknown OCR backend {requested!r}; choose from {OCR_BACKENDS}")
+    if backend == "paddle":
+        return "cpu"
     if backend != "auto":
         return backend
-    if sys.platform != "win32":
-        return "paddle"
     try:
         import onnxruntime as ort
     except ImportError:
-        return "paddle"
-    return (
-        "directml"
-        if "DmlExecutionProvider" in ort.get_available_providers()
-        else "paddle"
-    )
+        return "cpu"
+    providers = ort.get_available_providers()
+    if sys.platform == "win32" and "DmlExecutionProvider" in providers:
+        return "directml"
+    if "CUDAExecutionProvider" in providers:
+        return "cuda"
+    return "cpu"
 
 
 def _verify_onnx_provider(required_provider: str) -> list[list[str]]:
@@ -92,38 +95,73 @@ def _verify_onnx_provider(required_provider: str) -> list[list[str]]:
     return provider_lists
 
 
+def _preload_cuda_runtime() -> None:
+    """Load CUDA/cuDNN libraries shipped in Python packages before ORT sessions."""
+    import onnxruntime as ort
+
+    preload = getattr(ort, "preload_dlls", None)
+    if callable(preload):
+        # Empty string means NVIDIA packages in site-packages. This makes the
+        # ocr-cuda extra self-contained without modifying LD_LIBRARY_PATH.
+        preload(directory="")
+
+
 def build_paddle_engine(
-    backend: str = "paddle",
+    backend: str = "cpu",
     *,
-    directml_device_id: int = DEFAULT_DIRECTML_DEVICE_ID,
+    device_id: int = DEFAULT_DEVICE_ID,
+    directml_device_id: int | None = None,
 ) -> Any:
     """Construct one PaddleOCR pipeline using the selected inference backend."""
     from paddleocr import PaddleOCR
 
-    if backend == "paddle":
-        return PaddleOCR(lang="en", use_textline_orientation=True, enable_mkldnn=False)
-    if backend not in {"onnx-cpu", "directml"}:
+    # Retain the old keyword for callers while all new configuration uses one
+    # device_id for both GPU backends.
+    if directml_device_id is not None:
+        device_id = directml_device_id
+    if backend in {"cpu", "paddle"}:
+        return PaddleOCR(
+            lang="en",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=True,
+            enable_mkldnn=False,
+            device="cpu",
+        )
+    if backend not in {"onnx-cpu", "directml", "cuda"}:
         raise ValueError(f"build_paddle_engine requires a resolved backend, got {backend!r}")
 
     if backend == "directml":
         required_provider = "DmlExecutionProvider"
         engine_config: dict[str, Any] = {
             "providers": [required_provider],
-            "provider_options": {"device_id": directml_device_id},
+            "provider_options": {"device_id": device_id},
             # Required by ONNX Runtime's DirectML execution provider.
             "execution_mode": "sequential",
             "enable_mem_pattern": False,
         }
+        device = "cpu"
+    elif backend == "cuda":
+        _preload_cuda_runtime()
+        required_provider = "CUDAExecutionProvider"
+        engine_config = {
+            "providers": [required_provider],
+            "provider_options": {"device_id": device_id},
+        }
+        device = f"gpu:{device_id}"
     else:
         required_provider = "CPUExecutionProvider"
         engine_config = {"providers": [required_provider]}
+        device = "cpu"
 
     engine = PaddleOCR(
         lang="en",
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
         use_textline_orientation=True,
-        # PaddleOCR 3.7's ONNX wrapper only recognizes CUDA for device="gpu".
-        # The explicit provider above still controls the actual inference device.
-        device="cpu",
+        # PaddleOCR uses the device to prepare the engine while the explicit
+        # provider is verified below as the runtime that actually executes it.
+        device=device,
         engine="onnxruntime",
         engine_config=engine_config,
     )
@@ -350,30 +388,59 @@ def create_server(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from sari_runconfig import RunConfigError, load_run_config
+
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    config_args, _ = config_parser.parse_known_args(argv)
+    try:
+        config = load_run_config(config_args.config)
+    except RunConfigError as error:
+        config_parser.error(str(error))
+
     parser = argparse.ArgumentParser(description="Run the central runner-local PaddleOCR service.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=config_args.config,
+        help=f"Run configuration TOML (default: {DEFAULT_CONFIG_PATH}).",
+    )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
         "--backend",
         choices=OCR_BACKENDS,
-        default=os.environ.get(OCR_BACKEND_ENV, DEFAULT_OCR_BACKEND),
-        help="Inference backend (auto selects DirectML on Windows when available).",
+        default=os.environ.get(
+            OCR_BACKEND_ENV,
+            config.get("ocr", "backend", DEFAULT_OCR_BACKEND),
+        ),
+        help="Inference backend (CLI, then $SARI_OCR_BACKEND, then [ocr].backend).",
+    )
+    parser.add_argument(
+        "--device-id",
+        type=int,
+        default=config.get("ocr", "device_id", DEFAULT_DEVICE_ID),
+        help="CUDA GPU or DirectML adapter index.",
     )
     parser.add_argument(
         "--directml-device-id",
         type=int,
-        default=DEFAULT_DIRECTML_DEVICE_ID,
-        help="DirectML adapter index (default: 0).",
+        dest="device_id",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--max-in-flight", type=int, default=DEFAULT_MAX_IN_FLIGHT)
     parser.add_argument("--max-request-bytes", type=int, default=DEFAULT_MAX_REQUEST_BYTES)
     args = parser.parse_args(argv)
+    if args.device_id < 0:
+        parser.error("--device-id cannot be negative")
 
     backend = resolve_ocr_backend(args.backend)
     provider = {
-        "paddle": "PaddlePaddle",
+        "cpu": "PaddlePaddle-CPU",
         "onnx-cpu": "CPUExecutionProvider",
         "directml": "DmlExecutionProvider",
+        "cuda": "CUDAExecutionProvider",
     }[backend]
     identity = model_identity(backend)
     print(
@@ -386,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         args.port,
         engine_factory=lambda: build_paddle_engine(
             backend,
-            directml_device_id=args.directml_device_id,
+            device_id=args.device_id,
         ),
         model=identity,
         backend=backend,

@@ -40,7 +40,7 @@ Push-Location $repoRoot
 try {
     & $PythonPath -m sari_bench ocr-server `
         --backend directml `
-        --directml-device-id $DeviceId `
+        --device-id $DeviceId `
         --host $ListenAddress `
         --port $Port
     $exitCode = $LASTEXITCODE
