@@ -1,3 +1,6 @@
+> [!NOTE]
+> The agent is still fairly unoptimized (token-wise) and is still constantly going through multiple A/B and ablation tests.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/9b52e148-3998-420e-ba2a-cb15b0011681">
@@ -7,9 +10,12 @@
 
 <h1 align="center">Sari Agent²</h1>
 
-The current embodied agent for Sari Sandbox V2. It uses a checkpoint graph for navigation and
-vision models for local perception, manipulation, and task reasoning. The Unity simulator lives in
+The current embodied agent for Sari Sandbox². It uses a checkpoint graph for navigation and
+vision models for local perception, manipulation, and task reasoning. Sari Sandbox² lives in
 [this repository](https://github.com/iggyvilla/sari-sandbox-v2).
+
+## 📰 News
+* **2026-08-24:** 🚀 Sari Agent² 1.0.0 released! 
 
 ## Quick start
 * Install [uv](https://docs.astral.sh/uv/)
