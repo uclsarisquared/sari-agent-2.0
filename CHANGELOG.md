@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-08-27)
+
+### Features
+
+- **ocr**: Add configurable CUDA backend
+  ([`c8223a9`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c8223a9c2efc5d6113ad67bbedc376582f849df5))
+
+
 ## v1.6.0 (2026-08-26)
 
 ### Features
