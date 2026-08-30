@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.7.1 (2026-08-30)
+
+### Bug Fixes
+
+- **bench**: Include agent response in Discord alerts
+  ([`977a8f5`](https://github.com/uclsarisquared/sari-agent-2.0/commit/977a8f599f75444acb775afc5edea5713b7b439b))
+
+
 ## v1.7.0 (2026-08-27)
 
 ### Features
