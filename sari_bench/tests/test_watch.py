@@ -838,6 +838,8 @@ def test_every_finish_notifies_once() -> None:
         _write(battery / "battery.json", json.dumps({"planned_attempts": 9, "arm": "graph"}))
         make_attempt(battery, "won", 1, steps=healthy_steps(3), state="finished",
                      outcome="completed", success=True)
+        _write(battery / "won" / "try01" / scan.RESPONSE_FILE,
+               "I found the milk on the back wall and bought it.\n")
         make_attempt(battery, "missed", 1, steps=healthy_steps(3), state="finished",
                      outcome="completed", success=False)
         make_attempt(battery, "broke", 1, steps=healthy_steps(3), state="finished",
@@ -862,9 +864,32 @@ def test_every_finish_notifies_once() -> None:
         assert colors["Attempt succeeded"] == 0x4FA96B, colors
         assert colors["Attempt failed"] == 0xE0553F, colors
 
+        won = next(p[0] for p in posts if "succeeded: won" in p[0]["embeds"][0].get("title", ""))
+        response = next(f for f in won["embeds"][0]["fields"] if f["name"] == "Agent response")
+        assert response == {
+            "name": "Agent response",
+            "value": "`I found the milk on the back wall and bought it.`",
+            "inline": False,
+        }, response
+
         state.snapshot(force=True)
         assert len(_finish_titles(posts)) == 4, "a second pass re-announced finishes"
         print("ok  every halt is announced exactly once, successes included")
+
+
+def test_discord_response_field_is_bounded() -> None:
+    discord, posts = _recording_discord()
+    discord.attempt_finished({
+        "key": "verbose/try01", "prompt_id": "verbose", "attempt": 1,
+        "response": "x" * (1024 + 100),
+    })
+
+    fields = posts[0][0]["embeds"][0]["fields"]
+    response = next(field for field in fields if field["name"] == "Agent response")
+    assert response["inline"] is False
+    assert len(response["value"]) == 1024  # Discord's complete field limit, including backticks.
+    assert response["value"].endswith("…`")
+    print("ok  Discord bounds the agent response to one valid embed field")
 
 
 def test_agent_error_is_failure_and_automatic_invalid() -> None:
@@ -2095,6 +2120,7 @@ def main() -> int:
     test_report_and_kill_stamp()
     test_target_bitrate_math()
     test_every_finish_notifies_once()
+    test_discord_response_field_is_bounded()
     test_agent_error_is_failure_and_automatic_invalid()
     test_finish_attaches_replay_mp4()
     test_replay_seed_suppresses_backfill()

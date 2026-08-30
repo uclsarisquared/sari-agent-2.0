@@ -50,6 +50,11 @@ _AMBER = 0xE0A23F
 _GREEN = 0x4FA96B
 _BLUE = 0x4F7FA9
 
+# Discord allows up to 1,024 characters in an individual embed field. `_field` adds Markdown's two
+# wrapping backticks, so reserve them here. The dashboard keeps a longer response for review, but a
+# finish alert must remain a valid webhook payload even when an agent is unusually verbose.
+RESPONSE_FIELD_MAX_CHARS = 1022
+
 # Every finish is announced, successes included. This reverses an earlier decision to post failures
 # only: back then a success was a bare line of metrics, which really was noise at 3 tries x 20 prompts.
 # Now each message carries the attempt's replay, and a clip of a win is worth watching too.
@@ -210,6 +215,8 @@ class Discord:
                     _field("Exit code", attempt.get("exit_code")),
                     _field("Wall", _minutes(attempt.get("elapsed_seconds"))),
                     _field("Sandbox", attempt.get("sandbox_id") or "?"),
+                    _field("Agent response", _discord_response(attempt.get("response")),
+                           inline=False),
                 ],
             }]
         }, attachment=video)
@@ -292,6 +299,14 @@ def _retry_after(error: urllib.error.HTTPError) -> float:
 def _field(name: str, value: Any, *, inline: bool = True) -> dict[str, Any]:
     return {"name": str(name), "value": f"`{value}`" if value not in (None, "") else "`-`",
             "inline": inline}
+
+
+def _discord_response(value: Any) -> str:
+    """Makes a final response fit Discord's per-field limit without losing its ending marker."""
+    text = str(value or "").strip()
+    if len(text) <= RESPONSE_FIELD_MAX_CHARS:
+        return text
+    return text[:RESPONSE_FIELD_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _minutes(seconds: Any) -> str:
