@@ -21,8 +21,8 @@ SARI_BENCH_COORDINATOR=ws://<coordinator-host>:9000/sandbox ./SariSandbox
 # 4. Battery runner
 uv run poe dbench-run
 
-# 5. Optional live dashboard at http://127.0.0.1:8900
-uv run python -m sari_bench watch
+# 5. Live dashboard + Discord notifications, configured in watchconfig.toml
+uv run poe dbench-watch
 ```
 
 Build the player from Unity with **Build > Distributed Sari Bench Player**. For editor testing, set

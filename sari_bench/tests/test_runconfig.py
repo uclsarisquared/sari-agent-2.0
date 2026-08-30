@@ -12,6 +12,27 @@ import tomli
 
 from sari_bench.runner import BenchmarkRunner, async_main
 from sari_runconfig import RunConfigError, load_run_config
+from sari_watchconfig import WatchConfigError, load_watch_config
+
+
+def test_watcher_config_is_separate_from_runner_configs(tmp_path: Path) -> None:
+    watch_path = tmp_path / "watchconfig.toml"
+    watch_path.write_text(
+        "[discord]\nenable = true\ncollapse_alerts = false\n",
+        encoding="utf-8",
+    )
+    watch = load_watch_config(watch_path)
+    assert watch.get("discord", "enable") is True
+    assert watch.get("discord", "collapse_alerts") is False
+
+    runner_path = tmp_path / "runconfig.toml"
+    runner_path.write_text("[discord]\nenable = true\n", encoding="utf-8")
+    with pytest.raises(RunConfigError, match="unknown section"):
+        load_run_config(runner_path)
+
+    watch_path.write_text("[bench]\ntries = 3\n", encoding="utf-8")
+    with pytest.raises(WatchConfigError, match="unknown section"):
+        load_watch_config(watch_path)
 
 
 def test_context_ablation_configs_are_five_try_and_runner_is_complete() -> None:

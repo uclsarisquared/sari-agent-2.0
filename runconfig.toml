@@ -145,17 +145,3 @@ leg_retries = 1
 completion_guard = "vlm"
 # See [agent].refusal_cap_action above. Changing it makes a battery incompatible with a resume.
 refusal_cap_action = "continue"
-
-[discord]
-# Settings for the dashboard watcher's Discord notifications (sari_bench/watch).
-#
-# enable turns on Discord notifications without needing the --discord CLI flag. The two are
-# OR'ed together, so either is enough. It requires SARI_BENCH_DISCORD_WEBHOOK to be set in
-# secrets.env; notifications are skipped if that key is missing.
-# enable = true
-#
-# Collapse alerts post a still frame when an in-flight attempt's health score crosses into
-# "possible collapse" (stalled progress, spatial loop, repeated identical action, refusal spiral,
-# etc.) - a heuristic, not a hard failure, so this is the noisiest message type the watcher sends.
-# Off by default; uncomment to opt in.
-# collapse_alerts = true

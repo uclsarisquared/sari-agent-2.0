@@ -82,10 +82,6 @@ _SCHEMA: dict[str, dict[str, object]] = {
         "max_api_requeues": int,
         "sandbox_command_timeout": (int, float),
     },
-    "discord": {
-        "enable": bool,
-        "collapse_alerts": bool,
-    },
 }
 
 # DEPRECATED option values, still accepted so configs and scripts written before a rename keep

@@ -882,6 +882,7 @@ def test_discord_response_field_is_bounded() -> None:
     discord.attempt_finished({
         "key": "verbose/try01", "prompt_id": "verbose", "attempt": 1,
         "response": "x" * (1024 + 100),
+        "sandbox_alias": "sandbox-42", "sandbox_id": "f9a52d5409c64a32a57735646a76c23d",
     })
 
     fields = posts[0][0]["embeds"][0]["fields"]
@@ -889,6 +890,18 @@ def test_discord_response_field_is_bounded() -> None:
     assert response["inline"] is False
     assert len(response["value"]) == 1024  # Discord's complete field limit, including backticks.
     assert response["value"].endswith("…`")
+    sandbox = next(field for field in fields if field["name"] == "Sandbox")
+    assert sandbox["value"] == "`sandbox-42 (f9a52d5409c64a32a57735646a76c23d)`", sandbox
+
+    collapse_discord, collapse_posts = _recording_discord()
+    collapse_discord.collapse_alerts_enabled = True
+    collapse_discord.collapse({
+        "key": "verbose/try02", "prompt_id": "verbose", "attempt": 2,
+        "sandbox_alias": "sandbox-42", "sandbox_id": "f9a52d5409c64a32a57735646a76c23d",
+    }, frame=None)
+    collapse_fields = collapse_posts[0][0]["embeds"][0]["fields"]
+    collapse_sandbox = next(field for field in collapse_fields if field["name"] == "Sandbox")
+    assert collapse_sandbox["value"] == sandbox["value"], collapse_sandbox
     print("ok  Discord bounds the agent response to one valid embed field")
 
 

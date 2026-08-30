@@ -35,7 +35,7 @@ from sari_bench import capture, storage, video
 from sari_bench.protocol import DEFAULT_COORDINATOR_PORT, STATE_READY
 from sari_bench.storage import edit_json_locked
 from sari_bench.watch import health, notify, replay as replay_mod, scan
-from sari_runconfig import RunConfigError, load_run_config
+from sari_watchconfig import WatchConfigError, load_watch_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BENCH_ROOT = REPO_ROOT / "bench_runs"
@@ -1937,8 +1937,8 @@ def serve(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-pool", action="store_true", help="Do not connect to the coordinator.")
     parser.add_argument("--discord", action="store_true",
                         help=f"Send Discord notifications (needs {notify.WEBHOOK_ENV}).")
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "runconfig.toml",
-                        help="TOML run configuration read for [discord] settings.")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "watchconfig.toml",
+                        help="Watcher TOML configuration (defaults to watchconfig.toml).")
     parser.add_argument("--no-replay", action="store_true",
                         help="Announce halts without rendering and attaching a replay clip.")
     parser.add_argument("--replay-fps", type=float, default=video.UPLOAD_FPS)
@@ -1967,11 +1967,11 @@ def serve(argv: list[str] | None = None) -> int:
     discord_enabled = args.discord
     if args.config.is_file():
         try:
-            run_config = load_run_config(args.config)
-        except RunConfigError as error:
+            watch_config = load_watch_config(args.config)
+        except WatchConfigError as error:
             parser.error(str(error))
-        collapse_alerts = bool(run_config.get("discord", "collapse_alerts", False))
-        discord_enabled = discord_enabled or bool(run_config.get("discord", "enable", False))
+        collapse_alerts = bool(watch_config.get("discord", "collapse_alerts", False))
+        discord_enabled = discord_enabled or bool(watch_config.get("discord", "enable", False))
 
     discord = notify.Discord(enabled=discord_enabled, collapse_alerts=collapse_alerts)
     if discord_enabled and not discord.enabled:

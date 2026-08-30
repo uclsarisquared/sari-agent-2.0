@@ -1,0 +1,12 @@
+# SARI BENCH WATCHER CONFIGURATION.
+#
+# This file belongs only to `python -m sari_bench watch`; benchmark and agent settings live in
+# runconfig.toml or an experiment's bench TOML. The watcher loads this file by default.
+
+[discord]
+# Sends battery and attempt-finish notifications when SARI_BENCH_DISCORD_WEBHOOK is set in
+# secrets.env. The `--discord` flag also enables posting for an individual invocation.
+enable = true
+
+# Collapse alerts include a live still, but can be noisy during a large battery.
+collapse_alerts = false

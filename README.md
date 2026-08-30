@@ -67,6 +67,7 @@ The simulator WebSocket defaults to `ws://localhost:8080/commands`; override `ws
 
 - `runconfig.toml` controls the OCR backend, shared API retry policy, agent, limits, map, outputs, and benchmark.
   CLI flags override it.
+- `watchconfig.toml` controls the distributed-benchmark dashboard and Discord notifications.
 - `secrets.env` holds credentials and machine-specific paths and is gitignored.
 - `secrets.env.example` documents every supported environment variable.
 - `--help` on the agent or `python -m sari_bench <command> --help` is the authoritative flag list.
@@ -80,7 +81,7 @@ uv run poe ocr-server  # auto-selects DirectML on the configured RX 6650 XT host
 uv run poe dbench-coordinator
 SARI_BENCH_COORDINATOR=ws://<coordinator-host>:9000/sandbox ./SariSandbox
 uv run poe dbench-run
-uv run python -m sari_bench watch  # http://127.0.0.1:8900
+uv run poe dbench-watch  # dashboard + Discord notifications, http://0.0.0.0:8900
 ```
 
 See [`sari_bench/README.md`](sari_bench/README.md) for the concise fleet, resume, and reporting

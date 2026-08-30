@@ -17,6 +17,3 @@ completion_guard = "vlm"
 
 [experimental]
 adaptive_leg_replanning = true
-
-[discord]
-enable = true

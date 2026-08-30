@@ -81,7 +81,7 @@ class Discord:
         self.enabled = bool(enabled and self.webhook_url)
         # Collapse alerts fire on a health-score heuristic, not a hard failure, so they are the
         # noisiest message type this module sends. Off by default; see [discord].collapse_alerts
-        # in runconfig.toml.
+        # in watchconfig.toml.
         self.collapse_alerts_enabled = collapse_alerts
         self._last_sent: dict[str, float] = {}
         self._seen_finished: set[str] = set()
@@ -180,7 +180,7 @@ class Discord:
                 _field("Elapsed", _minutes(attempt.get("elapsed_seconds"))),
                 _field("Remaining", _minutes(attempt.get("remaining_seconds"))),
                 _field("Mode", attempt.get("mode") or "?"),
-                _field("Sandbox", attempt.get("sandbox_id") or "?"),
+                _field("Sandbox", _sandbox_label(attempt)),
             ],
         }
         if frame is not None and frame.exists():
@@ -214,7 +214,7 @@ class Discord:
                     _field("End reason", attempt.get("end_reason") or "-"),
                     _field("Exit code", attempt.get("exit_code")),
                     _field("Wall", _minutes(attempt.get("elapsed_seconds"))),
-                    _field("Sandbox", attempt.get("sandbox_id") or "?"),
+                    _field("Sandbox", _sandbox_label(attempt)),
                     _field("Agent response", _discord_response(attempt.get("response")),
                            inline=False),
                 ],
@@ -307,6 +307,15 @@ def _discord_response(value: Any) -> str:
     if len(text) <= RESPONSE_FIELD_MAX_CHARS:
         return text
     return text[:RESPONSE_FIELD_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _sandbox_label(attempt: dict[str, Any]) -> str:
+    """Puts the operator-facing sandbox alias before its opaque coordinator ID."""
+    alias = str(attempt.get("sandbox_alias") or "").strip()
+    sandbox_id = str(attempt.get("sandbox_id") or "").strip()
+    if alias and sandbox_id:
+        return f"{alias} ({sandbox_id})"
+    return alias or sandbox_id or "?"
 
 
 def _minutes(seconds: Any) -> str:
