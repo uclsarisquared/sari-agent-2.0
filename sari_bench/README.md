@@ -81,6 +81,7 @@ python -m sari_bench report                       # export CSV summaries
 python -m sari_bench video --battery <run-dir>    # render attempt replays
 python -m sari_bench watch --run-dir <run-dir>    # inspect a specific run
 python -m sari_bench cleanup-captures --bench-root bench_runs  # dry-run legacy cleanup
+python -m sari_bench optimize-artifacts --bench-root bench_runs  # dry-run closed-artifact compaction
 # Add --apply only after reviewing the per-attempt deletion summary.
 ```
 

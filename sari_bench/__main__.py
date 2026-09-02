@@ -11,6 +11,7 @@
     video         render an attempt's screenshots into a replay video
     cleanup-captures  safely remove legacy numbered captures after replay validation
     convert-step-pngs  re-encode legacy per-step PNG debug frames as JPEG
+    optimize-artifacts  compact safe closed benchmark artifacts (dry-run by default)
     ocr-server    run the shared runner-local PaddleOCR daemon
 """
 
@@ -196,6 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         from sari_bench.convert_step_pngs import main as convert_main
 
         return convert_main(rest)
+    if command == "optimize-artifacts":
+        from sari_bench.optimize_artifacts import main as optimize_main
+
+        return optimize_main(rest)
     if command == "ocr-server":
         from agent.vision.ocr_server import main as ocr_server_main
 

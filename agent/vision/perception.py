@@ -215,11 +215,16 @@ def annotate_target(ymin, xmin, ymax, xmax, file_path=None,
         y0, y1 = max(0, min(y0, H - 1)), max(0, min(y1, H - 1))
         draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
         draw.text((x0, max(0, y0 - 12)), "Target", fill="red")
-        # Debug-only annotated frame: cap on disk at 1080p (drawn at capture res, which may be 4K).
-        out_path = artifact_path("screenshots", "annotated_target.png",
-                                 legacy_base="")
-        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-        downscale_pil_for_storage(image).save(out_path)
+        # Debug-only annotated frame: cap on disk at 1080p (drawn at capture res, which may be
+        # 4K). Distributed benchmark archives use a compact, atomic JPEG; standalone diagnostics
+        # retain their historical PNG name and bytes.
+        if benchmark_artifact_mode():
+            out_path = artifact_path("screenshots", "annotated_target.jpg", legacy_base="")
+            save_jpeg_atomic(out_path, image, quality=85)
+        else:
+            out_path = artifact_path("screenshots", "annotated_target.png", legacy_base="")
+            os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+            downscale_pil_for_storage(image).save(out_path)
     except Exception as e:
         print(f"[perception] target annotation skipped: {type(e).__name__}: {e}")
 
@@ -253,8 +258,12 @@ def _draw_debug_frame(frame_source, boxes, chosen, aim_xy, out_path):
         ax, ay = int(aim_xy[0] * sx), int(aim_xy[1] * sy)
         draw.line([(ax - 28, ay), (ax + 28, ay)], fill="lime", width=3)
         draw.line([(ax, ay - 28), (ax, ay + 28)], fill="lime", width=3)
-        # Debug-only frame: cap on disk at 1080p (the detection ran on the full-res `image`, not this).
-        downscale_pil_for_storage(img).save(out_path)
+        # Debug-only frame: cap on disk at 1080p (the detection ran on the full-res `image`, not
+        # this). The caller chooses a .jpg path in distributed benchmark mode.
+        if benchmark_artifact_mode():
+            save_jpeg_atomic(out_path, img, quality=85)
+        else:
+            downscale_pil_for_storage(img).save(out_path)
     except Exception as e:
         print(f"[CENTER] debug frame save failed: {type(e).__name__}: {e}")
 
@@ -558,7 +567,8 @@ def center_object_on_screen(target_info, aim_norm=(0.5, 0.5), max_iters=5, tol_p
     view (see extend_arm_until_grabbed's vertical-gap note). Centring gets the target in
     front; it is not by itself a grab.
 
-    debug_dir: if set, each look writes {debug_dir}/look<i>_bbox.png - the frame with every VLM
+    debug_dir: if set, each look writes {debug_dir}/look<i>_bbox.png (or ``.jpg`` in distributed
+    benchmark mode) - the frame with every VLM
     candidate box (yellow), the locked instance (red) and the aim crosshair (green) - so a test
     can show what the detector returned and which instance was tracked. None in production (no
     image I/O beyond the annotate_target debug write).
@@ -610,8 +620,9 @@ def center_object_on_screen(target_info, aim_norm=(0.5, 0.5), max_iters=5, tol_p
         annotate_target(box['ymin'], box['xmin'], box['ymax'], box['xmax'],
                         source_image=image)
         if debug_dir:
+            suffix = ".jpg" if benchmark_artifact_mode() else ".png"
             _draw_debug_frame(image, boxes, box, (aim_x, aim_y),
-                              os.path.join(debug_dir, f"look{i}_bbox.png"))
+                              os.path.join(debug_dir, f"look{i}_bbox{suffix}"))
         dx, dy = box['cx'] - aim_x, box['cy'] - aim_y
         residual = (round(dx, 1), round(dy, 1))
         print(f"[CENTER] look {i}: '{box['label']}' center=({box['cx']:.0f},{box['cy']:.0f}) "

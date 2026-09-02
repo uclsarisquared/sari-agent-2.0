@@ -1,6 +1,9 @@
 import os
 from PIL import ImageDraw, Image
-from sim.env import TransformAgent, RequestScreenshot, artifact_path, screenshot_dir
+from sim.env import (
+    TransformAgent, RequestScreenshot, artifact_path, benchmark_artifact_mode,
+    save_jpeg_atomic, screenshot_dir,
+)
 
 def annotate_located_object(image: Image.Image | str, bbox: dict, color="red", radius=20):
     """
@@ -54,4 +57,8 @@ def annotate_boxes(roi, prefix="", file_path=None, source_image=None, output_dir
             source_image if source_image is not None else file_path,
             (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
         )
-        image.save(os.path.join(output_dir, f"{prefix+'-' if prefix else ''}{i}.png"))
+        stem = f"{prefix+'-' if prefix else ''}{i}"
+        if benchmark_artifact_mode():
+            save_jpeg_atomic(os.path.join(output_dir, f"{stem}.jpg"), image, quality=85)
+        else:
+            image.save(os.path.join(output_dir, f"{stem}.png"))

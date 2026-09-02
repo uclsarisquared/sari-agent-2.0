@@ -169,3 +169,19 @@ def test_annotations_default_to_the_attempt_directory(monkeypatch, tmp_path):
         source_image=Image.new("RGB", (8, 6), "white"),
     )
     assert (run_dir / "annotations" / "0.png").is_file()
+
+
+def test_benchmark_annotations_use_bounded_444_jpeg(monkeypatch, tmp_path):
+    run_dir = tmp_path / "try01"
+    monkeypatch.setenv(env.RUN_DIR_ENV, str(run_dir))
+    monkeypatch.setenv(env.BENCH_ARTIFACT_MODE_ENV, "1")
+    annotation_tools.annotate_boxes(
+        {"box": {"xmin": 1, "ymin": 1, "xmax": 6, "ymax": 5}},
+        source_image=Image.new("RGB", (2400, 1200), "white"),
+    )
+    output = run_dir / "annotations" / "0.jpg"
+    assert output.is_file()
+    with Image.open(output) as image:
+        assert image.format == "JPEG"
+        assert image.size == (1920, 960)
+        assert all(layer[1:3] == (1, 1) for layer in image.layer)

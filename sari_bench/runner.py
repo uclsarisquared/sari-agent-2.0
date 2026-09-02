@@ -1390,6 +1390,19 @@ class BenchmarkRunner:
         ):
             patch["wall_seconds"] = round(max(0.0, ended - float(started)), 1)
         _patch_json(manifest_path, patch)
+        # A rotated directory is no longer executable. Its completed replay is the durable review
+        # artifact; if it validates, discard only visual evidence covered by that replay. A bad or
+        # absent replay is deliberately conservative and keeps every file for diagnosis.
+        try:
+            from sari_bench.optimize_artifacts import purge_archived_visual_artifacts
+
+            removed, skipped = purge_archived_visual_artifacts(aside, apply=True)
+            if skipped:
+                _log(f"archived requeue artifact cleanup skipped for {aside.name}: {skipped}")
+            elif removed:
+                _log(f"archived requeue artifact cleanup removed {removed} item(s) from {aside.name}")
+        except Exception as error:  # archival cleanup must never prevent the logical retry
+            _log(f"archived requeue artifact cleanup failed for {aside.name}: {error!r}")
         _log(f"rotated a previous run dir aside: {aside.name}")
 
     def _schedule_requeue(
@@ -1654,6 +1667,9 @@ class BenchmarkRunner:
         env["SARI_WS_URI"] = lease.commands_uri
         env["SARI_OCR_URL"] = self.ocr_url
         env["SARI_MAX_API_REQUEUES"] = str(self.max_api_requeues)
+        # This is intentionally a runner-only marker. A local agent may have SARI_RUN_DIR for
+        # isolation but retains its established PNG diagnostic format.
+        env["SARI_BENCH_ARTIFACT_MODE"] = "1"
         env[SANDBOX_COMMAND_TIMEOUT_ENV] = str(self.sandbox_command_timeout)
         api_retry_signal = run_dir / API_RETRY_EXHAUSTED_SIGNAL
         env[API_RETRY_EXHAUSTED_PATH_ENV] = str(api_retry_signal)

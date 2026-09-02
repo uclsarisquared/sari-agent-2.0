@@ -21,6 +21,7 @@ from sim.sandbox_fault import signal_fault
 
 
 RUN_DIR_ENV = "SARI_RUN_DIR"
+BENCH_ARTIFACT_MODE_ENV = "SARI_BENCH_ARTIFACT_MODE"
 
 
 def current_run_dir() -> str | None:
@@ -32,6 +33,16 @@ def current_run_dir() -> str | None:
     Standalone scripts that do not establish a run keep their historical CWD-relative paths.
     """
     return os.environ.get(RUN_DIR_ENV) or None
+
+
+def benchmark_artifact_mode() -> bool:
+    """Whether this process is a distributed Sari Bench attempt.
+
+    The runner sets this deliberately rather than inferring it from ``SARI_RUN_DIR``: local
+    orchestrator runs also use attempt-local directories and must retain their historical PNG
+    diagnostics.
+    """
+    return os.environ.get(BENCH_ARTIFACT_MODE_ENV) == "1"
 
 
 def artifact_path(*parts: str, legacy_base: str = "") -> str:
@@ -121,7 +132,7 @@ def downscale_for_storage_jpeg(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H, 
             scale = min(max_w / w, max_h / h)
             img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
+        img.save(buf, format="JPEG", quality=quality, subsampling=0)
         return buf.getvalue()
     except Exception:
         return image_bytes
@@ -141,6 +152,46 @@ def downscale_pil_for_storage(img, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
         return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
     except Exception:
         return img
+
+
+def downscale_pil_for_storage_jpeg(img, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
+    """Bound a debug PIL image and return it as 4:4:4 JPEG bytes.
+
+    This is intentionally storage-only. Callers retain their original in-memory frame for model
+    decisions, OCR, and guards.
+    """
+    from io import BytesIO
+
+    bounded = downscale_pil_for_storage(img, max_w=max_w, max_h=max_h).convert("RGB")
+    out = BytesIO()
+    bounded.save(out, format="JPEG", quality=85, subsampling=0)
+    return out.getvalue()
+
+
+def save_jpeg_atomic(path, image, *, quality=85, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
+    """Atomically publish a bounded 4:4:4 JPEG artifact."""
+    from io import BytesIO
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    bounded = downscale_pil_for_storage(image, max_w=max_w, max_h=max_h).convert("RGB")
+    data = BytesIO()
+    bounded.save(data, format="JPEG", quality=quality, subsampling=0)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
+        dir=os.path.dirname(os.path.abspath(path)),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data.getvalue())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 # Which sandbox this process talks to. A plain local run needs no configuration; Distributed Sari

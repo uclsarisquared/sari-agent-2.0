@@ -3,7 +3,10 @@
 import base64
 import os
 
-from sim.env import _REQUEST_SCREENSHOT_, TransformHands, downscale_for_storage
+from sim.env import (
+    _REQUEST_SCREENSHOT_, TransformHands, benchmark_artifact_mode,
+    downscale_for_storage, downscale_for_storage_jpeg,
+)
 from toolset.actions import MANIPULATION_ACTIONS_REF
 from orchestrator.pickup_vlm_guard import (
     classify_inspection_label_presence,
@@ -255,9 +258,18 @@ def _run_held_item_inspection_macro(
             image_bytes = _REQUEST_SCREENSHOT_()["image"]
         frame_path = None
         if frames_dir:
-            frame_path = os.path.join(frames_dir, f"check{check_index:02d}_{phase}.png")
-            with open(frame_path, "wb") as frame_file:
-                frame_file.write(downscale_for_storage(image_bytes))
+            if benchmark_artifact_mode():
+                frame_path = os.path.join(frames_dir, f"check{check_index:02d}_{phase}.jpg")
+                payload = downscale_for_storage_jpeg(image_bytes, quality=90)
+            else:
+                frame_path = os.path.join(frames_dir, f"check{check_index:02d}_{phase}.png")
+                payload = downscale_for_storage(image_bytes)
+            temporary = f"{frame_path}.tmp"
+            with open(temporary, "wb") as frame_file:
+                frame_file.write(payload)
+                frame_file.flush()
+                os.fsync(frame_file.fileno())
+            os.replace(temporary, frame_path)
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         classify_kwargs = (
             {"ocr_lines": ocr_text} if ocr_text is not None else {})

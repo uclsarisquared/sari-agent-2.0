@@ -59,7 +59,8 @@ os.makedirs(run_dir, exist_ok=True)
 with open(os.path.join(run_dir, "liveness.json"), "w") as f:
     json.dump({"start": time.time(), "pid": os.getpid(),
                "uri": os.environ.get("SARI_WS_URI", ""),
-               "ocr_url": os.environ.get("SARI_OCR_URL", "")}, f)
+               "ocr_url": os.environ.get("SARI_OCR_URL", ""),
+               "bench_artifact_mode": os.environ.get("SARI_BENCH_ARTIFACT_MODE", "")}, f)
 
 # The real agent's token_meter rewrites this every few seconds, so it exists even for an attempt
 # that never reaches summary.json.
@@ -513,6 +514,7 @@ async def test_battery_runs_every_prompt_and_attempt() -> None:
                     live = json.loads(liveness.read_text())
                     assert live["uri"].endswith("/commands")
                     assert live["ocr_url"] == "http://127.0.0.1:9100"
+                    assert live["bench_artifact_mode"] == "1"
                     manifest = json.loads((liveness.parent / "attempt.json").read_text())
                     assert manifest["ocr_url"] == "http://127.0.0.1:9100"
 
