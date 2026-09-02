@@ -102,7 +102,7 @@ tries = 3
 queue_mode = "prompt-first"
 
 # Whole-attempt harness timeout and the agent's independent per-leg timeout, in minutes.
-time_limit = 120.0
+time_limit = 80.0
 per_leg_minutes = 40.0
 
 # Coordinator and sandbox startup behavior. Zero startup timeout waits indefinitely; an individual
