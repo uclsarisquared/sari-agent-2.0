@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-09-02)
+
+### Bug Fixes
+
+- **watch**: Separate watcher configuration
+  ([`c14dea6`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c14dea6cb6700d91a748239f11e7271bf90ef5f1))
+
+### Chores
+
+- **deps**: Refresh uv lockfile markers
+  ([`014ffd8`](https://github.com/uclsarisquared/sari-agent-2.0/commit/014ffd8d2a9f4ea37daaa5afb0fa863a4d66a31b))
+
+### Features
+
+- **ablation**: Run comprehensive prompt battery
+  ([`92ea6ea`](https://github.com/uclsarisquared/sari-agent-2.0/commit/92ea6eae489a8b20332c7f27e1bd2245ada2d726))
+
+- **bench**: Add safe benchmark artifact optimization
+  ([`226b51c`](https://github.com/uclsarisquared/sari-agent-2.0/commit/226b51c77d7bd83dad38cbec3023f680c013f7a2))
+
+- **watch**: Send completion notifications with replay clips
+  ([`829daf5`](https://github.com/uclsarisquared/sari-agent-2.0/commit/829daf5434a7b71e53c8466d5dd237e5eb03b183))
+
+
 ## v1.7.1 (2026-08-30)
 
 ### Bug Fixes
