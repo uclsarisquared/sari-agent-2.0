@@ -52,16 +52,20 @@ ENCODER_THREADS = 6
 # supplementary captures.
 MAX_REPLAY_FRAMES = 1_200
 
-# Full replays use the dense capture stream at four observations per playback second. The bounded
-# Discord artifact remains step-only at one frame per second.
+# Full replays use the dense capture stream at four observations per playback second. Uploads use
+# that same dense stream, compressed in time to roughly one second per agent step. That preserves
+# movement within a step instead of jumping from one agent observation to the next.
 DEFAULT_FPS = 4.0
-UPLOAD_FPS = 1.0
-UPLOAD_WIDTH = 960
+UPLOAD_FPS = 4.0
+UPLOAD_WIDTH = 640
+UPLOAD_STEP_FPS = 1.0
 
 # Name the upload copy separately from `replay.mp4`. Dashboard/CLI review owns that one; attachment
 # rendering must never quietly re-encode over it at upload quality.
 UPLOAD_NAME = "replay.discord.mp4"
 REPLAY_NAME = "replay.mp4"
+_UPLOAD_PROFILE_NAME = ".replay.discord.profile"
+_UPLOAD_PROFILE = "continuous-v1"
 
 
 def _steps_by_index(leg_jsonl: Path) -> dict[int, dict[str, Any]]:
@@ -368,7 +372,8 @@ def render(run_dir: Path, out_path: Path, *, fps: float = DEFAULT_FPS, width: in
             elif max_bytes is None:
                 _run(["ffmpeg", "-y", "-framerate", str(fps), "-i", input_pattern,
                       "-vf", scale, "-c:v", "libx264", "-preset", preset,
-                      "-threads", str(ENCODER_THREADS), "-pix_fmt", "yuv420p", str(part_path)],
+                      "-crf", "28", "-threads", str(ENCODER_THREADS), "-an",
+                      "-pix_fmt", "yuv420p", str(part_path)],
                      timeout=_remaining(deadline, timeout))
             else:
                 # Single-pass ABR with a hard ceiling and a 2 s VBV buffer: deterministic for a given
@@ -407,22 +412,98 @@ def render_for_upload(run_dir: Path, *, max_bytes: int = DISCORD_BUDGET_BYTES,
     notification it was meant to illustrate.
     """
     out_path = run_dir / UPLOAD_NAME
+    source = run_dir / REPLAY_NAME
     try:
         if reuse and out_path.is_file():
             size = out_path.stat().st_size
-            if 0 < size <= max_bytes and is_complete_mp4(out_path):
+            if (0 < size <= max_bytes and is_complete_mp4(out_path)
+                    and _upload_profile_current(run_dir)
+                    and (not source.is_file()
+                         or out_path.stat().st_mtime_ns >= source.stat().st_mtime_ns)):
                 return out_path
-        if render(run_dir, out_path, fps=fps, width=width, max_bytes=max_bytes,
-                  include_captures=False, max_frames=None) is None:
+        if valid_replay(source):
+            clip = _render_continuous_for_upload(
+                run_dir, source, out_path, max_bytes=max_bytes, fps=fps, width=width,
+            )
+        else:
+            # Legacy attempts may only have one screenshot per step. Keep the old path as a
+            # fallback, but do not make those sparse frames play four times faster just because
+            # continuous recordings now upload at four fps.
+            clip = render(run_dir, out_path, fps=UPLOAD_STEP_FPS, width=width,
+                          max_bytes=max_bytes, include_captures=False, max_frames=None)
+        if clip is None:
             return None
         size = out_path.stat().st_size
         if size > max_bytes:
             print(f"[sari-bench video] {out_path} is {size / 1e6:.1f} MB, over budget; skipping upload")
             return None
+        _mark_upload_profile(run_dir)
         return out_path
     except Exception as error:  # noqa: BLE001 - a replay is never worth disturbing the caller
         print(f"[sari-bench video] upload render failed for {run_dir}: {error!r}")
         return None
+
+
+def _upload_profile_current(run_dir: Path) -> bool:
+    try:
+        return (run_dir / _UPLOAD_PROFILE_NAME).read_text(encoding="utf-8").strip() == _UPLOAD_PROFILE
+    except OSError:
+        return False
+
+
+def _mark_upload_profile(run_dir: Path) -> None:
+    path = run_dir / _UPLOAD_PROFILE_NAME
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(_UPLOAD_PROFILE + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _render_continuous_for_upload(
+    run_dir: Path,
+    source: Path,
+    out_path: Path,
+    *,
+    max_bytes: int,
+    fps: float,
+    width: int,
+) -> Path | None:
+    """Downscale and time-compress the recorder's dense replay for a Discord attachment."""
+    if shutil.which("ffmpeg") is None:
+        print("[sari-bench video] ffmpeg not found on PATH")
+        return None
+    source_duration = ffprobe_duration(source)
+    if source_duration is None:
+        return None
+    # One second per agent observation keeps clips short enough for Discord while the source's
+    # intermediate frames make that second show motion rather than a single large jump. Never slow
+    # a naturally short replay down just to meet that target.
+    step_count = len(collect_frames(run_dir, include_captures=False))
+    target_duration = min(source_duration, max(1.0, step_count / UPLOAD_STEP_FPS))
+    speed = target_duration / source_duration
+    target_frames = max(1, round(target_duration * max(fps, 0.1)))
+    bitrate = target_bitrate(target_frames, fps, max_bytes)
+    part_path = out_path.with_name(
+        f".{out_path.stem}.{os.getpid()}.{threading.get_ident()}.part{out_path.suffix}"
+    )
+    filter_chain = (
+        f"scale={width}:-2:flags=lanczos,setpts={speed:.12g}*PTS,fps={fps:.12g}"
+    )
+    try:
+        _run([
+            "ffmpeg", "-y", "-i", str(source), "-vf", filter_chain,
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-threads", str(ENCODER_THREADS), "-an", "-b:v", str(bitrate),
+            "-maxrate", str(bitrate), "-bufsize", str(bitrate * 2),
+            "-movflags", "+faststart", str(part_path),
+        ])
+        if not is_complete_mp4(part_path):
+            raise OSError(f"ffmpeg produced an incomplete mp4 at {part_path}")
+        os.replace(part_path, out_path)
+    except (OSError, subprocess.SubprocessError) as error:
+        part_path.unlink(missing_ok=True)
+        print(f"[sari-bench video] upload transcode failed on {run_dir}: {error!r}", flush=True)
+        return None
+    return out_path
 
 
 def _run(command: list[str], *, timeout: float | None = None) -> None:

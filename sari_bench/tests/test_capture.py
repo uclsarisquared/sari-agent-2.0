@@ -40,7 +40,7 @@ def test_continuous_encoder_contract() -> None:
     command = capture.archive_command(Path("/tmp/replay.part.mp4"), 7.5)
     assert command[command.index("-framerate") + 1] == "7.5"
     assert command[command.index("-video_size") + 1] == "1280x720"
-    assert command[command.index("-crf") + 1] == "19"
+    assert command[command.index("-crf") + 1] == "28"
     assert command[command.index("-preset") + 1] == "veryfast"
     assert command[command.index("-threads") + 1] == "1"
     assert command[command.index("-pix_fmt") + 1] == "yuv420p"
@@ -244,7 +244,7 @@ def test_watch_and_replay_merge_supplementary_frames() -> None:
         assert [path for path, _ in full] == [step, preview], full
         assert "live observation" in full[1][1]
         assert [path for path, _ in upload] == [step]
-    print("ok  watch and full replay include captures; upload replay remains step-only")
+    print("ok  legacy frame collection retains the step-only upload fallback")
 
 
 def test_replay_frame_cap_preserves_steps_and_samples_captures() -> None:
@@ -315,6 +315,8 @@ def test_render_stages_jpeg_and_publishes_atomically() -> None:
         assert command[command.index("-i") + 1].endswith("f%05d.jpg"), command
         assert command[command.index("-preset") + 1] == "veryfast"
         assert command[command.index("-threads") + 1] == str(video.ENCODER_THREADS)
+        assert command[command.index("-crf") + 1] == "28"
+        assert "-an" in command
         assert timeout is not None and 0 < timeout <= 5.0
         assert output.read_bytes() == _minimal_mp4()
         assert video.is_complete_mp4(output)

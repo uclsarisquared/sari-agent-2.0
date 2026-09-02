@@ -44,28 +44,10 @@ MAX_ATTACHMENT_BYTES = 9_500_000
 # One retry on a rate limit, honouring Retry-After up to this many seconds.
 MAX_RETRY_AFTER_SECONDS = 30.0
 
-# Discord embed colours.
+# Collapse alerts remain colour-coded; completion notices intentionally are not.
 _RED = 0xE0553F
-_AMBER = 0xE0A23F
 _GREEN = 0x4FA96B
 _BLUE = 0x4F7FA9
-
-# Discord allows up to 1,024 characters in an individual embed field. `_field` adds Markdown's two
-# wrapping backticks, so reserve them here. The dashboard keeps a longer response for review, but a
-# finish alert must remain a valid webhook payload even when an agent is unusually verbose.
-RESPONSE_FIELD_MAX_CHARS = 1022
-
-# Every finish is announced, successes included. This reverses an earlier decision to post failures
-# only: back then a success was a bare line of metrics, which really was noise at 3 tries x 20 prompts.
-# Now each message carries the attempt's replay, and a clip of a win is worth watching too.
-_HARNESS_FAILURES = {
-    "agent_error",
-    "api_retry_exhausted",
-    "harness_timeout",
-    "sandbox_lost",
-    "harness_error",
-}
-
 
 class Discord:
     """Fail-soft Discord webhook client with per-key cooldowns."""
@@ -188,11 +170,11 @@ class Discord:
         self._post({"embeds": [embed]}, attachment=frame)
 
     def attempt_finished(self, attempt: dict[str, Any], video: Path | None = None) -> None:
-        """Announces one halt, with its replay clip when the watcher managed to render one.
+        """Post a completion marker, then its replay when one was rendered.
 
-        The clip is deliberately not referenced as ``attachment://`` the way `collapse` references its
-        frame: that only renders for stills. An unreferenced video attachment shows up as a player
-        under the embed, which also means a missing clip needs no change to the payload.
+        Completion is deliberately not a verdict. The agent's automatic success predicate can be
+        useful in reports, but a Discord notification should only say that a run ended and provide
+        the evidence for a person to review.
         """
         if attempt.get("end_reason") == "already_successful":
             return
@@ -202,24 +184,12 @@ class Discord:
         self._seen_finished.add(key)
         if not self._cooled(f"finished:{key}"):
             return
-        title, color = _finish_style(attempt)
-        self._post({
-            "embeds": [{
-                "title": f"{title}: {attempt.get('prompt_id')} try {attempt.get('attempt')}",
-                "description": attempt.get("prompt", "")[:400],
-                "color": color,
-                "fields": [
-                    _field("Outcome", attempt.get("outcome", "")),
-                    _field("Success", attempt.get("success")),
-                    _field("End reason", attempt.get("end_reason") or "-"),
-                    _field("Exit code", attempt.get("exit_code")),
-                    _field("Wall", _minutes(attempt.get("elapsed_seconds"))),
-                    _field("Sandbox", _sandbox_label(attempt)),
-                    _field("Agent response", _discord_response(attempt.get("response")),
-                           inline=False),
-                ],
-            }]
-        }, attachment=video)
+        label = f"{attempt.get('prompt_id')} try {attempt.get('attempt')}"
+        self._post({"content": f"Run complete: {label}"})
+        # Do not send a second text-only post when encoding/upload preparation failed. `_post`
+        # degrades an unusable attachment to JSON, so validate it before calling `_post` here.
+        if _usable_attachment(video) is not None:
+            self._post({"content": f"Replay: {label}"}, attachment=video)
 
     def suppress_finished(self, keys: Iterable[str]) -> None:
         """Marks halts as already-announced without sending anything.
@@ -259,23 +229,6 @@ class Discord:
         }, attachment=(attachments or [None])[0])
 
 
-def _finish_style(attempt: dict[str, Any]) -> tuple[str, int]:
-    """Title verb and colour for a halt.
-
-    `completed` only says the agent exited cleanly; `success` is the goal check. An attempt that ran to
-    the end and missed the goal is the normal, interesting case - amber, not red, which is reserved for
-    the harness itself going wrong.
-    """
-    outcome = attempt.get("outcome", "")
-    if attempt.get("success"):
-        return "Attempt succeeded", _GREEN
-    if outcome == "operator_kill":
-        return "Attempt killed", _BLUE
-    if outcome in _HARNESS_FAILURES:
-        return "Attempt failed", _RED
-    return "Attempt finished, goal not met", _AMBER
-
-
 def _usable_attachment(path: Path | None) -> Path | None:
     """The file if it can actually be uploaded, else None so the caller falls back to a text post."""
     if path is None or not path.is_file():
@@ -299,14 +252,6 @@ def _retry_after(error: urllib.error.HTTPError) -> float:
 def _field(name: str, value: Any, *, inline: bool = True) -> dict[str, Any]:
     return {"name": str(name), "value": f"`{value}`" if value not in (None, "") else "`-`",
             "inline": inline}
-
-
-def _discord_response(value: Any) -> str:
-    """Makes a final response fit Discord's per-field limit without losing its ending marker."""
-    text = str(value or "").strip()
-    if len(text) <= RESPONSE_FIELD_MAX_CHARS:
-        return text
-    return text[:RESPONSE_FIELD_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _sandbox_label(attempt: dict[str, Any]) -> str:

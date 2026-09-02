@@ -42,7 +42,7 @@ if _ROOT not in sys.path:
 
 from sari_bench import video
 from sari_bench.watch import health, scan
-from sari_bench.watch.server import WatchState, _safe_run_dir
+from sari_bench.watch.server import WatchState, _StatePoller, _safe_run_dir
 from sari_bench.watch.notify import Discord
 
 _PNG = bytes.fromhex(
@@ -812,9 +812,9 @@ def _recording_discord() -> tuple[Discord, list[tuple[dict, Path | None]]]:
     return discord, posts
 
 
-def _finish_titles(posts: list[tuple[dict, Path | None]]) -> list[str]:
-    titles = [p[0]["embeds"][0].get("title", "") for p in posts]
-    return [t for t in titles if t.startswith("Attempt")]
+def _completion_messages(posts: list[tuple[dict, Path | None]]) -> list[str]:
+    return [str(payload.get("content") or "") for payload, _ in posts
+            if str(payload.get("content") or "").startswith("Run complete:")]
 
 
 def test_target_bitrate_math() -> None:
@@ -852,46 +852,54 @@ def test_every_finish_notifies_once() -> None:
                            replay=None, min_interval=0.0)
         state.snapshot(force=True)
 
-        titles = _finish_titles(posts)
-        assert len(titles) == 4, titles
-        assert any("succeeded" in t and "won" in t for t in titles), titles
-        assert any("goal not met" in t and "missed" in t for t in titles), titles
-        assert any("failed" in t and "broke" in t for t in titles), titles
-        assert any("killed" in t and "killed" in t for t in titles), titles
-
-        colors = {p[0]["embeds"][0]["title"].split(":")[0]: p[0]["embeds"][0]["color"]
-                  for p in posts if p[0]["embeds"][0].get("title", "").startswith("Attempt")}
-        assert colors["Attempt succeeded"] == 0x4FA96B, colors
-        assert colors["Attempt failed"] == 0xE0553F, colors
-
-        won = next(p[0] for p in posts if "succeeded: won" in p[0]["embeds"][0].get("title", ""))
-        response = next(f for f in won["embeds"][0]["fields"] if f["name"] == "Agent response")
-        assert response == {
-            "name": "Agent response",
-            "value": "`I found the milk on the back wall and bought it.`",
-            "inline": False,
-        }, response
+        completions = _completion_messages(posts)
+        assert len(completions) == 4, completions
+        assert {message.removeprefix("Run complete: ") for message in completions} == {
+            "won try 1", "missed try 1", "broke try 1", "killed try 1",
+        }
+        assert not any("success" in message.lower() or "fail" in message.lower()
+                       for message in completions), completions
 
         state.snapshot(force=True)
-        assert len(_finish_titles(posts)) == 4, "a second pass re-announced finishes"
-        print("ok  every halt is announced exactly once, successes included")
+        assert len(_completion_messages(posts)) == 4, "a second pass re-announced finishes"
+        print("ok  every halt posts one outcome-neutral completion marker")
 
 
-def test_discord_response_field_is_bounded() -> None:
+def test_state_poller_notifies_without_dashboard_request() -> None:
+    """Discord completion detection must not depend on a browser polling `/api/state`."""
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(2), pid=os.getpid())
+        discord, posts = _recording_discord()
+        state = WatchState(bench_root=Path(temp), fixed_battery=battery, discord=discord,
+                           replay=None, min_interval=60.0)
+        poller = _StatePoller(state, interval=0.01)
+        poller.start()
+        try:
+            # Let the poller observe the live attempt before its terminal manifest appears.
+            deadline = time.monotonic() + 1.0
+            while state.battery != battery and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert state.battery == battery
+
+            _finish(run_dir, outcome="completed", success=False)
+            while not _completion_messages(posts) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert _completion_messages(posts) == ["Run complete: p try 1"], posts
+        finally:
+            poller.stop()
+            poller.join(timeout=1.0)
+    print("ok  the state poller announces a finish with no dashboard request")
+
+
+def test_discord_completion_message_is_outcome_neutral() -> None:
     discord, posts = _recording_discord()
     discord.attempt_finished({
         "key": "verbose/try01", "prompt_id": "verbose", "attempt": 1,
         "response": "x" * (1024 + 100),
         "sandbox_alias": "sandbox-42", "sandbox_id": "f9a52d5409c64a32a57735646a76c23d",
     })
-
-    fields = posts[0][0]["embeds"][0]["fields"]
-    response = next(field for field in fields if field["name"] == "Agent response")
-    assert response["inline"] is False
-    assert len(response["value"]) == 1024  # Discord's complete field limit, including backticks.
-    assert response["value"].endswith("…`")
-    sandbox = next(field for field in fields if field["name"] == "Sandbox")
-    assert sandbox["value"] == "`sandbox-42 (f9a52d5409c64a32a57735646a76c23d)`", sandbox
+    assert posts == [({"content": "Run complete: verbose try 1"}, None)], posts
 
     collapse_discord, collapse_posts = _recording_discord()
     collapse_discord.collapse_alerts_enabled = True
@@ -899,10 +907,8 @@ def test_discord_response_field_is_bounded() -> None:
         "key": "verbose/try02", "prompt_id": "verbose", "attempt": 2,
         "sandbox_alias": "sandbox-42", "sandbox_id": "f9a52d5409c64a32a57735646a76c23d",
     }, frame=None)
-    collapse_fields = collapse_posts[0][0]["embeds"][0]["fields"]
-    collapse_sandbox = next(field for field in collapse_fields if field["name"] == "Sandbox")
-    assert collapse_sandbox["value"] == sandbox["value"], collapse_sandbox
-    print("ok  Discord bounds the agent response to one valid embed field")
+    assert collapse_posts[0][0]["embeds"][0]["color"] == 0xE0553F
+    print("ok  Discord completion messages do not expose automatic success or failure")
 
 
 def test_agent_error_is_failure_and_automatic_invalid() -> None:
@@ -950,6 +956,11 @@ def test_finish_attaches_replay_mp4() -> None:
         # a finish that predates the watcher is deliberately seeded silently.
         run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(12), pid=os.getpid(),
                                frame_size=(320, 240))
+        # The runner normally publishes this continuous replay before it stamps the attempt
+        # finished. Its source duration is three seconds; a legacy step-only upload would instead
+        # play one frame per step for twelve seconds.
+        assert video.render(run_dir, run_dir / video.REPLAY_NAME,
+                            fps=4.0, width=320, include_captures=False) is not None
 
         discord, posts = _recording_discord()
         worker = ReplayNotifier(discord, max_bytes=8_000_000, width=320, fps=6.0)
@@ -959,18 +970,21 @@ def test_finish_attaches_replay_mp4() -> None:
             state = WatchState(bench_root=Path(temp), fixed_battery=battery, discord=discord,
                                replay=worker, min_interval=0.0)
             state.snapshot(force=True)
-            assert _finish_titles(posts) == []
+            assert _completion_messages(posts) == []
 
             _finish(run_dir, outcome="completed", success=True)
             state.snapshot(force=True)
             worker._queue.join()
 
-            attached = [p[1] for p in posts if p[0]["embeds"][0].get("title", "").startswith("Attempt")]
+            attached = [attachment for payload, attachment in posts
+                        if str(payload.get("content") or "").startswith("Replay:")]
             assert len(attached) == 1, attached
             clip = attached[0]
             assert clip == run_dir / video.UPLOAD_NAME, clip
             size = clip.stat().st_size
             assert 0 < size <= 8_000_000, size
+            duration = video.ffprobe_duration(clip)
+            assert duration is not None and duration < 5.0, duration
             # The full dashboard replay is queued by the same finish transition, without waiting
             # for a reviewer to open the modal.
             replay_clip = run_dir / video.REPLAY_NAME
@@ -982,7 +996,7 @@ def test_finish_attaches_replay_mp4() -> None:
 
             state.snapshot(force=True)
             worker._queue.join()
-            assert len(_finish_titles(posts)) == 1, "the halt was announced twice"
+            assert len(_completion_messages(posts)) == 1, "the halt was announced twice"
         finally:
             worker.stop()
         print(f"ok  a halt posts a {size / 1e6:.2f} MB replay clip, rendered once and reused")
@@ -1005,14 +1019,14 @@ def test_replay_seed_suppresses_backfill() -> None:
                                replay=worker, min_interval=0.0)
             state.snapshot(force=True)
             worker._queue.join()
-            assert _finish_titles(posts) == [], "a restart replayed finishes that predate it"
+            assert _completion_messages(posts) == [], "a restart replayed finishes that predate it"
 
             make_attempt(battery, "d", 1, steps=healthy_steps(2), state="finished",
                          outcome="agent_error")
             state.snapshot(force=True)
             worker._queue.join()
-            titles = _finish_titles(posts)
-            assert len(titles) == 1 and "d" in titles[0], titles
+            completions = _completion_messages(posts)
+            assert len(completions) == 1 and "d" in completions[0], completions
         finally:
             worker.stop()
         print("ok  a watcher restart seeds old finishes silently and still catches new ones")
@@ -2133,7 +2147,8 @@ def main() -> int:
     test_report_and_kill_stamp()
     test_target_bitrate_math()
     test_every_finish_notifies_once()
-    test_discord_response_field_is_bounded()
+    test_state_poller_notifies_without_dashboard_request()
+    test_discord_completion_message_is_outcome_neutral()
     test_agent_error_is_failure_and_automatic_invalid()
     test_finish_attaches_replay_mp4()
     test_replay_seed_suppresses_backfill()

@@ -42,6 +42,9 @@ DEFAULT_BENCH_ROOT = REPO_ROOT / "bench_runs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 POOL_REFRESH_SECONDS = 5.0
+# Notifications must not depend on a browser keeping `/api/state` open. This is separate from the
+# coordinator poller because an unavailable coordinator must never stop filesystem-based watching.
+WATCH_POLL_SECONDS = 1.0
 LOG_TAIL_LINES = 25
 LOG_MAX_LINES = 2000
 LOG_BOOTSTRAP_BYTES = 16_384
@@ -1634,6 +1637,31 @@ class _PoolPoller(threading.Thread):
         self._stop.set()
 
 
+class _StatePoller(threading.Thread):
+    """Continuously scan the watched battery so completion notifications are never UI-driven."""
+
+    daemon = True
+
+    def __init__(self, state: WatchState, interval: float = WATCH_POLL_SECONDS) -> None:
+        super().__init__(name="watch-state-poller")
+        self.state = state
+        self.interval = interval
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                # Force a scan: the state cache is for HTTP readers, whereas this is the durable
+                # completion detector that drives Discord and replay preparation.
+                self.state.snapshot(force=True)
+            except Exception as error:  # noqa: BLE001 - a malformed run must not kill the watcher
+                _log(f"state poll failed: {error!r}")
+            self._stop_event.wait(self.interval)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
 class Handler(BaseHTTPRequestHandler):
     state: WatchState = None  # type: ignore[assignment]
 
@@ -2002,6 +2030,8 @@ def serve(argv: list[str] | None = None) -> int:
         backfill=args.replay_backfill,
         coordinator_url=args.coordinator,
     )
+    state_poller = _StatePoller(state)
+    state_poller.start()
 
     battery = state.resolve_battery()
     if args.run_dir:
@@ -2027,6 +2057,7 @@ def serve(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         _log("stopping")
     finally:
+        state_poller.stop()
         if poller is not None:
             poller.stop()
         replay.stop()
