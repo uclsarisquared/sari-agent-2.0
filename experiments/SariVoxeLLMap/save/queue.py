@@ -59,9 +59,7 @@ class SaveTask:
         # Misc.: Set up name of overall task and logger
         self.logger = logging.getLogger(__name__)
 
-    # -----------------------------
     # Special Methods
-    # -----------------------------   
 
     def __call__(self, save_func, *args, **kwargs) -> None:
         """
@@ -111,9 +109,7 @@ class SaveTask:
         cpu_count = os.cpu_count() or 1
         return max(1, cpu_count - 1)
 
-    # -----------------------------
     # Private Methods
-    # -----------------------------       
 
     async def _worker(self):
         """
@@ -133,6 +129,4 @@ class SaveTask:
                 # Notify the queue that the "work item" has been processed.
                 self.queue.task_done()
 
-# -----------------------------
 # Utility
-# -----------------------------

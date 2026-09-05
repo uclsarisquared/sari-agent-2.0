@@ -1,26 +1,13 @@
-"""Phase 4 library API over the frozen mapping artifacts.
+"""Read frozen mapping artifacts and navigate to their checkpoints.
 
-This is the read side of `phase4_agent_integration.md`: everything an agent needs to answer
-"where is product X and how do I stand in front of it" WITHOUT a VLM doing spatial reasoning.
-The graph owns spatial truth; this module is how the agent reads the graph.
+StoreMap works offline; NavSession requires the live simulator. Navigation reuses
+capture_walk's defaults and movement helpers, and refuses stale map alignment.
 
-Reuses, never copies:
-  - executor knobs come from `capture_walk.build_parser()` parsed with defaults - the CLI and the
-    library CANNOT drift because there is only one definition of the defaults
-  - driving is `capture_walk.goto()` + `face()` + `pitch_to()` - the same A* + swept-LiDAR
-    executor that produced every capture the annotations were made from
-  - staleness refusal is `walk_map.check_alignment()` - but promoted from a warning to a raised
-    error, because a library caller has no console to read the warning on and stale annotations
-    describe a DIFFERENT shelf, convincingly
-
-Offline half (StoreMap) needs no sim; live half (NavSession) needs Play mode.
-
-    from nav.store_map import StoreMap, NavSession
     sm = StoreMap()
-    rows = sm.search("coca")             # deterministic tier; LLM resolver is the primary tier
-    nav = NavSession(sm)                 # sim must be in Play mode
-    ok = nav.goto(15)                    # drive + face the shelf perpendicular
-    png = nav.screenshot("cp15.png")     # level-camera capture of what the agent now faces
+    rows = sm.search("coca")
+    nav = NavSession(sm)
+    ok = nav.goto(15)
+    png = nav.screenshot("cp15.png")
     nav.close()
 """
 import json
@@ -332,7 +319,7 @@ class NavSession:
             self._stowed = False
 
 
-# ===== Phase 6.2: deterministic "go to the checkout counter" =====================================
+# Phase 6.2: deterministic "go to the checkout counter"
 def go_to_counter(nav, resync=True):
     """Drive a live NavSession to the checkout counter (the cp54 landmark) and face it - the
     fixed-target navigation mirror of perception.center_to_counter, and the 'go to the counter'
@@ -365,7 +352,7 @@ def go_to_counter(nav, resync=True):
     return {"arrived": bool(arrived), "checkpoint": cp, "x": x, "z": z, "yaw": yaw}
 
 
-# ===== Phase 6.2 (restructured): square onto the barcode scan pad (the "last metre") =============
+# Phase 6.2 (restructured): square onto the barcode scan pad (the "last metre")
 # The `aligned` verdict is on the LATERAL offset to the pad, not the raw yaw angle. Measured 2026-07-23
 # from 2 live checkout runs: the sweep scanned at 0.033 m (yaw 2.2 deg) and 0.047 m (yaw 3.2 deg) lateral.
 # The lateral strafe moves in 0.10 m steps and rounds, so it cannot converge finer than 0.05 m - which is
@@ -375,31 +362,14 @@ ALIGN_LATERAL_TOL_M = 0.05
 
 def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_iters=6, resync=True,
                      debug_dir=None):
-    """Square the agent onto the checkout scan pad from the counter checkpoint - the visual-servo
-    'last metre' the occupancy grid is too coarse to place (0.1 m cells vs a centimetre-scale pad).
-    Phase 6.2, promoted from place_probe's `align` + `adv`, which centred + aligned well enough to
-    scan on both live chain runs (2026-07-22).
+    """Align the held item with the scan pad from near the counter.
 
-    Deterministic-over-topology by design (the frozen-map-preferred Option A): all existing
-    primitives - center_to_scanner (perception) + strafe/advance (env) + the graph's perpendicular -
-    so this is regenerable and A/B-able rather than a re-dock of cp54 in the frozen topology. Splice a
-    scan-dock node only if this measures flaky (the same trigger the phase6 plan set for cp54).
+    Keep carrying hands active at REST. Center the pad, strafe using its offset from
+    the graph's perpendicular, then advance and re-center to reach target_slant.
+    Final detection, lateral tolerance, and slant determine aligned.
 
-    PRECONDITION: at/near the counter (call go_to_counter first) and CARRYING (hands at REST, active).
-    Like go_to_counter, this does NOT touch the hands - the caller keeps the item riding at REST.
-
-    Two loops:
-      1. Lateral: center_to_scanner -> yaw error vs cp54's perpendicular (from the graph) -> strafe
-         slant*sin(yaw_off) -> re-face the perpendicular -> re-centre. <= max_lateral_iters; converged
-         at <= one pan step (2.5 deg) of residual yaw.
-      2. Advance: close the pad's centre-LiDAR slant to `target_slant` (SCAN_REACH_M, measured
-         comfortable at 0.84-0.89 m), re-centring the scanner after each move.
-
-    Returns {'aligned': bool, 'slant': float|None, 'residual_yaw': float, 'checkpoint': id|None,
-    'iters': int, 'reason': str} - surfaced as `last_align`. `aligned` iff the pad was detected, the
-    yaw residual is within one pan step, AND the final slant <= target_slant + a small margin (the
-    item is within the hand's reach of the pad). An honest False tells the caller to re-approach or
-    fall back, never a silent miss."""
+    Return aligned, slant, residual_yaw, checkpoint, iters, and reason.
+    """
     from vision.perception import center_to_scanner   # lazy: perception pulls the OpenAI client (live-only)
 
     cp_id = nav.sm.counter_checkpoint()
@@ -459,14 +429,9 @@ def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_it
         (move_forward if steps > 0 else move_backward)(min(abs(steps), 10))
         center_to_scanner(debug_dir=debug_dir)     # a move de-centres the pad
 
-    # Final read for the honest verdict - re-measure BOTH the slant and the yaw/lateral from the ACTUAL
-    # final pose (the advance loop may have drifted laterally). The verdict is on the LATERAL offset,
-    # not the raw yaw angle: what the scan needs is the item transiting the pad, which is a lateral
-    # distance, and at close range a few degrees of yaw is only centimetres. CALIBRATED from 2 live
-    # runs (2026-07-23): the sweep SCANNED at lateral 0.033 m (yaw -2.2 deg) AND 0.047 m (yaw +3.2 deg);
-    # the old `abs(yaw) <= 2.5` verdict wrongly failed the 3.2 deg run even though it scanned. The
-    # strafe cannot converge finer than ~0.05 m anyway (half a 0.10 m step - round(x/0.10)==0 <=> x<0.05),
-    # so ALIGN_LATERAL_TOL_M ties the verdict to the strafe's own resolution AND the measured-OK bound.
+    # Remeasure distance and lateral offset after moving. Judge lateral alignment,
+    # not yaw: successful scans at 0.033/0.047 m support the 0.05 m tolerance,
+    # which also matches half the strafe's 0.10 m step.
     nav.pos, nav.rot, _ = step_agent((0, 0, 0), (0, 0, 0), nav.args.uri)
     yaw_off = normalize_deg(nav.rot[1] - perp)
     s = RequestLidarCenter()
@@ -492,7 +457,7 @@ def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_it
             "checkpoint": cp_id, "iters": iters, "reason": reason}
 
 
-# ===== Phase 6.2 (restructured): the deterministic checkout macro ================================
+# Phase 6.2 (restructured): the deterministic checkout macro
 def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, debug_dir=None):
     """Check out the item currently in hand: drive to the checkout (optional), align on the scan pad,
     scan the held item, then bag it in the tray - the ONE deterministic macro, NO LLM inside. This is
@@ -588,50 +553,20 @@ def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, deb
 
 
 def checkout_held_items(nav, drive=True, bag_if_unscanned=False, debug_dir=None):
-    """Check out EVERY item currently in hand in ONE fused pass - the both-hands sibling of
-    checkout_held_item. Drive + align ONCE, sweep-scan each held hand (verifying each off the POS
-    receipt) BEFORE bagging any, then bag each scanned item:
+    """Check out held items with one approach: scan each hand before bagging any.
 
-        [go_to_counter] -> align_to_scanner -> baseline receipt
-                        -> sweep LEFT  -> read screen  (scanned_left  = receipt delta)
-                        -> sweep RIGHT -> read screen  (scanned_right = delta vs the post-left receipt)
-                        -> bag LEFT -> bag RIGHT
+    Thread each scan's receipt into the next baseline and re-center on the pad after
+    screen reads. Scanning both before release allows retry while items remain held.
+    One held item delegates to checkout_held_item; empty hands are refused.
 
-    ORDER RATIONALE (user, 2026-07-23): both SWEEPS happen before either DROP. A sweep is REVERSIBLE
-    (the grip never opens - a held item keeps its Barcode trigger live, so it scans without dropping);
-    the bag is the ONE irreversible release. Front-loading both scans means a missed sweep is caught
-    while BOTH items are still in hand, so a single re-align retries the pair - versus scan-drop-scan-
-    drop (what two back-to-back checkout_held_item calls do), which commits the first drop before the
-    second scan is even known. One drive + one align also serves both items instead of re-approaching
-    the counter per hand.
+    NavSession must use stow_hands=False. Each primitive owns its hand's GRAB/REST
+    poses. Unless bag_if_unscanned is set, failed scans remain held for retry.
+    The fused two-hand sequence needs live acceptance validation.
 
-    Baseline threading: the receipt ACCUMULATES on the POS screen, so each sweep's `scanned` is a delta
-    against the receipt AFTER the previous sweep - scan_held_item returns `receipt`; we thread it as the
-    next sweep's baseline (baseline=None only for the first, a fresh checkout). scan_held_item ends by
-    yawing the body to the SCREEN to read it, so we center_to_scanner again before the next sweep - the
-    same pad<->screen dance checkout_held_item does around its single scan.
-
-    DEGRADES to checkout_held_item when only ONE hand holds (nothing to fuse - that macro already
-    drives/aligns/scans/bags a single hand); REFUSES with nothing held. Composes only the four measured
-    Phase 6.2 primitives (align/scan/place + the screen reads), so it adds NO new geometry or
-    calibration over the single macro - UNMEASURED live only in that two sweeps + two drops now run off
-    one stance; validate it with a two-item run before trusting it
-    (validation/acceptance/checkout.py and checkout_smoke.py).
-
-    PRECONDITION: holding item(s) (refused otherwise). NavSession must be stow_hands=False (carry-safe);
-    each primitive owns its own GRAB/REST around its hand, and this RESTs every held hand before driving.
-
-    bag_if_unscanned (default False): an item whose sweep did not register is NOT bagged (dropping it
-    would hide the scan miss) - it stays in hand, and the checkout completion predicate, seeing a hand
-    still gripping, sends the agent to re-run checkout. Set True only to force a bag.
-
-    Returns {success, scanned, placed, aligned, steps, reason, hand, per_hand}. To stay compatible with
-    predicate_checkout WITHOUT changing it, top-level `scanned`/`placed` are the AND across the held
-    hands (ALL scanned / ALL bagged) and `hand` is None - so the predicate's single-hand consistency
-    check is skipped and its still-gripping guard (any hand left holding => refuse) does the work.
-    `per_hand` carries the per-item {scanned, placed} detail. success = every held item scanned AND
-    bagged (both MEASURED - OCR receipt delta / released-under-a-placeable-verdict). Honest scoring
-    only: the gate owns scanned_verified (beep) and placed_verified (in-tray screenshot)."""
+    Return aggregate scanned/placed (all held items), success, aligned, steps, reason,
+    hand=None, and per_hand details. These measured verdicts remain separate from
+    human verification of scanning and landing.
+    """
     from vision.perception import (scan_held_item, place_held_item, center_to_screen,
                             center_to_scanner, read_text_in_box)
     from manip.manipulation import set_hand_pose, hand_grip_states

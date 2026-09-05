@@ -34,13 +34,8 @@ def _make_scan(hits, max_range=20.0, azimuth_step_deg=10.0):
     azimuth_samples = 1
     vertical_angles_deg = [v for v, _az, _r in hits]
     ranges = [r for _v, _az, r in hits]
-    # azimuth_start_deg varies per-channel in a real scan, but here each
-    # channel only has one azimuth sample, so encode each hit's azimuth via
-    # a per-call override isn't supported by the real format - instead give
-    # every channel the SAME azimuth_start_deg/step and rely on callers only
-    # needing one hit's azimuth at a time (tests below use single-hit scans
-    # for azimuth-sensitive checks, multi-hit scans only for angle-independent
-    # height checks at azimuth 0).
+    # The scan format shares azimuth across channels. Use single-hit scans for
+    # azimuth-sensitive checks; multi-hit height tests use uniform azimuth.
     az_degs = {az for _v, az, _r in hits}
     assert len(az_degs) == 1, "helper only supports uniform azimuth across hits in one scan"
     azimuth_start_deg = next(iter(az_degs))

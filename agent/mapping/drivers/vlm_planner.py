@@ -246,14 +246,8 @@ def render_ascii_map(grid, cur_world_xz, clusters, res_m=0.5, radius_m=None):
     coordinates, neither of which is coarsened.
     """
     factor = max(1, int(round(res_m / grid.res)))
-    # The TRUE world width of one character, which is res_m only when res_m is an exact multiple
-    # of grid.res. Deriving it from grid.res * factor instead of reusing res_m is not pedantry:
-    # labelling these axes with the requested res_m instead of the realised one put every
-    # coordinate in this map out by a factor of `factor` (5x at the defaults), so the text map
-    # contradicted both the stated pose and the map image's axes. The model was then being scored
-    # on reconciling three mutually inconsistent coordinate frames - measuring this bug, not its
-    # spatial reasoning. Caught only by printing the map next to a known pose; never label an axis
-    # with a requested resolution.
+    # Label axes with the realized cell width (grid.res * factor), which can differ
+    # from the requested resolution after rounding.
     coarse_m = grid.res * factor
     n_coarse = grid.n // factor
     usable = n_coarse * factor
@@ -764,13 +758,8 @@ class VLMAdvisedPlanner(VLMFrontierPlanner):
                 continue
             if best is None or len(path) < best[0]:
                 wps = simplify_path(path, self.grid, occupied_mask=occupied)
-                # STRICTLY wps[1] - the only waypoint with guaranteed line-of-sight from the
-                # CURRENT cell. A first draft skipped waypoints inside goal_arrival_radius
-                # (capture_walk's executor habit) and MEASURED 2026-07-19, first live run:
-                # 3 of 28 advised asks got flagged crosses_inflation with dist=0.0 - the VLM
-                # had copied the advice EXACTLY and the ADVICE was the violation, because
-                # cur -> wps[2] carries no line-of-sight guarantee. An advisor whose advice
-                # fails the harness's own validator contaminates the attribution analysis.
+                # Only wps[1] has guaranteed line of sight from the current cell.
+                # Skipping nearby waypoints can advise a move through inflated obstacles.
                 target = (self.grid.to_world(*wps[1]) if len(wps) > 1
                           else self.grid.to_world(*c.centroid_cell))
                 best = (len(path), c.vlm_id, target)

@@ -211,13 +211,8 @@ class TestSimplifyPath(unittest.TestCase):
                              f"simplified waypoints {a}->{b} are not actually clear")
 
     def test_inflated_start_cell_does_not_produce_degenerate_first_waypoint(self):
-        # Regression: with the agent parked against a shelf, its own cell sits inside the
-        # body_radius inflation. _line_of_sight tested that start endpoint too, so EVERY
-        # shortcut from the start failed and simplify_path emitted the start cell as a
-        # DUPLICATE first waypoint. The executor then read to_world(start) == its own
-        # position as the target -> dist~0 -> false 'path blocked' (forward arc wide open,
-        # clearance 4.17m in the live log) -> replan->same-degenerate-path until the
-        # no-movement circuit breaker ended the run with the map half-built.
+        # An inflated start cell must not create a duplicate first waypoint.
+        # A zero-distance target otherwise stalls the executor until its circuit breaker.
         grid = OccupancyGrid(size_m=6.0, resolution=0.1)
         grid.log_odds[:, :] = -1.0
         grid.log_odds[30, 20:40] = 5.0                       # shelf column
@@ -354,12 +349,8 @@ class TestFrontierPlannerStateMachine(unittest.TestCase):
                              "a single block should be enough to switch goals by default")
 
     def test_blocklisted_cluster_is_not_treated_as_map_complete(self):
-        # Regression: a live run declared "map complete" with large unexplored areas still
-        # visible in the saved map, right after rapid-fire blocks (replan_stuck_steps=1)
-        # blocklisted every cluster the planner currently knew about. A blocklist entry means
-        # "deprioritized for goal_blocklist_steps," not "gone forever" - if it's the ONLY
-        # known cluster and it's genuinely still reachable, the planner must still go there
-        # instead of declaring DONE just because it happens to be on cooldown.
+        # A reachable cluster on cooldown must still be considered when it is the
+        # only frontier; blocklisting does not mean exploration is complete.
         grid = OccupancyGrid(size_m=10.0, resolution=0.1)
         grid.log_odds[10, 10] = -1.0
         grid.log_odds[50:54, 50:54] = -1.0  # exactly one real candidate cluster
@@ -439,12 +430,8 @@ class TestObservationVantages(unittest.TestCase):
         self.assertNotEqual(goal, centroid, "goal must be a standable vantage, not the unstandable frontier cell")
 
     def test_vantage_excludes_the_cell_the_agent_already_occupies(self):
-        # Regression: when a line-of-sight vantage coincides with the cell the agent already
-        # stands on (or within the waypoint-arrival radius of it), returning it produced a
-        # degenerate "go to your own cell" path -> the executor can't move -> the agent holds
-        # every step until the no-movement circuit breaker ends the run (a real stall seen
-        # live at a shelf-corner pocket re-picking top-wall frontier slivers already in view).
-        # Such self-vantages must be excluded so only real-movement vantages are offered.
+        # Exclude observation vantages at the current position or within arrival radius;
+        # zero-distance paths cannot make progress and exhaust the replanning budget.
         grid = self._wall_grid()
         planner = FrontierPlanner(grid, body_radius=0.3)
         occ_mask = _inflate_occupied(grid, 0.3)

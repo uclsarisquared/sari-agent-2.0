@@ -508,14 +508,9 @@ class WatchState:
             return {"ok": False, "error": repr(error)}
         return {"ok": True, **status}
 
-    # -- queue -----------------------------------------------------------------------------
-    #
-    # What the watcher can honestly say about dispatch order. It knows its own retry jobs exactly -
-    # it started them - and it knows from the pool how many sandboxes are free and how many acquires
-    # are parked coordinator-side. It does NOT know the battery runner's pending work items: a
-    # worker creates its run dir only after it holds a lease, so an attempt still waiting for one
-    # exists nowhere but in another process's asyncio queue. Those show up here only as the
-    # `coordinator_waiting` count they contribute to.
+    # Queue visibility covers watcher retries and coordinator wait counts.
+    # The battery's pending jobs live in another process and have no run directory
+    # until leased, so their order is unavailable here.
 
     # Retry states that are not yet holding a sandbox, in the order `_retry_worker` moves through
     # them. "running" has one; "failed" has stopped needing one.

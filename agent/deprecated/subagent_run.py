@@ -64,9 +64,7 @@ ASSOCIATIVE_CONFIG = OpenRouterConfig(
 )
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator LLM helpers
-# ---------------------------------------------------------------------------
 
 def _llm_client() -> OpenAI:
     return OpenAI(
@@ -167,9 +165,7 @@ def generate_handoff_summary(client: OpenAI, completed_subtask: str, final_state
     return _llm_call(client, system, user)
 
 
-# ---------------------------------------------------------------------------
 # Action dispatch
-# ---------------------------------------------------------------------------
 
 def dispatch_action(action: str, time_units: int, notes: dict, mode: str = None) -> None:
     action = action.strip()
@@ -206,9 +202,7 @@ def dispatch_action(action: str, time_units: int, notes: dict, mode: str = None)
         action_ref(time_units)
 
 
-# ---------------------------------------------------------------------------
 # Subtask runner
-# ---------------------------------------------------------------------------
 
 def _get_screenshot(run_entry: str, time_step: int) -> bytes:
     if run_entry:
@@ -353,9 +347,7 @@ def run_subtask(subtask: str, agent: EmbodiedAgent, context: str = "",
     return {"final_state": current_state, "step_notes": step_notes}
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator
-# ---------------------------------------------------------------------------
 
 def orchestrate(task: str, run_entry: str = ""):
     client = _llm_client()

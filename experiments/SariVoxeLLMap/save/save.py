@@ -45,9 +45,7 @@ def prep_dir_and_get_filepath(
 
     return filepath_wo_dot_ext, filepath
 
-# -----------------------------
 # Save Functions
-# -----------------------------    
 
 def save_npz(
     # Data

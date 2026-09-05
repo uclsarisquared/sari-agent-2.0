@@ -111,12 +111,8 @@ def build_tasks(sm):
         ("Find sardines.", "general_name", cps_matching(sm, "sardines"), "name"),
     ]
 
-    # 3. INGREDIENT - knowledge the index does not carry; scored vs catalog allergens.
-    # ONLY DISCRIMINATING allergens. MEASURED 2026-07-19: Milk covers 20/24 shelf checkpoints,
-    # Wheat 19/24, Soy 17/24 - "find something with milk" is satisfied by nearly every shelf in
-    # the store, so a resolver that answered "everywhere" would score ~1.0 and the task would
-    # measure nothing. Fish (3), Tree Nuts (3), Crustacean (2) and Egg (2) actually
-    # discriminate. Do not re-add the common allergens as scored tasks.
+    # Score only discriminating allergens. Milk, wheat, and soy occur on nearly
+    # every shelf; fish, tree nuts, crustacean, and egg distinguish locations.
     T += [
         ("Find an item containing fish.", "ingredient", cps_with_allergen(sm, "Fish"), None),
         ("Find something containing tree nuts.", "ingredient", cps_with_allergen(sm, "Tree Nuts"), None),

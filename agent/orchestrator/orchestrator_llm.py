@@ -33,9 +33,7 @@ FINDINGS_INPUT_MAX_CHARS = 200_000
 FINDINGS_STATE_MAX_CHARS = 40_000
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator LLM helpers
-# ---------------------------------------------------------------------------
 
 def _llm_client() -> OpenAI:
     """Build the shared orchestrator client from configured endpoint credentials."""

@@ -84,13 +84,8 @@ class TestBresenhamLine3D(unittest.TestCase):
                 self.assertEqual(_chebyshev(p, q), 1)
 
     def test_planar_reduction_matches_2d_up_to_tie_breaking(self):
-        # With y0 == y1 the (x,z) projection is the SAME line as the 2D _bresenham_line:
-        # same length, same endpoints, and every cell within one of the 2D line. It is NOT
-        # asserted to be the identical sequence - the two formulations break diagonal ties
-        # in opposite directions, so a single cell can differ by one on the driven axis.
-        # That's immaterial to free-marching (every cell is decremented regardless) and
-        # this test pins exactly that weaker-but-true guarantee so a future change can't
-        # silently widen the gap past one cell.
+        # Equal-height 3D and 2D lines have equal length/endpoints, with cells at most
+        # one apart. Their diagonal tie-breaking differs, so exact equality is invalid.
         rng = random.Random(1)
         for _ in range(5000):
             x0, z0 = rng.randint(-50, 50), rng.randint(-50, 50)
@@ -114,12 +109,8 @@ class TestBresenhamLine3D(unittest.TestCase):
             self.assertTrue(all(p[1] == y for p in pts))
 
     def test_reversing_endpoints_gives_the_same_line_up_to_tie_breaking(self):
-        # Driving-axis Bresenham is NOT reversal-symmetric - it breaks diagonal ties by
-        # direction, so a->b and b->a can differ by a cell. Free-marching never needs
-        # symmetry (rays always go sensor->hit), so rather than force it, this pins the
-        # real, benign behavior: same length, and any differing cell within one of the
-        # other line - so a future change can't silently turn a tie-break difference into
-        # a genuine divergence.
+        # Bresenham breaks diagonal ties by direction. Reversed rays may differ by
+        # one cell but must retain length and stay within one cell of each other.
         rng = random.Random(3)
         for _ in range(3000):
             a = (rng.randint(-40, 40), rng.randint(-40, 40), rng.randint(-40, 40))

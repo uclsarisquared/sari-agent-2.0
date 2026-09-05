@@ -2,23 +2,17 @@
 Methods for converting the points to 2D grids and 3D columns
 """
 
-# -----------------------
 # Imports
-# -----------------------
 
 import numpy as np
 import logging
 from time import time
 
-# -----------------------
 # Logging Setup
-# -----------------------
 
 logger = logging.getLogger(__name__)
 
-# -----------------------
 # Class for data storage
-# -----------------------
 
 class Voxelizator:
 
@@ -34,14 +28,12 @@ class Voxelizator:
         self.heightmap = np.array([]).reshape(0, 0)
         self.min_z = 0.0
 
-# -----------------------
 # Pre-processing
-# ----------------------- 
 
 def correct_coordinates(points: np.ndarray) -> np.ndarray:
     """
     Transform coordinates by swapping x and y values and inverting the z value to correct point cloud orientation.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :return: The coordinates of the points with the x and y values swapped and z inverted, which can be used for correcting the orientation of the point cloud data
@@ -54,7 +46,7 @@ def correct_coordinates(points: np.ndarray) -> np.ndarray:
 def sort_points_by_height(points: np.ndarray) -> np.ndarray:
     """
     Sorts the points by their z values (height) in ascending order, which can be used for sorting the point cloud data by height.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :return: The coordinates of the points sorted by their z values, which can be used for sorting the point cloud data by height
@@ -68,7 +60,7 @@ def sort_points_by_height(points: np.ndarray) -> np.ndarray:
 def preprocess_points(points: np.ndarray) -> np.ndarray:
     """
     Apply coordinate correction, height-based sorting, and non-negative shifting to prepare 3D points for voxelization.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :return: The coordinates of the points after pre-processing
@@ -86,14 +78,12 @@ def preprocess_points(points: np.ndarray) -> np.ndarray:
 
     return points
 
-# -----------------------
 # Filtering
-# -----------------------
 
 def remove_outliers(points: np.ndarray, num_std: float = 2) -> np.ndarray:
     """
     Removes outliers from the point cloud data by filtering out points that are more than 3 standard deviations away from the mean in any of the x, y, or z dimensions, which can be used for filtering out noise from the point cloud data.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :return: The coordinates of the points with outliers removed, which can be used for filtering out noise from the point cloud data
@@ -139,7 +129,7 @@ def remove_floor_ceil(
         ) -> np.ndarray:
     """
     Excludes floor and ceiling points using percentile-based filtering.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :param floor_cumulative_threshold: Percentile threshold for floor cutoff (default: 0.2 = remove bottom 20%)
@@ -173,14 +163,12 @@ def remove_floor_ceil(
 
     return points_wo_floor_ceil
 
-# -----------------------
 # Heightmap Generation
-# -----------------------
 
 def split_axes(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Splits the points into separate x, y, and z coordinate arrays for easier processing in heightmap generation.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :return: Three separate numpy arrays containing the x, y, and z coordinates of the points, which can be used for easier processing in heightmap generation
@@ -201,7 +189,7 @@ def get_histogram2d(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Computes a 2D histogram of point counts in the x-y plane using specified bin width.
-    
+
     :param points: The coordinates of the points within an arbitrary planar area in a single direction
     :type points: np.ndarray
     :param bin_width: The width of each bin in the x and y directions (default: 0.75)
@@ -244,7 +232,7 @@ def get_height_estimates(
 ) -> tuple[np.ndarray, float]:
     """
     Computes the specified percentile of z values for each bin in the 2D histogram, which can be used for estimating the height of each bin in the heightmap representation of the point cloud data.
-    
+
     :param x: The x-coordinates of the points
     :type x: np.ndarray
     :param y: The y-coordinates of the points
@@ -306,7 +294,7 @@ def get_height_filter_mask(
 ) -> np.ndarray | None:
     """
     Computes a boolean mask for the bins in the height estimates based on a height threshold, which can be used for filtering out bins that do not meet the specified height criteria in the heightmap representation of the point cloud data.
-    
+
     :param height_estimates: A 2D numpy array where each element represents the estimated height of each bin
     :type height_estimates: np.ndarray
     :param height_threshold: The minimum height threshold for a bin to be considered valid (between 0 and 1)
@@ -360,7 +348,7 @@ def get_filtered_heightmap(
 ) -> np.ndarray:
     """
     Applies a density and a height filter mask to the estimated heights to produce a filtered heightmap, which can be used for creating a heightmap representation of the point cloud data that only includes bins that meet the specified density criteria.
-    
+
     :param estimated_heights: A 2D numpy array where each element represents the estimated height of each bin
     :type estimated_heights: np.ndarray
     :param density_mask: A boolean 2D numpy array where True indicates bins that meet the density threshold and False indicates bins that do not
@@ -382,7 +370,7 @@ def format_back_to_unity_coordinates(
 ) -> list[tuple[float, float, float]]:
     """
     Converts a 2D heightmap histogram into a list of three coordinates (x, y, height) for each non-zero bin, which can be used for creating a column representation of the point cloud data based on the heightmap.
-    
+
     :param heightmap: A 2D numpy array where each element represents the height of each bin
     :type heightmap: np.ndarray
     :param xedges: The edges of the bins in the x direction

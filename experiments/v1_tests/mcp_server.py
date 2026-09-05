@@ -22,9 +22,7 @@ import websockets
 from mcp.server.fastmcp import FastMCP
 from mcp import types
 
-# ---------------------------------------------------------------------------
 # Server setup
-# ---------------------------------------------------------------------------
 
 mcp = FastMCP(name="pantrypal-mcp")
 
@@ -32,9 +30,7 @@ WS_URI = "ws://localhost:8080/commands"
 UNIT_CAP = 10  # matches env.py's movement allowance
 
 
-# ---------------------------------------------------------------------------
 # Low-level WebSocket helper
-# ---------------------------------------------------------------------------
 
 async def _send(command: dict, uri: str = WS_URI) -> bytes | str:
     """
@@ -48,9 +44,7 @@ async def _send(command: dict, uri: str = WS_URI) -> bytes | str:
         return await ws.recv()       # text string
 
 
-# ---------------------------------------------------------------------------
 # Response parsers (mirrors env.py logic)
-# ---------------------------------------------------------------------------
 
 def _parse_agent_state(text: str) -> dict:
     coords = re.findall(r'\((.*?)\)', text, re.DOTALL)
@@ -78,9 +72,7 @@ def _parse_hand_state(text: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Shared movement helper
-# ---------------------------------------------------------------------------
 
 async def _repeat_transform_agent(translation, rotation, units: int) -> dict:
     """Call TransformAgent `units` times (capped at UNIT_CAP) and return the
@@ -111,9 +103,7 @@ async def _repeat_transform_hands(l_trans, l_rot, r_trans, r_rot, units: int) ->
     return state
 
 
-# ===========================================================================
 # NAVIGATION TOOLS
-# ===========================================================================
 
 @mcp.tool()
 async def move_forward(units: int) -> dict:
@@ -171,9 +161,7 @@ async def move_right(units: int) -> dict:
     return await _repeat_transform_agent((0.1, 0, 0), (0, 0, 0), units)
 
 
-# ===========================================================================
 # CAMERA / LOOK TOOLS
-# ===========================================================================
 
 @mcp.tool()
 async def pan_left(units: int) -> dict:
@@ -231,9 +219,7 @@ async def tilt_down(units: int) -> dict:
     return await _repeat_transform_agent((0, 0, 0), (2.5, 0, 0), units)
 
 
-# ===========================================================================
 # HAND — EXTENSION / RETRACTION
-# ===========================================================================
 
 @mcp.tool()
 async def extend_left_hand_forward(units: int) -> dict:
@@ -291,9 +277,7 @@ async def pull_right_hand_backward(units: int) -> dict:
     return await _repeat_transform_hands((0, 0, 0), (0, 0, 0), (0, 0, -0.025), (0, 0, 0), units)
 
 
-# ===========================================================================
 # HAND — RAISE / LOWER
-# ===========================================================================
 
 @mcp.tool()
 async def raise_left_hand(units: int) -> dict:
@@ -351,9 +335,7 @@ async def lower_right_hand(units: int) -> dict:
     return await _repeat_transform_hands((0, 0, 0), (0, 0, 0), (0, -0.025, 0), (0, 0, 0), units)
 
 
-# ===========================================================================
 # HAND — ROTATION
-# ===========================================================================
 
 @mcp.tool()
 async def rotate_left_hand_clockwise(units: int) -> dict:
@@ -407,9 +389,7 @@ async def rotate_right_hand_counterclockwise(units: int) -> dict:
     return await _repeat_transform_hands((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, -15, 0), units)
 
 
-# ===========================================================================
 # GRIP TOOLS
-# ===========================================================================
 
 @mcp.tool()
 async def toggle_left_grip() -> dict:
@@ -433,9 +413,7 @@ async def toggle_right_grip() -> dict:
     return {"gripped": "True" in raw}
 
 
-# ===========================================================================
 # RAW TRANSFORM TOOLS  (precise, single-step control)
-# ===========================================================================
 
 @mcp.tool()
 async def transform_agent(
@@ -493,9 +471,7 @@ async def transform_hands(
     return _parse_hand_state(raw)
 
 
-# ===========================================================================
 # PERCEPTION TOOLS
-# ===========================================================================
 
 @mcp.tool()
 async def get_current_view() -> list:
@@ -526,9 +502,7 @@ async def get_scene_json() -> str:
     return await _send({"command": "RequestJson"})
 
 
-# ===========================================================================
 # UTILITY TOOLS
-# ===========================================================================
 
 @mcp.tool()
 async def get_agent_state() -> dict:
@@ -580,9 +554,7 @@ async def reset_environment(degrees: float | None = None) -> bool:
     return True
 
 
-# ===========================================================================
 # Entry point
-# ===========================================================================
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

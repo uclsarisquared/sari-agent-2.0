@@ -89,12 +89,8 @@ def iter_banded_hits(scan, world_pos, yaw_deg, min_obstacle_height=0.05,
             if r >= max_range - 1e-3:
                 continue
             if r <= exclusion_range + 1e-3:
-                # Below the sensor's stated minimum reliable range OR within
-                # self_exclusion_range - the latter covers the agent's own body
-                # (stowed hands/arms/shoulders sitting near the sensor), confirmed
-                # via a live scan: a fixed hit at ~0.6-0.7m, sensor-mount height,
-                # and lateral offset landing right at body_radius kept showing up
-                # regardless of true position/heading - not a real obstacle.
+                # Exclude unreliable near returns and the agent's own body, which can
+                # otherwise appear as a persistent obstacle near the sensor.
                 continue
             height = _hit_height_above_root(v_deg, r, sensor_height_offset)
             if not (min_obstacle_height <= height <= max_obstacle_height):

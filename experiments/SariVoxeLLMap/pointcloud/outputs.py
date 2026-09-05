@@ -33,9 +33,7 @@ class PointcloudOutputs:
 
         self.logger = logging.getLogger(__name__)
 
-    # -----------------------------
     # Special Methods
-    # -----------------------------    
     
     def __repr__(self) -> str:
         """
@@ -139,9 +137,7 @@ class PointcloudOutputs:
             raise IndexError(f"Frame index {idx} is out of range for outputs with {len(self)} frames")
         return self.depth[idx], self.conf[idx], self.processed_images[idx]
     
-    # -----------------------------
     # Overall pointcloud data methods
-    # -----------------------------
 
     @property
     def dynamic_conf_thresh(self) -> float:
@@ -162,9 +158,7 @@ class PointcloudOutputs:
         conf_thresh = min(max(self.conf_thresh, lower), upper)
         return conf_thresh
     
-    # -----------------------------
     # __call__ helpers
-    # -----------------------------
 
     def _append(self, depth: np.ndarray, conf: np.ndarray, processed_images: np.ndarray, intrinsics: np.ndarray) -> None:
 

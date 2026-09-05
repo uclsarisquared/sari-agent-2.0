@@ -128,7 +128,7 @@ class EmbodiedAgent:
             self.associative_learner = AssociativeLearner(associative_config)
             self.set_semantic_memory()
 
-    # ------------------------------------------------------------------ services
+    # services
 
     def _hand_service(self) -> HandController:
         """Return the hand controller, constructing it for compatibility-created agents."""
@@ -180,7 +180,7 @@ class EmbodiedAgent:
         service.leg = self.__dict__.get("_mem_leg")
         return service
 
-    # --------------------------------------------------------- compatibility API
+    # compatibility API
 
     @property
     def _hands_active(self):
@@ -392,7 +392,7 @@ class EmbodiedAgent:
         result = self._navigation_service().metric_approach(move_steps)
         return result.note, result.image_bytes
 
-    # --------------------------------------------------------------- LLM passes
+    # LLM passes
 
     def _call_associative(
         self, system_instruction: str, image: Optional[Image.Image], text: str
@@ -560,7 +560,7 @@ class EmbodiedAgent:
             self._memory_service().persist()
         return stop_response(decision, semantic_text)
 
-    # ----------------------------------------------------------- single pipeline
+    # single pipeline
 
     def execute_lean(self, request: dict, timestep: int) -> dict:
         """Execute semantic routing, actor response, and memory updates for one step."""

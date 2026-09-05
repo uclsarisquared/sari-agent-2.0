@@ -115,12 +115,8 @@ SCAN_CSV_PATH = os.path.join(OUT_DIR, "scan_probe.csv")
 SCAN_CSV_COLS = ["ts", "label", "slant_start", "pitch_deg", "camera_height", "steps_extended",
                  "scanned_measured", "scanned_verified", "still_holding", "new_lines", "shot"]
 
-# The ONLY scan-distance number: get the pad's centre-LiDAR slant inside this before sweeping.
-# Seeded from the measured grab REACH_ENVELOPE (0.85 m); probe M3 is a yes/no check that a
-# full-extension sweep from inside it scans - NOT a boundary-mapping ladder. There is no
-# stop-distance calibration inside the sweep itself: the user enlarged the Easy trigger box
-# (2026-07-22) to cover the WHOLE scan region, so a full extension transits it, and the sweep
-# stops on the hand's own stall/clamp, never on a measured distance.
+# Scan inside the 0.85 m reach envelope. The enlarged trigger covers the full
+# sweep; extension ends at hand stall/clamp, not at a calibrated scan distance.
 SCAN_REACH_M = 0.85
 SWEEP_MAX_STEPS = 25   # extension cap; Unity clamps the hand ~0.5 m out and the stall guard stops
                        # earlier, so this is a runaway bound, not a reach claim
@@ -333,12 +329,8 @@ def main():
         read()
 
     def center(aim_y=None):
-        # Hands stay ACTIVE at REST while carrying - stowing them here would drop the item and undo
-        # Phase 6.1. REST is out of frame and LiDAR-culled, so the centring read is clean.
-        # aim_y dials the vertical aim live (see help): the counter bbox includes the vertical front
-        # face, so at the default aim the centre ray lands near the top's FRONT EDGE (measured live
-        # 2026-07-22, user screenshot) - a higher aim_y pushes the sample/release point deeper onto
-        # the surface. The dialed-in winner gets pinned into perception.COUNTER_AIM_NORM.
+        # Keep carrying hands active at REST. Adjust aim_y to move the sample away from
+        # the counter's front edge; pin the validated aim in COUNTER_AIM_NORM.
         aim = (COUNTER_AIM_NORM[0], aim_y) if aim_y is not None else COUNTER_AIM_NORM
         res = center_to_counter(aim_norm=aim, debug_dir=run_dir)
         print(f"  center_to_counter: {res.get('outcome')} "

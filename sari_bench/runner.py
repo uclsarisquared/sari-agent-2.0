@@ -1676,12 +1676,8 @@ class BenchmarkRunner:
         sandbox_fault_signal = run_dir / SANDBOX_FAULT_SIGNAL
         env[SANDBOX_FAULT_PATH_ENV] = str(sandbox_fault_signal)
         if self.map_dir:
-            # Belt to --output-dir's braces. The flag only reaches the call sites the orchestrator
-            # explicitly threads it through; this reaches every StoreMap() in the attempt's process
-            # (nav/store_map.default_output_dir reads it), so no helper can silently fall back to
-            # the frozen mapping/output - which in this checkout has no topology_final_shelf.json
-            # and used to take every attempt down in ~2s as a bare `agent_error`.
-            # Absolute because the agent runs with cwd=agent/.
+            # Set an absolute output path for every StoreMap in the subprocess, including
+            # helpers not reached by --output-dir. The agent runs with cwd=agent/.
             env["SARI_MAP_DIR"] = str(Path(self.map_dir).resolve())
 
         timeout = self.time_limit_minutes * 60.0 + self.timeout_grace

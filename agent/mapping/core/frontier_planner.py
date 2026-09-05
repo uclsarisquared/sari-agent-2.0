@@ -133,12 +133,8 @@ def _passable(occupied_mask, grid, cell):
     cx, cz = cell
     if not grid.in_bounds(cx, cz):
         return False
-    # Free and unknown cells are both passable - unknown is passable because
-    # routing toward/through unexplored space near a frontier goal is the
-    # point. swept_clearance_ahead() (LiDAR, checked every physical step by
-    # the caller) is the real-time safety net; occupied_mask (optionally
-    # inflated by body_radius - see _inflate_occupied) is what keeps the
-    # PLANNER from confirming paths the body can't actually fit through.
+    # Unknown cells are passable for frontier exploration. Inflated occupied cells
+    # provide planner clearance; the caller checks LiDAR before every physical step.
     return not occupied_mask[cx, cz]
 
 
@@ -391,13 +387,8 @@ class FrontierPlanner:
             if path_world is not None:
                 return path_world, goal_cell
 
-        # Fallback: none of the frontier's own cells is reachable. A very common reason is
-        # that the frontier hugs a shelf face - its cells are free (that's why they're
-        # frontiers) but sit inside the body-radius inflation, so A* can't stand ON them,
-        # even though the agent could plainly SEE them from a step back. Rather than declare
-        # the cluster unreachable (which ends the run early with grey pockets left around the
-        # shelves), try to reach a standable cell that has line-of-sight to the cluster - a
-        # scan from there resolves the frontier without ever standing on it.
+        # Shelf-edge frontier cells may lie inside body-radius inflation. Try a
+        # standable cell with line of sight so a scan can resolve them from a distance.
         for goal_cell in self._observation_vantages(cluster, occupied_mask, cur_cell):
             path_world = self._try_reach(cur_cell, goal_cell, window, occupied_mask)
             if path_world is not None:
@@ -471,14 +462,8 @@ class FrontierPlanner:
         self._dbg(f"_pick_and_plan start cur_cell={cur_cell} "
                   f"no_progress_count={self._no_progress_pick_count}")
 
-        # Circuit breaker: the blocklist-fallback pass below (needed so a merely-cooling-down
-        # cluster doesn't get mistaken for "nothing left to explore") can otherwise loop
-        # forever. body_radius inflation (see _plan_to_cluster/_inflate_occupied) fixes the
-        # main known cause - A* confirming a path through a gap too narrow for the agent's
-        # actual footprint, which real-time swept_clearance_ahead then correctly refuses -
-        # but this stays as a general safety net for any other way "A* says reachable, real
-        # time says blocked" could happen. If we're replanning repeatedly from the exact same
-        # cell with no progress, stop retrying and end the run instead of looping forever.
+        # Stop repeated replanning from the same cell: A* may consider a path reachable
+        # while live clearance checks keep blocking it.
         if cur_cell == self._no_progress_pick_cell:
             self._no_progress_pick_count += 1
         else:
@@ -508,14 +493,8 @@ class FrontierPlanner:
 
         clusters.sort(key=lambda c: score_cluster(c, cur_cell, self._blocklist))
 
-        # Two passes: prefer non-blocklisted clusters first, but fall back to blocklisted
-        # ones rather than declaring DONE if that's all that's left. A blocklist entry means
-        # "deprioritize this for goal_blocklist_steps," not "gone forever" - confirmed live,
-        # treating "every known cluster happens to be blocklisted right now" as "exploration
-        # complete" was a real bug: with replan_stuck_steps=1, a run near a persistent close
-        # obstruction blocklisted every cluster it knew about in quick succession and quit with
-        # large unexplored areas still visible in the saved map, long before the blocklist
-        # entries would have naturally expired.
+        # Prefer clusters off cooldown, then retry blocklisted ones. Cooldown means
+        # deprioritized, not explored; it must not cause premature completion.
         for consider_blocklisted in (False, True):
             self._dbg(f"pass consider_blocklisted={consider_blocklisted}: {len(clusters)} clusters to try")
             for i, cluster in enumerate(clusters):

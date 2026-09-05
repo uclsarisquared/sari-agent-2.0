@@ -76,21 +76,9 @@ def squash(s):
 def tok_sim(a, b):
     if a == b:
         return 1.0
-    # Containment counts as a full match: catalog SKUs concatenate words (BLACKCURRANTWAFERS,
-    # BBQOVERLOAD, AJINOMOTO), so 'wafers'/'bbq'/'aji' must meet them at full strength - the
-    # plain ratio gives 'wafers'~'blackcurrantwafers' 0.50 and the token gate kills a correct
-    # snap (measured: Bissin wafers, Aji Soup & Go, Pic-A all false-nulled). The floor is on
-    # the SHORTER string (>=3, with <=2-char tokens already dropped in tokens_of - a first
-    # attempt gated only the NAME side and LESLIE_S's 's' welded Piattos to Leslie's at 1.0).
-    # Deliberate consequences, all covered in self_test: 'king'-in-'kangkongking' passes here
-    # but "Bangkok King" still nulls on its other token (bangkok~kangkongking 0.63 < 0.65);
-    # 'hunt'-in-'hunts' passes but "Hunt's Corned Beef" nulls on corned/beef vs PORK&BEANS.
-    # ...but partial containment is NOT identity: 'pica' is a prefix of 'picattos' by
-    # coincidence, and at a flat 1.0 it outscored the true referent PIATTOS (0.933), snapping
-    # the misread to the wrong REAL product - the worst outcome the reconciler can produce.
-    # Scaling by length ratio keeps 'wafers'-in-'blackcurrantwafers' strong (0.90) while
-    # 'pica'-in-'picattos' (0.925) drops just below a near-perfect whole-token match, which
-    # puts PIATTOS back on top and demotes PICA to family-candidate at worst.
+    # Reward containment for concatenated SKU words, but require >=3 characters
+    # on the shorter side to avoid matches on suffixes such as 's'. Scale by length
+    # ratio so partial overlap ('pica'/'picattos') cannot beat a near-exact identity.
     if min(len(a), len(b)) >= 3 and (a in b or b in a):
         return 0.85 + 0.15 * (min(len(a), len(b)) / max(len(a), len(b)))
     return difflib.SequenceMatcher(None, a, b).ratio()
@@ -170,25 +158,13 @@ class Reconciler:
                     "match": {"method": "exact", "score": 1.0,
                               "runner_up": round(scored[1][0], 3)}}
 
-        # Fuzzy tier. THREE gates hold the null-over-guess line (all calibrated in self_test):
-        #  - overall score >= 0.76 ("Knock Krack" -> KNICK_KNACKS scores 0.764; the 0.76-0.86
-        #    band is why the audit list in the report exists)
-        #  - EVERY name token >= 0.65 against its best SKU token. This is the brand gate:
-        #    "Hunt's Corned Beef" scores 0.886 overall against STAR_NUTRIMEATS_CORNED_BEEF_
-        #    CHUNKY_CHEESE because corned+beef align perfectly and 'hunt'~'chunky' happens to
-        #    hit 0.600 exactly (common block "hun") - averages hide brands; minima don't, but
-        #    only if the gate clears coincidental blocks. MEASURED landscape: impostor pairs
-        #    top out at 0.600 (hunt~chunky); true misreads bottom at 0.727 (krack~knacks).
-        #    0.65 sits in the middle of that gap. Re-measure before moving it.
-        #  - category consistency when both sides know their category.
+        # Require overall score >=0.76, every name token >=0.65, and compatible
+        # categories. The per-token gate prevents strong generic words from hiding a
+        # brand mismatch; remeasure the calibrated thresholds before changing them.
         runner = next((sc for sc, sk, _ in scored[1:] if sk != best_sku), 0.0)
         cat_sku = self.cat_of.get(best_sku)
-        # Chips<->Biscuit is exempt from the category veto: the store's own taxonomy blurs the
-        # snack aisle (CLAUDE.md: cereals are filed under Biscuit; measured here: the annotator
-        # filed "Knock Krack" under Chips while the catalog says Knick Knacks is Biscuit, and
-        # the veto turned a calibrated-correct snap into a ghost IN PRODUCTION ONLY - the
-        # self-test passed because it doesn't pass categories. Divergence between those two is
-        # always a category-veto smell.)
+        # Allow Chips/Biscuit mismatches: annotation and catalog taxonomy disagree
+        # for some snacks, including Knick Knacks.
         blurry = {frozenset(("Chips", "Biscuit"))}
         cat_veto = (category and cat_sku and category != "other"
                     and category != cat_sku

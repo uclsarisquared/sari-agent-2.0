@@ -28,15 +28,9 @@ from sari_bench.watch import scan
 ATTEMPT_COLUMNS = [
     "battery_id", "prompt_id", "attempt", "family", "prompt", "looking_for",
     "outcome", "success",
-    # The human's answer, kept beside the predicate's rather than folded into it. `success` is what
-    # agent/orchestrator/subtask_completion.py decided - and several of its predicates grant on
-    # state they cannot ground. `verified_success` is a reviewer's call after watching the replay.
-    # `verdict_agrees` is the column this whole path exists to produce; `success_final` is the one to
-    # group by, preferring the human where there is one.
-    # `verified_verdict` carries the answers the boolean cannot: "invalid", a run the reviewer threw
-    # out, and "already_successful", a try halted because a sibling had already won the prompt. Those
-    # rows leave `verified_success`, `verdict_agrees` and `success_final` blank - excluded from every
-    # total rather than counted as failures.
+    # Keep predicate success and human review separate; success_final prefers review.
+    # Invalid and already_successful verdicts leave result booleans blank so totals
+    # exclude them instead of counting them as failures.
     "verifiable", "verified", "verified_verdict", "verified_success", "verdict_agrees",
     "success_final",
     # True on exactly one row per solved prompt: its lowest-numbered human-verified pass, the same

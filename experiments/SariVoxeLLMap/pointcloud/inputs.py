@@ -2,7 +2,6 @@ import os, logging, glob
 import numpy as np
 from PIL import Image
 from threading import Thread
-# ----------------------------------------------
 
 class PointcloudInputs:
 
@@ -29,9 +28,7 @@ class PointcloudInputs:
 
         self.logger = logging.getLogger(__name__)
 
-    # -----------------------------
     # Special Methods
-    # -----------------------------    
     
     def __repr__(self) -> str:
         """
@@ -62,7 +59,7 @@ class PointcloudInputs:
         Add new inputs for a single frame and get the current window of frames for inference.
         This method should be called after each new frame is added to the input directory and before running inference on the latest window of frames,
         to ensure that the latest inputs are included in the prediction.
-        
+
         :param self: The instance of the PointcloudInputs class.
         :type self
         :return: The current window of frames for inference, including the list of image file paths, the extrinsics array, and the intrinsics array.
@@ -125,9 +122,7 @@ class PointcloudInputs:
         else:
             return 0 <= id < len(self.image_paths)
         
-    # ---------------------------------------------
     # Get specific subsets of inputs for inference
-    # ---------------------------------------------
 
     @property
     def last(self) -> tuple[str, np.ndarray, np.ndarray]:
@@ -211,9 +206,7 @@ class PointcloudInputs:
 
         return self.image_paths, self.extrinsics, self.intrinsics
     
-    # ---------------------------------------------
     # Methods for modifying the inputs
-    # ---------------------------------------------
     
     def append(self, image_path: str, extrinsics: np.ndarray, intrinsics: np.ndarray) -> None:
         """
@@ -234,16 +227,6 @@ class PointcloudInputs:
         # 1) Append the new frame's image path
         self.image_paths.append(image_path)
 
-        # 2) Convert the image into an array and append it to the image_arrays attribute if image_type is set to "arrays"
-        #while not os.path.exists(image_path):
-        #    pass
-        #pil_image = Image.open(image_path)
-        #pil_image.load()
-        #np_image = np.asarray(pil_image, dtype=np.uint8)
-        #if self.image_arrays.shape[0] == 0:
-        #    self.image_arrays = np_image[np.newaxis]  # Initialize the image_arrays with the first image
-        #else:
-        #    self.image_arrays = np.concatenate((self.image_arrays, np_image[np.newaxis]), axis=0)
 
         # 3) Append the new frame's extrinsics
         assert extrinsics.shape == (4, 4), "Extrinsics for each frame must have shape (4, 4)"

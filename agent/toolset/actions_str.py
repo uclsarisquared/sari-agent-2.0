@@ -1,18 +1,3 @@
-# ACTIONS = ("MOVE_FWD: Move forward 0.1 units.\n"
-#            "MOVE_BACK: Move backward 0.1 units.\n"
-#            "MOVE_LEFT: Move left 0.1 units.\n"
-#            "MOVE_RIGHT: Move right 0.1 units.\n"
-#            "PAN_LEFT: Pan left 2.5 degrees.\n"
-#            "PAN_RIGHT: Pan right 2.5 degrees.\n"
-#            "TILT_UP: Tilt up 2.5 degrees.\n"
-#            "TILT_DOWN: Tilt down 2.5 degrees.\n"
-#            "EXTEND_LEFT: Extend left hand 0.025 units.\n"
-#            "PULL_LEFT: Pull left hand 0.025 units.\n"
-#            "EXTEND_RIGHT: Extend right hand 0.025 units.\n"
-#            "PULL_RIGHT: Pull right hand 0.025 units.\n"
-#            "GRIP_LEFT: Toggle left grip.\n"
-#            "GRIP_RIGHT: Toggle right grip.\n"
-#            "STOP: Stop all actions. Use this when you think you have completed the task.\n")
 
 
 NAVIGATION_ACTIONS = ("move_forward: Move forward 0.1 meters. This will move in the Z-axis. Maximum 10 steps per action.\n"

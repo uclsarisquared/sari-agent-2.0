@@ -327,12 +327,8 @@ def sweep_edge_side(grid, path_cells, side, *,
                 occupied_mask=occupied_mask, inflated_mask=inflated_mask,
             )
             if checkpoint is not None:
-                # point_cell (the on-path sample this checkpoint was found from, before its
-                # perpendicular offset) doesn't depend on `side` - a left and a right sweep
-                # over the same path_cells/interval_m sample the exact same point_cell
-                # sequence. Stamping it here gives splice_shelf_checkpoints' ladder-rung
-                # pairing an exact shared key to match corresponding left/right checkpoints
-                # by, instead of a fuzzy nearest-position search.
+                # Use the pre-offset path cell as the exact shared key for pairing left/right
+                # checkpoints sampled at the same path position.
                 checkpoint["path_point"] = point_cell
                 checkpoints.append(checkpoint)
 

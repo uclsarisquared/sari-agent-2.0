@@ -15,22 +15,11 @@ from orchestrator.held_item_inspection import _run_held_item_inspection_macro
 
 
 def _crouched_grab(action_ref, time_units, target_info, debug_dir, plan):
-    """AUTO-CROUCH (Phase D, 2026-07-23): resolve a `crouch` verdict INSIDE this one dispatch call -
-    crouch, re-center, re-measure, grab if now reachable, and ALWAYS stand back up (finally-guarded).
+    """Crouch, re-center, re-measure, and grab if reachable; always stand back up.
 
-    Posture is deliberately NOT the VLM's job: if standing up were left to the actor, a run could end
-    with the agent navigating crouched (or the learner drawing lessons from a stale posture). The
-    invariant this enforces: **the agent is only ever crouched inside a single grab call** - the same
-    scoping the hand-retract already uses. Measured basis (envelope.csv, 2026-07-22): L1 items missed
-    standing at slant 1.1-1.3 m and grabbed crouched at 0.6-0.7 m - crouching shortens the slant
-    distance below max_reach.
-
-    The re-center is MANDATORY: crouching drops the camera ~0.7 m, so the just-centred target is now
-    well off-centre; grabbing without re-centering is the grab-the-neighbour failure. Hands stay
-    ACTIVE throughout (Phase 6.1: hands are always-on at REST/GRAB; centring already runs with resting
-    hands everywhere else). If after crouching the target is STILL too far, we stand up and report the
-    measured move - the tool never moves the body (2026-07-21 directive); the router moves and the
-    next grab re-crouches (one spare cycle, rare)."""
+    Crouching shifts the camera, so re-centering prevents grabbing a neighboring item.
+    This call changes posture only; the router handles any required body movement.
+    """
     from sim.env import SetCrouch
     from vision.perception import center_object_on_screen
     base = {"gripped": False, "reach_verdict": "crouch", "move_steps": 0}
@@ -64,8 +53,7 @@ def _crouched_grab(action_ref, time_units, target_info, debug_dir, plan):
 
 
 def _last_reach_line(plan, gripped=None):
-    """Human-readable `last_reach` string the actor/learner reads (AGENT_STATE_DOC p). Carries the
-    measured Phase-D verdict + distance so the recovery is specific, not a guess."""
+    """Format the measured reach verdict for the actor and learner."""
     v = plan["verdict"]
     if v == "reachable":
         if gripped:
@@ -81,12 +69,8 @@ def _last_reach_line(plan, gripped=None):
     if v == "recenter":
         return f"RE-CENTER - {plan['reason']}"
     return f"{v.upper()} - {plan.get('reason', '')}"
-# Phase 6.3 macro actions: dispatched via the AGENT (they need the live NavSession), not via the
-# free-function action refs. Gated to manipulation mode alongside the raw hand actions (mode
-# coherence, 6.1) - a wrong-mode emit is blocked and the router flips to manipulation next step, the
-# same self-correcting loop extend_arm_until_grabbed already relies on.
-# Dual-hand (2026-07-23): each macro/grab family is {bare-name: 'auto', _left: 'left', _right: 'right'};
-# 'auto' resolves deterministically from grip state (manipulation.resolve_grab_hand/_release_hand).
+# Macros need the agent's live NavSession and share the manipulation-mode gate.
+# Bare names select a hand from grip state; suffixed names pin the side.
 _MACRO_ACTIONS = {"checkout_held_item": "auto",
                   "checkout_held_item_left": "left",
                   "checkout_held_item_right": "right"}
@@ -102,48 +86,25 @@ _INSPECT_HELD_ACTIONS = set(_INSPECT_MACRO_ACTIONS)
 _INSPECT_VISUAL_ACTIONS = {
     "pan_left", "pan_right", "tilt_up", "tilt_down", "center_object_on_screen",
 }
-# Small body repositioning inside an UNHELD inspect leg (2026-07-30). The decomposer contract has
-# always defined inspect as covering "small in-place repositioning to get a better look (stepping
-# closer, panning, crouching)" - but the scope gate allowed camera actions ONLY, so the contract
-# promised a capability dispatch denied. Measured consequence: an inspect leg that starts away from
-# its target (plan_legs gives inspect legs no checkpoints) can only pan forever - every other exit is
-# sealed (a STOP saying "I cannot see it" is refused by INSPECT_GUARD_SYSTEM, and an agent that
-# correctly declines to STOP never trips HALT_REFUSAL_CAP either), so the leg burns to its step cap.
-# This is a BUDGET, not a licence to navigate: the graph navigator still owns real travel (doctrine),
-# so the allowance is metered in 0.1 m steps and, once spent, the block message points at STOP with a
-# not-found answer rather than leaving the agent to guess.
+# Unheld inspections allow limited repositioning; graph navigation owns longer travel.
+# Exhausting this budget directs the actor to report absence and STOP.
 _INSPECT_APPROACH_ACTIONS = {"move_forward", "move_backward", "move_left", "move_right"}
 _INSPECT_MOVE_BUDGET_STEPS = 20   # 20 x 0.1 m = 2.0 m of repositioning per unheld inspect leg
 def _grab_ready(state):
-    """MEASURED readiness gate for run_leg's perception->manipulation grab auto-promotion (Option 2,
-    2026-07-23). True iff a MEASURED signal says the target is centred or in reach: last_center's
-    "SUCCESS ..." (center_object_on_screen verified the target on the aim point) or last_reach's
-    "REACHABLE ..." (plan_reach measured the slant distance inside the envelope). Both are CODE reading
-    the sim, never the model's eyeballed "looks centred" - so promoting a grab on this signal cannot
-    encourage the blind grab-at-air the centring/grab handshake edit fought (sys_inst.py header). An
-    absent/None field (e.g. step 1, before anything has been centred) reads as NOT ready, so a premature
-    grab still blocks and the router flips to manipulation next step, exactly as before."""
+    """Allow grab promotion only after measured centering or reach success."""
     lc = state.get("last_center") or ""
     lr = state.get("last_reach") or ""
     return lc.startswith("SUCCESS") or lr.startswith("REACHABLE")
 
 
-# The actor emits a single-quoted Python-literal dict (sys_inst OUTPUT FORMAT). ast.literal_eval
-# parses that - UNTIL a value carries an apostrophe ("Kellogg's", "it's"), which terminates the
-# single-quoted string early and raises SyntaxError. The free-text fields (reasoning, notes) are
-# where apostrophes live; the ACTIONABLE fields (actions, times) are apostrophe-free flat lists.
-# So when the whole-dict parse fails we recover just those two, letting the step execute instead of
-# being wasted. Measured 2026-07-24 on the "Get a cereal" run, where every cereal-brand mention
-# crashed the actor parse and burned the leg's 3-error budget.
+# Apostrophes in free-text fields can break the actor's Python-literal response.
+# Recover the flat actions/times lists when the full dict cannot be parsed.
 _ACTOR_LIST_RE = lambda key: re.compile(r"['\"]%s['\"]\s*:\s*\[([^\[\]]*)\]" % key, re.DOTALL)
 _ACTOR_ITEM_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
 def _salvage_actions_times(blob: str):
-    """Recover (actions, times) by regex from an actor blob whose full literal parse failed. Both
-    are flat lists of short, apostrophe-free tokens, so a bracket-scoped match is robust to broken
-    quoting anywhere else in the dict. Returns None if either list is missing or their lengths
-    disagree (a mismatch means the salvage is unreliable - fall through to the error path)."""
+    """Recover flat actions/times lists from malformed quoting, or None on mismatch."""
     am, tm = _ACTOR_LIST_RE("actions").search(blob), _ACTOR_LIST_RE("times").search(blob)
     if not (am and tm):
         return None
@@ -155,10 +116,7 @@ def _salvage_actions_times(blob: str):
 
 
 def parse_actor_response(text: str, pattern) -> dict:
-    """Parse the actor's fenced dict, tolerant of the apostrophe break above. Tiers, cheapest first:
-    ast.literal_eval (the contract) -> json.loads (a model that emitted real JSON) -> regex salvage
-    of actions/times with notes defaulted to {} (dispatch_action reads every notes field via .get,
-    so an empty dict is safe). Returns None only when even the actions/times can't be recovered."""
+    """Try Python literals, JSON, then actions/times salvage; return None on failure."""
     m = re.search(pattern, text or "")
     blob = m.group(1) if m else (text or "").strip()
     if not blob:
@@ -182,20 +140,11 @@ def dispatch_action(action: str, time_units: int, notes: dict, inline_arg: str =
                     state: dict = None, inspection_query: str = None,
                     inspection_log=None, inspection_frames_dir: str = None,
                     inspect_move_allowance: int = 0) -> dict:
-    """Execute one action. Returns a result dict; grab actions include a 'gripped' key, and the
-    checkout macro returns its {scanned, placed, ...} verdict (surfaced by run_leg as `last_checkout`).
+    """Execute one action and return its result, including any grab or checkout verdict.
 
-    Two gates guard the checkout macro:
-      - LEG-SCOPED (6.3): `checkout_held_item` belongs ONLY to a `checkout` leg. On any other leg
-        (pickup/goto/compare) the agent must NOT run the whole checkout chain - the item hands off to
-        the next (checkout) leg. A wrong-leg emit is redirected to STOP, not to manipulation, because
-        the fix is to FINISH this leg, not to run checkout early. Checked FIRST so it wins over the
-        mode-gate's 'route to manipulation' message (which was correct for grabs, harmful here).
-      - MODE COHERENCE (6.1): manipulation actions + the checkout macro run only in *manipulation*
-        mode (hands stay ACTIVE at REST elsewhere, so firing a hand action off-mode perturbs a carried
-        item). A wrong-mode emit blocks and the router flips to manipulation next step.
-
-    `leg_type=None` disables the leg gate (pickup_navigation, which has no legs, calls it that way)."""
+    Check the checkout leg restriction before the manipulation-mode gate so a wrong-leg
+    action requests STOP instead of a mode switch. leg_type=None disables the leg gate.
+    """
     inspect_move_steps = 0   # >0 only when THIS call spends part of an inspect leg's approach budget
     if leg_type == "inspect":
         inspect_state = state
@@ -285,12 +234,9 @@ def dispatch_action(action: str, time_units: int, notes: dict, inline_arg: str =
         # candidate/locked/aim frames there - see the runners' per-step screenshot logging.
         return action_ref(target_info, debug_dir=debug_dir) or {}
     elif action in _GRAB_ACTIONS:
-        # Phase D: MEASURE before the blind reach. RequestLidarCenter reads depth along the pitched
-        # gaze (hands are LiDAR self-culled, so an active hand does not occlude it); plan_reach turns
-        # it into a verdict. The tool still never moves the body - a move/crouch/bail/recenter verdict
-        # is surfaced as `last_reach` for the router/actor to act on next step (measured, not a guess).
-        # Any failure (transport error, or a pre-Phase-D sim build with no pose in the sample) falls
-        # back to the exact prior behaviour: one blind reach.
+        # Measure reach along camera gaze; hands are excluded from LiDAR.
+        # Surface non-reachable verdicts for recovery. Transport failures or missing
+        # pose data retain the blind-reach fallback.
         plan = None
         try:
             plan = plan_reach(RequestLidarCenter())

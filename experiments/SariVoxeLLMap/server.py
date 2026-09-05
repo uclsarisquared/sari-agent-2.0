@@ -76,7 +76,7 @@ class Server:
         """
         Handle the 'run_id' event sent by the client, which contains information about the current run or session.
         Used to initialize or reset the dynamic point cloud and the background frame queueing task for a new run.
-        
+
         :param sid: The session ID of the client that sent the run_id event.
         :param run_id: The unique identifier for the run or session sent by the client.
         """
@@ -99,7 +99,7 @@ class Server:
     async def frame_data(self, sid, data):
         """
         Handle the 'frame_data' event sent by the client by queuing incoming frame data for asynchronous processing into world points using the dynamic point cloud model.
-        
+
         :param sid: The session ID of the client that requested the world points data.
         :param data: The data sent by the client, which may include parameters for generating the world points (e.g., image directory, camera parameters).
         """
@@ -349,14 +349,12 @@ class Server:
     async def on_ping_from_client(self, sid):
         """
         For handling 'ping_from_client' events sent by the client. Upon receiving this event, the server will respond with a 'pong_from_server' event, which can be used by the client to measure latency.
-        
+
         :param sid: The session ID of the client that sent the ping event.
         """
         await self.sio.emit('pong_from_server', room=sid)
 
-# -----------------------
 # Main entry point
-# -----------------------
 
 if __name__ == '__main__':
     server = Server()

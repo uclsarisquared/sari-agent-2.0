@@ -61,17 +61,8 @@ class OccupancyGrid:
     def frontiers(self):
         free = self.log_odds < self.FREE_THRESHOLD
         occupied = self.log_odds > self.OCCUPIED_THRESHOLD
-        # "Unknown" must be the complement of free|occupied (matches how save_snapshot's
-        # display array - and every other consumer of this grid - treats a cell), not a
-        # narrow abs(log_odds) < 1e-6 check for literally-untouched cells. A cell grazed by
-        # only one or two rays (e.g. a long-range Bresenham pass-through, or a cell at the
-        # edge of the scan fan) sits at a small nonzero log-odds value that never crosses
-        # either threshold - under the narrow check that cell is neither "free" nor
-        # "unknown", so it can never become a frontier target and a free cell right next to
-        # it never sees it as an unexplored neighbor either. Confirmed live: this silently
-        # stalled exploration with large map regions still gray/unmapped, because
-        # cluster_frontiers() had nothing to find once every remaining unresolved cell fell
-        # into that invisible middle zone.
+        # Unknown is the complement of free|occupied. Weakly observed cells can have
+        # nonzero log odds below both thresholds and must remain frontier candidates.
         unknown = ~free & ~occupied
         # Pad with False instead of using np.roll's circular wraparound, so a cell on the
         # grid boundary never sees the opposite edge as a "neighbor" (np.roll would make

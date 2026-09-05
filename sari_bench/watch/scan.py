@@ -86,16 +86,8 @@ class AttemptView:
     retry_state: str = ""
     retry_error: str = ""
 
-    # The human verdict, kept strictly beside `success` and never folded into it. `success` stays the
-    # predicate's answer; `verified_success` is a reviewer's. Where they disagree is the signal.
-    # `verified_success` is None - not False - until someone actually looks, so "not reviewed" is
-    # never read as "reviewed and failed".
-    #
-    # `verified_verdict` is the reviewer's full answer and has four values, because "the harness
-    # broke" is not the same finding as "the agent failed the task": an INVALID run is one nobody
-    # should count in either direction. It carries `verified_success = None` for exactly the reason
-    # an unreviewed attempt does - no reader may total it as a failure. ALREADY_SUCCESSFUL is the
-    # same exclusion for the opposite cause: the try was halted because the prompt was already won.
+    # Keep human review separate from predicate success. None means unreviewed,
+    # invalid, or already_successful; none of these should count as a failure.
     verifiable: bool = False      # finished and eligible for a human verdict
     verified: bool = False
     # "pass" | "fail" | "invalid" | "already_successful", "" when unreviewed
@@ -491,15 +483,8 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
     started = manifest.get("started_epoch")
     deadline = manifest.get("deadline_epoch")
     archived = is_archived_requeue(view.state, view.pending_retry)
-    # An attempt that has stopped keeps the wall clock it stopped at, and has no deadline left to
-    # count down to. Three of the four ways to stop are not the tidy one:
-    #
-    #   - a rotated-aside requeue, whose directory nothing will ever write into again;
-    #   - an orphan, whose runner died without closing the attempt out;
-    #   - and, for either, a manifest written before this code learned to stamp a wall time.
-    #
-    # None of those leave a `wall_seconds` behind, and a clock still climbing on one of them says the
-    # opposite of what the tile's own badge says: that something is still running.
+    # Freeze stopped attempts' clocks, including requeues and orphans whose
+    # manifests may lack wall_seconds.
     stopped = view.state in {"finished", "orphaned"} or view.pending_retry or archived
     if stopped:
         wall = manifest.get("wall_seconds")
@@ -673,13 +658,8 @@ def run_dirs_of(battery: Path) -> list[Path]:
 def scan_battery(battery: Path, now: float, *, discovered: list[Path] | None = None) -> BatteryView:
     """Full state for one battery: its plan, every attempt, and the tally."""
     attempts = [scan_attempt(run_dir, battery, now) for run_dir in run_dirs_of(battery)]
-    # Worst-first. With eight concurrent attempts you want to look at one tile, not scan eight, so
-    # the ranking is the feature: live attempts sort by collapse score, finished ones sink.
-    #
-    # Rotated-aside requeues sink furthest, below even the finished ones. They used to lead the grid,
-    # because an attempt abandoned mid-step scores terribly on every collapse signal there is - and
-    # that score is about a run that no longer exists. Nothing can be done with one and nothing will
-    # happen to one; the retry that replaced it is the tile worth looking at.
+    # Sort live attempts by collapse score, then finished attempts, then abandoned
+    # requeues. A requeue's stale score must not outrank its active replacement.
     def rank(a: AttemptView) -> tuple[int, float, str, int]:
         tier = 2 if is_archived_requeue(a.state, a.pending_retry) else int(a.state == "finished")
         return (tier, -float(a.health.get("score") or 0.0), a.prompt_id, a.attempt)

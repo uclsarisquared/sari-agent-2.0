@@ -93,9 +93,7 @@ class SariVoxeLLMap:
             self.frame_process_task.cancel()
         self.logger.info("Server shutdown complete")
 
-    # -------------------------------------------
     # For external calls to queue frames for processing
-    # -------------------------------------------
 
     async def queue_frame(self, img_path: str, extrinsics: np.ndarray, intrinsics: np.ndarray) -> int:
         """
@@ -126,9 +124,7 @@ class SariVoxeLLMap:
             self.logger.warning("Dynamic point cloud not initialized. Call init_run() first.")
             return -1                
 
-    # -------------------------------------------
     # For agent usage
-    # -------------------------------------------
 
     async def get_current_map(self, current_position: tuple | None) -> list[tuple[float, float, float]]:
         """
@@ -159,9 +155,7 @@ class SariVoxeLLMap:
         
         return heightmap
 
-    # -------------------------------------------
     # Background processing of frames and saving results
-    # -------------------------------------------
 
     async def _process_frame_queue(self):
         """

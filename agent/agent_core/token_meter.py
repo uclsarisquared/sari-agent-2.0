@@ -1,48 +1,13 @@
-"""Process-wide token accounting for every LLM call the agent makes, split by which reasoner made it.
+"""Process-wide token and HTTP-attempt accounting, attributed by reasoner role.
 
-WHY A PATCH AND NOT PER-CALL-SITE COUNTERS: the token cost of one benchmark attempt is spread over
-call sites in agent_core.agent (actor + semantic/episodic learner + advisor), vision.perception
-(bbox/centering/OCR reasoning), vision.md_tools' qwen fallback, orchestrator.subtask_agents
-(decomposer + findings summary + final responder), orchestrator.pickup_vlm_guard's completion guards,
-mapping.drivers.vlm_planner and the map resolver. Most go through the OpenAI SDK's
-``chat.completions.create`` against the same OpenAI-compatible endpoint. The response wrapper counts
-token-bearing completions; a separate transport wrapper counts every actual HTTP send, including
-failed requests and retries performed inside either the SDK or ``BaseAgent._api_call_with_retry``.
+Wrap SDK completions to count usage and transport sends to count failed attempts
+and retries. role() uses a context variable; untagged calls and fresh threads
+default to UNATTRIBUTED. Calls without usage are recorded as untracked_calls.
+Claude CLI and the deprecated moondream API are outside this SDK accounting path.
 
-WHY ROLES ON TOP OF THAT: the totals alone answer "what did this attempt cost", never "what did the
-advisor cost" - so an ablation that removes a component cannot tell from them whether the component
-it cut was the expensive one. ``by_model`` does not help: every reasoner here runs on the same
-Qwen checkpoint. So each call site declares itself with the ``role`` context manager and ``_record``
-attributes the call to whatever role is current on this thread. A call made outside any ``role``
-block is counted under ``UNATTRIBUTED`` rather than dropped or guessed at, so the role rows always
-re-total to the whole and a new, untagged call site shows up as a visible gap instead of quietly
-inflating somebody else's share.
-
-The context variable is per-thread by construction (a fresh thread starts with the default), which
-is the right failure mode: a background thread's call reads as unattributed, never as whatever role
-the main thread happened to be inside at the time.
-
-The runtime resolver/advisor/verifier, endpoint annotator, probe, and mapping planner all use the
-SDK transport, so the patch is their single accounting path. ``claude_json`` (the claude-cli
-backend) is billed to a different account altogether and is not counted here.
-
-NOT COUNTED, deliberately: moondream (vision/md_tools) is a different API that reports no token
-usage at all, so there is nothing to add up; its qwen ERROR-fallback path does go through the SDK
-and is counted. Streamed responses carry no ``usage`` either and land in ``untracked_calls`` rather
-than being guessed at - the repo streams nowhere today, so that counter should stay 0.
-
-Usage (see run_agent.py):
-
-    from agent_core import token_meter
-    token_meter.install(run_dir)      # once, before any LLM traffic
-    with token_meter.role(token_meter.ROLE_ACTOR):
-        ...                           # every SDK call in here is billed to the actor
-    before = token_meter.snapshot()
-    ...
-    token_meter.delta(before)         # adds api_calls beside token-bearing calls
-    token_meter.dump()                # tokens.json, also auto-dumped every DUMP_INTERVAL_S
-
-``install`` is idempotent, so importing this from two places cannot double-count.
+Call install(run_dir) before traffic, wrap calls in role(ROLE_ACTOR) or another
+role, and use snapshot()/delta() for intervals. dump() writes tokens.json;
+periodic dumps preserve costs if the process is killed. Installation is idempotent.
 """
 
 from __future__ import annotations
@@ -143,12 +108,8 @@ def install(run_dir: Optional[str] = None) -> None:
 
     original_create = _completions.Completions.create
     if getattr(original_create, "_sari_token_meter", False):
-        # Already patched by another copy of this module (subtask_agents imports it as
-        # `agent_core.token_meter`, a different sys.path root would import it again) - wrapping the
-        # wrapper would double-count every call. Adopt the counters that copy is already filling,
-        # AND the context variable it reads roles from, so reading the totals - or opening a `role`
-        # block - through EITHER copy sees the same run. Adopting the counters without the var
-        # would send this copy's roles nowhere and file all its calls as unattributed.
+        # Adopt both counters and role context from an existing wrapper to avoid double
+        # counting when this module is imported under another path.
         _totals = original_create._sari_totals
         _totals.setdefault("api_calls", 0)
         _totals.setdefault("by_role", {})  # the installing copy may predate role accounting

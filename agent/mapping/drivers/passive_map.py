@@ -140,12 +140,8 @@ def run(args):
     last_poll_pos = None
     still_polls = 0
     scans_taken = 0
-    # TransformAgent's reply and the LiDAR scan are two separate WebSocket round-trips: if the
-    # agent is still moving between them (live WASD control), the pose used to project the scan
-    # is already stale by the time the scan is actually captured, smearing the grid. Instead of
-    # scanning on every poll where the agent has moved, wait until the agent has been
-    # (approximately) stationary for settle_time seconds — pose and scan can't drift apart if
-    # nothing is moving — then take the scan.
+    # Wait for a stationary pose before scanning: pose and LiDAR use separate
+    # WebSocket round-trips, so movement between them smears the projected grid.
     settle_polls_needed = max(1, int(round(args.settle_time / args.poll_interval)))
 
     print("[passive_map] polling pose + LiDAR — drive the agent in the Unity Game window "

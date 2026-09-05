@@ -14,13 +14,9 @@ from agent_core.prompt_loader import load_prompt
 
 
 def _guard_call(client, kwargs, call_name):
-    """One classifier request, billed to the `guard` role.
+    """Bill a fresh classifier request to the guard role, disabling SDK retries.
 
-    Disables the OpenAI SDK's own automatic retries without mutating the shared actor client;
-    fake/minimal clients used by offline tests need not implement ``with_options``. Every classifier
-    in this module goes through here, which is also what makes the guards a single line item in the
-    per-role token accounting - an ablation that drops the completion guard reads its saving off
-    that one row.
+    Minimal test clients may omit with_options; the shared client is never mutated.
     """
     request_client = (client.with_options(max_retries=0)
                       if callable(getattr(client, "with_options", None)) else client)
@@ -50,17 +46,7 @@ def _guard_call(client, kwargs, call_name):
 
 GUARD_SYSTEM = load_prompt("orchestrator/pickup_guard")
 
-# The definite-absence exception below is a CODIFICATION, not a behaviour change (MEASURED
-# 2026-07-31, A/B on three saved run frames, temperature 0): the pre-2026-07-31 wording ALREADY
-# returned match=true for "no X are on this shelf" 3/3, while holding "I cannot see it / need to get
-# closer" at match=false 3/3 and an invented price for an off-frame product at match=false 3/3. The
-# hypothesis this edit was written to fix - that the guard could not tell absence from inability, and
-# so sealed the last exit from an inspect leg whose target is not here - was WRONG; the model drew
-# that line on its own. What actually sealed that leg was the scope gate blocking all body motion
-# (see action_dispatch._INSPECT_MOVE_BUDGET_STEPS, the real fix). Kept because the distinction was
-# emergent rather than specified, and pinning it costs nothing. Do NOT loosen the inability clause on
-# the theory that it blocks completion: it is what forces the rotate-until-front-facing behaviour,
-# and an inspect leg that may answer "I could not see it" is trivially completable.
+# Definite visual absence can complete inspection; inability to see the target cannot.
 INSPECT_GUARD_SYSTEM = load_prompt("orchestrator/inspect_guard")
 
 INSPECTION_VISIBILITY_SYSTEM = load_prompt("orchestrator/inspection_visibility")
@@ -77,6 +63,21 @@ _SCHEMA = {
     "required": ["match", "reason"],
     "additionalProperties": False,
 }
+
+
+def _guard_kwargs(model, config, messages, *, temperature=None):
+    """Share request limits while allowing visibility checks to force temperature zero."""
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": getattr(config, "temperature", 0) if temperature is None else temperature,
+        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
+        "timeout": 30,
+    }
+    extra_body = getattr(config, "extra_body", None)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
 
 
 def _refusal(reason, latency_ms, sku):
@@ -98,16 +99,7 @@ def classify_pickup(client, model, config, image_b64, held_sku, target,
              "text": f"HELD SKU: {held_sku}\nTARGET: {target}\nDoes the held SKU match the target?"},
         ]},
     ]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": getattr(config, "temperature", 0),
-        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-        "timeout": 30,
-    }
-    extra_body = getattr(config, "extra_body", None)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    kwargs = _guard_kwargs(model, config, messages)
     try:
         parsed = _guard_call(client, kwargs, "completion_guard.pickup")
         latency = (time.monotonic() - started) * 1000
@@ -120,16 +112,10 @@ def classify_pickup(client, model, config, image_b64, held_sku, target,
 
 def classify_inspection(client, model, config, image_b64, query, answer, auxiliary_context,
                         image_media_type="image/png", evidence_frames=None):
-    """Verify a free-form inspection answer against the actor-visible frame plus earlier evidence.
+    """Verify an answer against earlier labeled evidence followed by the current frame.
 
-    A multi-item inspect leg is UNVERIFIABLE from one frame (2026-07-29, measured): a robot can only
-    turn one held item's printed label toward the camera at a time, so a two-item sugar comparison
-    reads item A at step N and item B at step M and no single frame ever shows both. The guard used
-    to see only the current frame and refused every STOP until the refusal cap - correct about the
-    image, wrong about the unit of evidence. `evidence_frames` is the leg's ordered ledger of frames
-    that already satisfied the inspection macro's visibility gate, each `{"label", "image_b64"}`;
-    they are sent BEFORE the current frame, mirroring classify_compare's labeled-candidate layout.
-    Empty/absent evidence reproduces the original single-image request exactly.
+    Multi-item answers may need several views because only one held label faces the
+    camera at a time. Empty evidence preserves the single-frame request.
     """
     started = time.monotonic()
     content = []
@@ -158,16 +144,7 @@ def classify_inspection(client, model, config, image_b64, query, answer, auxilia
         {"role": "system", "content": INSPECT_GUARD_SYSTEM},
         {"role": "user", "content": content},
     ]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": getattr(config, "temperature", 0),
-        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-        "timeout": 30,
-    }
-    extra_body = getattr(config, "extra_body", None)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    kwargs = _guard_kwargs(model, config, messages)
     try:
         parsed = _guard_call(client, kwargs, "completion_guard.inspection")
         latency = (time.monotonic() - started) * 1000
@@ -197,16 +174,7 @@ def classify_inspection_visibility(client, model, config, image_b64, query,
             )},
         ]},
     ]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-        "timeout": 30,
-    }
-    extra_body = getattr(config, "extra_body", None)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    kwargs = _guard_kwargs(model, config, messages, temperature=0)
     try:
         parsed = _guard_call(client, kwargs, "completion_guard.inspection_visibility")
         latency = (time.monotonic() - started) * 1000
@@ -245,16 +213,7 @@ def classify_inspection_label_presence(client, model, config, image_b64, query,
             )},
         ]},
     ]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-        "timeout": 30,
-    }
-    extra_body = getattr(config, "extra_body", None)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    kwargs = _guard_kwargs(model, config, messages, temperature=0)
     try:
         parsed = _guard_call(client, kwargs, "completion_guard.inspection_label_presence")
         latency = (time.monotonic() - started) * 1000
@@ -306,19 +265,11 @@ def classify_compare(client, model, config, candidate_frames, criterion, answer,
             f"{json.dumps(auxiliary_context, ensure_ascii=False, default=str)}\n"
             "Do the labeled candidate images conclusively support the reported choice?"
         )})
-        kwargs = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": COMPARE_GUARD_SYSTEM},
-                {"role": "user", "content": content},
-            ],
-            "temperature": getattr(config, "temperature", 0),
-            "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-            "timeout": 30,
-        }
-        extra_body = getattr(config, "extra_body", None)
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        messages = [
+            {"role": "system", "content": COMPARE_GUARD_SYSTEM},
+            {"role": "user", "content": content},
+        ]
+        kwargs = _guard_kwargs(model, config, messages)
         parsed = _guard_call(client, kwargs, "completion_guard.compare")
         latency = (time.monotonic() - started) * 1000
         return {"match": parsed["match"], "reason": parsed["reason"].strip(),
@@ -347,16 +298,7 @@ def classify_unknown(client, model, config, image_b64, task, claim, auxiliary_co
             )},
         ]},
     ]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": getattr(config, "temperature", 0),
-        "max_tokens": min(getattr(config, "max_tokens", 256), 256),
-        "timeout": 30,
-    }
-    extra_body = getattr(config, "extra_body", None)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    kwargs = _guard_kwargs(model, config, messages)
     try:
         parsed = _guard_call(client, kwargs, "completion_guard.unknown")
         latency = (time.monotonic() - started) * 1000

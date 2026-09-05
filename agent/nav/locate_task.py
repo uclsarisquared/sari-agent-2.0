@@ -83,15 +83,8 @@ VERIFY_SCHEMA = {
     "required": ["target_visible", "confidence", "where", "evidence", "seen_instead"],
 }
 
-# MEASURED 2026-07-23 (A/B, 12 eval tasks, qwen, resolve-only - mapping/plans/ResolverResolved.md
-# + mapping/output/resolver_ab/): the previous two-tier prompt STARVED 4/12 tasks (empty or
-# singleton candidates) because most eval tasks are attribute-shaped ("with stevia", "imported",
-# "< 30 pesos") and neither the name nor category tier fires for a property. Starvation is what
-# strands the graph arm: with 0-1 candidates, navigation mode has nowhere new to go and the VLM
-# actor falls back to manual body-moves (pickup run 0722_160423, stuck at cp48 for 12 steps).
-# This ATTRIBUTE-tier version measured 1/12 starved - and that one (Bingo Corned Beef -> [50]) is
-# a correct singleton - with no regression on any name/category task. Generosity is the point:
-# a wrong candidate costs one wasted visit, and the on-site verifier is the ground truth.
+# Attribute candidates prevent empty plans for requests such as 'with stevia'
+# or '<30 pesos'. Keep plausible candidates; on-site verification decides matches.
 RESOLVER_SYS = load_prompt("navigation/resolver")
 
 VERIFY_CATEGORY_SCHEMA = {
@@ -115,7 +108,7 @@ VERIFIER_CATEGORY_SYS = load_prompt("navigation/category_verifier")
 VERIFIER_SYS = load_prompt("navigation/verifier")
 
 
-# ---------------------------------------------------------------------------- backends
+# backends
 
 def claude_json(system, prompt, schema, image_paths=(), model="sonnet", effort="medium",
                 timeout=240.0):
@@ -233,7 +226,7 @@ def make_backend(args):
         base_url=args.base_url)
 
 
-# ---------------------------------------------------------------------------- the task
+# the task
 
 def resolve(call, sm, task):
     cats = sm.categories()
@@ -417,12 +410,8 @@ def drive_and_verify(call, sm, nav, task, resolution, report, run_dir, max_visit
         if verdict["seen_instead"]:
             print(f"[locate]    seen instead: {', '.join(verdict['seen_instead'][:5])}")
 
-        # Same-brand lookalike seen but variant unconfirmed -> the variant word is probably
-        # just below legibility at this distance. Re-verify on magnified tiles of the SAME
-        # frames before moving on (digital close-in; no sim motion). NAME tier only: a
-        # category/attribute verdict ("no chips / nothing stevia-like on this shelf") is about
-        # the shelf's kind, which magnification cannot change - and near_miss's token overlap
-        # is meaningless against attribute target names like "Imported Drink" anyway.
+        # For name-tier near misses, recheck magnified tiles of the same frames.
+        # Category/attribute mismatches do not benefit from magnification.
         if (not vis and zoom and resolution.get("tier") not in ("category", "attribute")
                 and near_miss(resolution["target_name"], verdict["seen_instead"])):
             print(f"[locate]    near miss (same brand seen) - zooming in ...")

@@ -1,21 +1,8 @@
-"""subtask_completion.py - typed-subtask contract + pluggable pickup completion predicates.
+"""Typed subtask parsing and completion predicates without simulator or model imports.
 
-Lightweight and sim-free BY DESIGN: no torch/agent/env/openai imports, so the offline predicate
-tests and the decomposer A/B harness load in milliseconds (importing subtask_agents pulls the whole
-model stack, ~25 s). subtask_agents.py imports the loaded prompt export, parser, and predicates FROM
-HERE; the prompt text itself lives in ``agent/prompts/orchestrator/decomposer.md``.
-
-The default pickup, compare, and unknown guards remain deterministic. An optional VLM backend may
-inject per-hand pickup verdicts, a labeled multi-frame compare verdict, or a current-frame unknown
-task verdict, while every inspect leg requires its own image-bound VLM verdict. Deterministic
-physical and structural prerequisites remain additive. A VLM `STOP` is still only a *request* these
-predicates grant or refuse.
-
-Type vocabulary is CLOSED: pickup | checkout | compare | goto | inspect. An untypeable decomposition degrades
-to `unknown`, which falls back to the pre-6.3 keyword guards (behaviour preserved, logged as
-`untyped`). `checkout` REPLACES the master plan's `place`: 6.2 collapsed scan-then-bag into the one
-deterministic macro `store_map.checkout_held_item`, whose measured `{scanned, placed}` verdict the
-checkout predicate reads rather than re-deriving.
+STOP requests must satisfy physical and structural prerequisites. Pickup, compare,
+and unknown tasks support optional VLM guards; inspection requires image evidence.
+Malformed decompositions fall back to an unknown task with keyword guards.
 """
 
 import json
@@ -31,43 +18,25 @@ logger = logging.getLogger(__name__)
 # Closed type vocabulary. `checkout` (not `place`) - see the module docstring.
 SUBTASK_TYPES = ("pickup", "checkout", "compare", "goto", "inspect")
 
-# A leg whose halt is refused this many times ENDS (never a fake grant), marked `halt_forced` with
-# the last refusal reason left in state, so a confused agent can't spin forever on STOP. Whether that
-# ends the whole TASK is the orchestrator's call, not this cap's: OrchestrationConfig
-# .refusal_cap_action defaults to 'continue', which retries the leg and then runs the remaining legs.
+# End the leg as halt_forced after repeated refusals; the orchestrator decides whether to retry.
 HALT_REFUSAL_CAP = 3
 
-# The symmetric twin of the refusal cap: if the completion predicate stays satisfied for this many
-# CONSECUTIVE steps and the agent still never proposes STOP (it keeps pursuing future goals from
-# persistent memory), the leg ends success=True with end_reason='completed_no_stop'. One cap stops
-# infinite STOP-spam; this stops infinite not-stopping. 6.4 reports halt_granted vs completed_no_stop
-# as the completion-detection health signal (did the agent know it was done, or need the backstop?).
+# Complete after this many consecutive satisfied steps without an actor STOP.
 COMPLETION_BACKSTOP = 3
 
-# Mid-leg self-correction (2026-07-23): after this many refused STOPs on a pickup leg while a hand
-# verifiably holds the WRONG item (mismatched_hands below), run_leg force-releases that hand (drops
-# the item) and resets the refusal budget ONCE per leg, so the agent gets a real second attempt at
-# the grab instead of spinning its remaining refusals into halt_forced. Set below HALT_REFUSAL_CAP
-# on purpose: one refusal is guidance the agent may act on itself; two identical refusals mean it
-# is not correcting, so code corrects.
+# Release a verified wrong item once per leg, before the refusal cap, to allow another grab.
 WRONG_ITEM_RELEASE_AFTER = 2
 
 
-# ---------------------------------------------------------------------------
 # Typed decomposer contract
-# ---------------------------------------------------------------------------
 
 TYPED_DECOMPOSER_SYSTEM = load_prompt("orchestrator/decomposer")
 
 
 def parse_decomposition(raw: str, original_task: str) -> list:
-    """Turn the decomposer LLM's raw output into a list of typed subtask dicts.
+    """Parse typed subtasks, falling back to the original task as unknown on invalid input.
 
-    Every returned item is a dict with at least {"type", "text"}, "type" in SUBTASK_TYPES or
-    "unknown". Robust by construction - ANY failure degrades to a single `unknown` subtask carrying
-    the original task text (which run_leg then handles with the pre-6.3 keyword guards), never an
-    exception. Old-style bare strings (a legacy or half-migrated decomposer) are wrapped as `unknown`
-    too, so a mixed response never crashes.
+    Legacy strings become unknown subtasks; malformed members are skipped.
     """
     array_match = re.search(r'\[[\s\S]*\]', raw or "")
     if not array_match:
@@ -118,9 +87,7 @@ def parse_decomposition(raw: str, original_task: str) -> list:
     return out or [{"type": "unknown", "text": original_task}]
 
 
-# ---------------------------------------------------------------------------
 # Name matching (the pickup / compare grounding primitive)
-# ---------------------------------------------------------------------------
 
 # Tokens that carry no product identity - dropped before overlap so a target like "the milk" doesn't
 # match on "the". Kept deliberately small; colour/qualifier words (green, large, orange) are content.
@@ -137,22 +104,10 @@ def _tokens(text: str) -> list:
     return [t for t in toks if len(t) > 2 and t not in _STOPWORDS]
 
 
-# --- catalog grounding (2026-07-23) -----------------------------------------------------------
-# Two catalog sources, both LAZY + FAILURE-SILENT by design (a machine without them degrades to the
-# plain substring check, keeping this module sim-free and import-cheap):
-#   1. Categories.json - the full category->SKU index (all ~250 SKUs). Path comes from
-#      $SARI_SANDBOX_DIR (secrets.env; see sim.sim_paths) - there is no path to the separate sim repo
-#      that works across machines, so it is read as a setting rather than hardcoded per-developer
-#      (the previous absolute broke on every machine but the one it was written on, silently, into
-#      this same failure-silent fallback - see agent/CLAUDE.md open thread on catalog grounding).
-#      Gives BOTH category membership (a 'Biscuits' target -> any Biscuit SKU) AND the set of
-#      category-name words, which are GENERIC (see below).
-#   2. products_final_shelf_reconciled.json - the annotated per-SKU records (~56 SKUs) carrying a
-#      clean NAME + VARIANT + APPEARANCE. Used to ENRICH the held item's identity text: the raw sim
-#      SKU string is munged ('JACK_AND_JILL_PIATTOS_...'), the reconciled name is clean ('Piattos').
-#      APPEARANCE (colour/packaging) rides along as a SOFT, ADDITIVE tie-breaker - it can only HELP a
-#      target token match (e.g. 'green Piattos' vs a 'green bag' appearance), never block one, so the
-#      78% of SKUs with no record never cause a false refusal.
+# Load catalog sources lazily; missing files fall back to substring matching.
+# Categories.json (under SARI_SANDBOX_DIR) supplies membership and generic tokens.
+# Reconciled records add names, variants, and appearance as positive-only evidence,
+# so products without annotations are not penalized.
 _RECONCILED_JSON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "mapping", "output", "products_final_shelf_reconciled.json")
 _CATEGORY_LEXICON = None    # {singularized category word: [sku_lower, ...]}
@@ -169,24 +124,9 @@ _CATALOG_LOADED = False     # True iff Categories.json was actually read, vs the
 # NOT size tokens (no unit), so they stay distinctive.
 _SIZE_TOKEN = re.compile(r"^\d+(g|kg|mg|ml|l|pcs)$|^\d+x\d+")
 
-# Colloquial words the store catalog has no clean category/token for -> the specific SKUs they name,
-# matched as lowercase substrings (same containment the category lexicon uses; brand+product suffices).
-# Each key is merged into the lexicon as a pseudo-category AND marked generic, so a BARE alias target
-# ('cereal') resolves to its SKU list while a NAMED product still wins on its own distinctive token
-# ('Coco Pops' -> coco_pops). Lists are kept TIGHT (only true members) so an alias can never grant a
-# neighbour that merely shares a broad category - it does NOT alias to a whole loose category.
-# Every list below was checked against the frozen catalog (measure, don't assume): the coverage sweep
-# is in tests + the 2026-07-24 session notes. WHY each is needed rather than left to substring match:
-#   cereal    - MEASURED refusal (run 2026-07-24: target 'cereal', held KELLOGG'S_COCO_POPS_30G,
-#               refused): no cereal SKU contains "cereal"; all six are filed under Biscuit by brand.
-#   candy /   - both alias the eat-as-is chocolate BARS (Schogetten, Lindt, M&M, Kinder Tronky - a
-#   chocolate   choco wafer bar, counted here per user call 2026-07-24). 'candy' matched 0 SKUs;
-#               'chocolate' matched 21 across 4 categories as a FLAVOR word - the alias TIGHTENS it to
-#               the bars, while a choco-flavored biscuit still matches on its brand ('Pocky chocolate').
-#   cheese    - dairy cheese only (Eden, Magnolia Cheezee/DailyQuezo). 'cheese'/'cheesy' is a flavor
-#               across Chips/Can/Nuts (19 raw matches); a flavored snack still matches on its brand.
-#   yogurt    - Cimory, Dutchmill Proyo, Pascual Greek, Bauer FruFru. Dutchmill *Delight* (cultured
-#               milk, not yogurt) is deliberately OUT.
+# Narrow SKU aliases resolve category names absent or ambiguous in the catalog.
+# Named products still match distinctive tokens. Chocolate/cheese flavors do not
+# imply category membership; yogurt excludes cultured milk such as Dutchmill Delight.
 _CATEGORY_ALIASES = {
     "cereal": ["coco_pops", "froot_loops", "frosties",
                "corn_flakes", "honeystars", "kokokrunch"],
@@ -196,13 +136,8 @@ _CATEGORY_ALIASES = {
     "yogurt": ["cimory", "proyo", "pascual_greek", "frufru"],
 }
 
-# Multi-word colloquialisms the single-token path can't resolve: 'energy drink' tokenizes to
-# energy+drink, and 'drink' alone matches Sprite/Pocari/Delmonte while MISSING Sting (no 'energy' in
-# its SKU). Keyed on the whole PHRASE, tested as a normalized substring of the target. A matched
-# phrase contributes its words to the generic set FOR THAT TARGET ONLY (see blob_matches_target), so
-# 'Cobra energy drink' still prefers the distinctive 'cobra' (won't grant a Red Bull) while a bare
-# 'energy drink' resolves to the tight list. This keeps bare 'milk' UNaffected - it's only neutralized
-# when the actual phrase 'soy milk' / 'oat milk' is present, so 'pick up milk' still matches real milk.
+# Phrase aliases mark words generic only within that target: 'soy milk' resolves
+# to Vitamilk without changing bare 'milk' or overriding distinctive brand names.
 _PHRASE_ALIASES = {
     "energy drink": ["cobra", "redbull", "sting"],
     "soy milk": ["vitamilk"],
@@ -453,9 +388,7 @@ def mismatched_hands(sub: dict, state: dict, start_grips=(),
     return out
 
 
-# ---------------------------------------------------------------------------
 # Completion predicates - each: (subtask_dict, state[, final_text]) -> (granted: bool, reason: str)
-# ---------------------------------------------------------------------------
 
 def _gripping(state: dict) -> bool:
     """Return whether either simulator hand is currently gripping an item."""
@@ -543,12 +476,8 @@ def predicate_pickup(sub: dict, state: dict, guard_backend="deterministic",
             return False, (f"gripping, but the held item ({held!r}) does not match target {target!r} - "
                            "grab the right item")
         return True, "pickup complete: gripping the target item"
-    # Dual-hand (2026-07-23), UNTARGETED pickups only: a grip carried IN from a previous leg must not
-    # satisfy THIS leg's pickup. run_leg sets `new_grip_this_leg` when a hand that was empty at leg
-    # start grips; when the runner provides it (pickup_navigation's flat loop does not - key absent skips
-    # the check, old behaviour), an untargeted pickup needs a NEW grip, not just any grip. A TARGETED
-    # pickup grants on the name match above regardless - the right item in hand is the right item,
-    # whichever leg grabbed it.
+    # Untargeted pickups require a new grip when the runner supplies that signal.
+    # A carried-in item does not count; targeted pickups still grant on identity.
     if state.get("new_grip_this_leg") is False:
         return False, ("pickup not complete: still holding only the item carried in from a previous "
                        "subtask - grab THIS subtask's item (a hand is free)")

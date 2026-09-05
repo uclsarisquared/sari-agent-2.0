@@ -106,12 +106,8 @@ class TestFindClearHeading(unittest.TestCase):
         self.assertEqual(offset, 0.0, "should not nudge at all when the straight heading is already clear")
 
     def test_finds_smallest_nudge_that_clears_an_off_axis_obstacle(self):
-        # Obstacle dead ahead (azimuth 0) at 1.0m: with body_radius=0.3, clearing it needs
-        # sin(offset) > 0.3/1.0 = 0.3 -> offset > ~17.46 degrees. With nudge_step_deg=5, the
-        # first offset magnitude that actually clears it is 20 degrees, not smaller ones.
-        # safety_margin=0.8 (unrealistically large, deliberately) so that even the raw 1.0m
-        # straight-ahead clearance (0.2m of margin) fails min_needed_step=0.3 and the search
-        # is actually forced to happen, rather than trivially succeeding at offset=0.
+        # At 1 m, a 0.3 m body radius needs >17.46 degrees of clearance, so 5-degree
+        # nudges first clear at 20 degrees. A large safety margin forces the search.
         scan = _make_ring_scan([(0.0, 1.0)])
 
         result = explore.find_clear_heading(
@@ -369,12 +365,8 @@ class TestExploreLoopVoxelWiring(unittest.TestCase):
         self.assertFalse(translations, "a waypoint arrival (open clearance) must not trigger an escape step")
 
     def test_forward_step_travels_along_facing_not_double_rotated(self):
-        # Regression for the world-vs-egocentric de-sync (2026-07-22). The sim rotates the
-        # body-relative step into world space itself, so after facing an off-axis target the
-        # loop must step STRAIGHT along its new facing (here +X), advancing toward the target -
-        # NOT perpendicular to it. Pre-rotating the step in Python (the old code) produced a
-        # sideways move once the sim went egocentric, because the sim rotated it a SECOND time.
-        # The translation the loop sends must be body-relative forward (0, 0, step_len).
+        # After facing +X, send body-relative forward (0, 0, step_len).
+        # Pre-rotating would make the simulator rotate twice and move sideways.
         agent, _voxel, _grid, _planner = self._run(
             navs=[_move_nav(target=(2.0, 0.0)), _done_nav()],  # due +X from the start
             clearances=[(5.0, None)],                          # wide open: full step_size move

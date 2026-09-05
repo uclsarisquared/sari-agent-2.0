@@ -55,9 +55,7 @@ ACTION_MAP = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator LLM helpers
-# ---------------------------------------------------------------------------
 
 def _llm_client() -> OpenAI:
     return OpenAI(
@@ -188,9 +186,7 @@ def generate_handoff_summary(
     return _llm_call(client, system, user)
 
 
-# ---------------------------------------------------------------------------
 # Subtask runner
-# ---------------------------------------------------------------------------
 
 def get_state():
     state = env.RequestJson()
@@ -316,9 +312,7 @@ def run_subtask(subtask: str, context: str = "", next_task_hint: str = "") -> di
     return {"final_state": final_state, "step_notes": step_notes}
 
 
-# ---------------------------------------------------------------------------
 # Orchestrator
-# ---------------------------------------------------------------------------
 
 def orchestrate(task: str):
     client = _llm_client()

@@ -70,7 +70,7 @@ print(" INITIAL STATE ".center(100, "="))
 print(CURRENT_AGENT_STATE)
 print("=" * 100)
 
-# ====== Initialize Embodied Agent ======
+# Initialize Embodied Agent
 from agent_core.llm import agent_vlm_config
 from agent_core.runtime import EmbodiedAgent
 
@@ -87,7 +87,6 @@ embodied_agent = EmbodiedAgent(
     nav_mode=NAV_MODE,
 )
 print(f"[env_simulation] navigation arm: {NAV_MODE}")
-# ========================================
 
 while ON_PLAY:
     if RUN_ENTRY:

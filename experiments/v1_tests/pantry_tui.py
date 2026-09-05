@@ -51,9 +51,7 @@ def dispatch(actions, times):
     return False, results
 
 
-# ---------------------------------------------------------------------------
 # Widgets
-# ---------------------------------------------------------------------------
 
 class TimestepDisplay(VerticalGroup):
 
@@ -198,9 +196,7 @@ class TaskInput(HorizontalGroup):
         self.app.query_one("#main_scroll", VerticalScroll).mount(AgentLoop(task, mode))
 
 
-# ---------------------------------------------------------------------------
 # App
-# ---------------------------------------------------------------------------
 
 class PantryApp(App):
 

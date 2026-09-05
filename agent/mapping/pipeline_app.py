@@ -71,7 +71,7 @@ class PipelineApp:
         self._build_ui()
         self._poll()
 
-    # ------------------------------------------------------------------ UI construction
+    # UI construction
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=8)
@@ -191,7 +191,7 @@ class PipelineApp:
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=4, pady=1)
         widget.grid(row=r, column=1, sticky="w", padx=4, pady=1)
 
-    # ------------------------------------------------------------------ dir helpers
+    # dir helpers
 
     def _browse_dir(self):
         d = filedialog.askdirectory(initialdir=os.path.dirname(self.out_dir.get()) or _MAPPING_DIR)
@@ -207,7 +207,7 @@ class PipelineApp:
         os.makedirs(d, exist_ok=True)
         os.startfile(d)  # Windows; this project is Windows-only (winsound history)
 
-    # ------------------------------------------------------------------ pipeline
+    # pipeline
 
     def _commands(self):
         """Build the stage command lines from the UI state. Only user-chosen flags are passed;
@@ -346,7 +346,7 @@ class PipelineApp:
         self._set_status("idle")
         self.log_queue.put(("__controls__", None))
 
-    # ------------------------------------------------------------------ GUI-thread plumbing
+    # GUI-thread plumbing
 
     def _log(self, text):
         self.log_queue.put(("log", text))

@@ -190,7 +190,7 @@ class Coordinator:
         # Strong refs to in-flight socket closes, so they are not garbage-collected mid-handshake.
         self._closers: set[asyncio.Task[None]] = set()
 
-    # ------------------------------------------------------------------ durable health state
+    # durable health state
 
     def _load_state(self) -> None:
         if self.state_path is None:
@@ -278,7 +278,7 @@ class Coordinator:
         sandbox_id = self._resolve_sandbox_id(selector)
         return self._sandboxes.get(sandbox_id) if sandbox_id else None
 
-    # ------------------------------------------------------------------ lifecycle
+    # lifecycle
 
     async def start(self) -> None:
         import websockets
@@ -319,7 +319,7 @@ class Coordinator:
             return socket.getsockname()[1]
         return self.port
 
-    # ------------------------------------------------------------------ routing
+    # routing
 
     async def _handle_connection(self, websocket: Any, path: str | None = None) -> None:
         route = route_of(websocket, path)
@@ -330,7 +330,7 @@ class Coordinator:
         else:
             await websocket.close(code=1008, reason=f"Use {SANDBOX_ROUTE} or {BENCH_ROUTE}")
 
-    # ------------------------------------------------------------------ sandbox side
+    # sandbox side
 
     async def _handle_sandbox(self, websocket: Any) -> None:
         sandbox_id: str | None = None
@@ -470,12 +470,8 @@ class Coordinator:
         ]
         await self._pump_resets()
 
-        # Dropping a sandbox whose socket is still open MUST hang up on it. The sim only re-registers
-        # from its socket's on-open, and only reconnects once it sees a close, so an eviction that
-        # leaves the connection up takes that sandbox out of the pool permanently: it keeps
-        # heartbeating happily into a registry that no longer has a row for it. That is not
-        # hypothetical - it is how a fleet-wide reset hitch turned into every sim silently
-        # disappearing and never coming back.
+        # Close an evicted sandbox's socket so it reconnects and re-registers.
+        # Leaving it open strands a heartbeating simulator outside the pool.
         if close_socket:
             self._close_socket_soon(sandbox.websocket, reason)
 
@@ -496,7 +492,7 @@ class Coordinator:
                 ),
             )
 
-    # ------------------------------------------------------------------ bench side
+    # bench side
 
     async def _handle_bench(self, websocket: Any) -> None:
         """One worker, at most one lease. Requests are handled in order on this connection."""
@@ -771,7 +767,7 @@ class Coordinator:
         self._closers.add(task)
         task.add_done_callback(self._closers.discard)
 
-    # ------------------------------------------------------------------ pool helpers
+    # pool helpers
 
     def _take_leasable(self) -> Sandbox | None:
         if self._lease_limit is not None and len(self._leases) >= self._lease_limit:
@@ -862,7 +858,7 @@ class Coordinator:
             **self.capacity_status(),
         }
 
-    # ------------------------------------------------------------------ reaper
+    # reaper
 
     async def _reap_forever(self) -> None:
         while True:

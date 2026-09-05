@@ -34,9 +34,7 @@ from sim.env import (
     _GRIP_LEFT_, _GRIP_RIGHT_,
 )
 
-# ------------------------------------------------------------------
 # Action tables
-# ------------------------------------------------------------------
 
 # Keys that trigger repeatedly while held
 HOLD_ACTIONS: dict[str, tuple] = {
@@ -60,9 +58,7 @@ ONESHOT_ACTIONS: dict[str, tuple] = {
     "e": (_GRIP_RIGHT_, "Toggle right grip"),
 }
 
-# ------------------------------------------------------------------
 # Shared state between listener thread and worker thread
-# ------------------------------------------------------------------
 
 held_keys:      set[str] = set()
 held_lock                = threading.Lock()
@@ -73,9 +69,7 @@ oneshot_lock             = threading.Lock()
 stop_event               = threading.Event()
 
 
-# ------------------------------------------------------------------
 # Key helpers
-# ------------------------------------------------------------------
 
 def key_to_str(key) -> str | None:
     """Return a canonical string for a key, or None if not mapped."""
@@ -91,9 +85,7 @@ def key_to_str(key) -> str | None:
     return None
 
 
-# ------------------------------------------------------------------
 # pynput callbacks
-# ------------------------------------------------------------------
 
 def on_press(key):
     if key == keyboard.Key.esc:
@@ -119,9 +111,7 @@ def on_release(key):
             held_keys.discard(s)
 
 
-# ------------------------------------------------------------------
 # Worker thread
-# ------------------------------------------------------------------
 
 TICK_SECONDS = 0.08  # ~12 Hz — balances responsiveness and WebSocket load
 
@@ -162,9 +152,7 @@ def worker():
         time.sleep(TICK_SECONDS)
 
 
-# ------------------------------------------------------------------
 # Entry point
-# ------------------------------------------------------------------
 
 def print_controls():
     print()

@@ -54,15 +54,6 @@ perception_actions_ref = {
 }
 manipulation_actions_ref = {
     'grab_and_read_item': approach_cardinal,
-    # 'pull_left_hand_backward': pull_left_hand_backward,
-    # 'extend_right_hand_forward': extend_right_hand_forward,
-    # 'pull_right_hand_backward': pull_right_hand_backward,
-    # 'raise_left_hand': raise_left_hand,
-    # 'raise_right_hand': raise_right_hand,
-    # 'lower_left_hand': lower_left_hand,
-    # 'lower_right_hand': lower_right_hand,
-    # 'toggle_left_grip': _GRIP_LEFT_,
-    # 'toggle_right_grip': _GRIP_RIGHT_,
 }
 actions_ref = {
     'MOVE_FWD': _MOVE_FWD_,

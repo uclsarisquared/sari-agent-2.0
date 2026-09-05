@@ -81,16 +81,9 @@ ANNOTATE_BACKENDS = {
 # One "backend call failed for this checkpoint" signal, whichever backend raised it.
 AnnotateError = (ClaudeCliError, EndpointAnnotateError)
 
-# Per-backend default worker counts for the parallel pass (override with --jobs). Checkpoints are
-# embarrassingly parallel: each annotate_checkpoint() reads only its own PNGs + the frozen topology
-# and writes only its own record; all fan-in (route hints, products, semantic map) happens after the
-# loop. The ceiling is therefore the BACKEND, not the work:
-#   claude-cli: 8 = 80% of Claude Code's documented default of 10 concurrent subagents (user
-#     directive 2026-07-30, "80% of the prescribed maximum for Claude Max"). Anthropic publishes no
-#     hard `claude -p` concurrency cap for the Max plan, so the 10-parallel-subagent default is the
-#     nearest prescribed figure. Each call is its own subprocess; billing is subscription-covered.
-#   qwen: 4 (user directive 2026-07-30). Servers like vLLM batch concurrent requests fine; 4
-#     keeps the shared endpoint responsive for other users.
+# Per-backend worker defaults, overridable with --jobs. Checkpoints write separate
+# records; aggregation runs after the workers finish. User-selected limits are
+# 8 Claude CLI processes and 4 Qwen requests to limit backend load.
 DEFAULT_JOBS = {"claude-cli": 8, "endpoint": 4}
 
 

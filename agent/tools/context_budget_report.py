@@ -71,9 +71,7 @@ _SECTION_RE = re.compile(r"^--- ([A-Z][A-Za-z ()/]+) ---$", re.M)
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
-# ---------------------------------------------------------------------------------------------
 # Corpus loading
-# ---------------------------------------------------------------------------------------------
 
 def _verdict_source():
     """The bench harness's own verdict logic, imported rather than reimplemented.
@@ -218,9 +216,7 @@ def load_attempts(bench_root: str) -> list:
     return attempts
 
 
-# ---------------------------------------------------------------------------------------------
 # Step dumps - the per-step record of what each reasoner emitted
-# ---------------------------------------------------------------------------------------------
 
 def _sections(text: str) -> dict:
     """Split one stepNN.txt into its `--- NAME ---` sections."""
@@ -279,9 +275,7 @@ def load_leg_dumps(bench_root: str, limit=None) -> list:
     return legs
 
 
-# ---------------------------------------------------------------------------------------------
 # The growth model
-# ---------------------------------------------------------------------------------------------
 
 def fit_growth(attempts: list) -> dict:
     """Least squares for tokens_in = A*steps + B*depth, no intercept (a zero-step run costs zero).
@@ -339,9 +333,7 @@ def role_attribution(attempts: list) -> dict:
     return {"metered_attempts": metered, "attempts": len(attempts), "by_role": dict(totals)}
 
 
-# ---------------------------------------------------------------------------------------------
 # Component sizes
-# ---------------------------------------------------------------------------------------------
 
 def static_prompt_costs() -> dict:
     """Sizes of the fixed prompt scaffolding. Imported from the live modules, not hardcoded, so
@@ -431,9 +423,7 @@ def vision_tokens(width: int = 1280, height: int = 720) -> int:
     return (width // VISION_PIXELS_PER_TOKEN) * (height // VISION_PIXELS_PER_TOKEN)
 
 
-# ---------------------------------------------------------------------------------------------
 # Per-arm sizing - what each ablation would actually remove
-# ---------------------------------------------------------------------------------------------
 
 def arm_savings(fit: dict, sizes: dict, decomposition: dict, retention: dict,
                 chars_per_token: float, leg_lengths=REPORT_LEG_LENGTHS) -> list:
@@ -491,9 +481,7 @@ def arm_savings(fit: dict, sizes: dict, decomposition: dict, retention: dict,
     return rows
 
 
-# ---------------------------------------------------------------------------------------------
 # Redundancy + retention replay (the A2 evidence)
-# ---------------------------------------------------------------------------------------------
 
 def _words(text: str) -> set:
     return {w for w in _WORD_RE.findall(text.lower()) if len(w) > 3}
@@ -571,9 +559,7 @@ def retention_sweep(legs: list, thresholds=(0.55, 0.62, 0.68, 0.72, 0.80, 0.88),
     return [retention_replay(legs, t, keep_last) for t in thresholds]
 
 
-# ---------------------------------------------------------------------------------------------
 # Outcomes
-# ---------------------------------------------------------------------------------------------
 
 def outcomes(attempts: list) -> dict:
     """Success rates under all three definitions in play, plus the cost profile of wins vs losses.
@@ -639,9 +625,7 @@ def outcomes(attempts: list) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------------------------
 # Rendering
-# ---------------------------------------------------------------------------------------------
 
 def _rule(title):
     print(f"\n{'=' * 78}\n{title}\n{'=' * 78}")
@@ -772,7 +756,6 @@ def render(report: dict, chars_per_token: float) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------------------------
 
 def build_report(bench_root: str, chars_per_token: float, deep: bool, sample: int) -> dict:
     attempts = load_attempts(bench_root)

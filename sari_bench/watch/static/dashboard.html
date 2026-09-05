@@ -17,16 +17,11 @@
   header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
   .muted { color: var(--dim); font-size: 12.5px; }
   .pill { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--dim); }
-  /* The battery picker is a pill that happens to be a button: same shape as the read-only tags
-     beside it, so the header still reads as a row of labels rather than a toolbar. It opts out
-     of the header's baseline alignment because an inline-flex box whose first child is an empty dot
-     has no useful baseline to hand it. */
+  /* Avoid baseline alignment: the inline-flex button starts with an empty dot. */
   button.pill { display: inline-flex; align-items: center; align-self: center; gap: 6px;
                 background: transparent; line-height: 1.45; cursor: pointer; }
   button.pill:hover { background: #262b33; color: var(--ink); }
   .caret { font-size: 12px; opacity: .75; line-height: 1; }
-  /* A live battery is the one fact worth spending motion on: nothing else on the page animates, so
-     the blink reads as "a runner is working here" from across the room. */
   .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--idle); flex: none; }
   .dot.live { background: var(--ok); animation: blink 1.4s ease-in-out infinite; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
@@ -41,37 +36,24 @@
              font-size: 12.5px; cursor: pointer; white-space: nowrap; }
   .menu li:hover { background: #262b33; }
   .menu li[aria-selected="true"] { color: var(--ink); background: rgba(79,143,208,.12); }
-  /* Not flex: 1 any more - every name gets the same fixed clip box as the pill that opens this list,
-     so the column is one width and the date is what the row's spare space goes to. */
   .menu .m-id { font-variant-numeric: tabular-nums; }
-  /* The pencil swaps a row's clipped name for this field, same fixed width as the clip box so the
-     row does not jump; Enter or blur saves, Escape drops the edit. */
+  /* Match the label width so entering rename mode does not shift the row. */
   .menu .m-edit { flex: none; width: 28ch; font-size: 12px; padding: 2px 5px; margin: 0;
                   font-variant-numeric: tabular-nums; color: var(--ink); background: var(--bg);
                   border: 1px solid var(--accent); border-radius: 4px; }
   .menu .m-edit:focus { outline: none; border-color: var(--accent); }
   .menu li.m-editing { cursor: text; }
-  /* Straight after the name's fixed clip box, NOT pushed to the row's right edge: the two row
-     buttons are not always both there - the pencil is hidden on a live run, since the server will
-     not rename a battery a runner still holds - and an `auto` margin here handed that missing button
-     to the date, which then sat a few pixels right of every other row's. */
+  /* Keep dates aligned even when the live-run rename button is hidden. */
   .menu .m-note { color: var(--dim); font-size: 11.5px; }
-  /* The buttons take the spare space instead, as one group, so the row's right end is what absorbs
-     a hidden pencil. */
   .menu .m-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; }
-  /* A queue row carries no buttons and no fixed-width name box, so its own note keeps the far edge. */
   .menu li.q-row .m-note { margin-left: auto; }
   .menu .m-empty { color: var(--dim); cursor: default; }
   .menu .m-empty:hover { background: none; }
-  /* Renaming and copying are deliberate acts on a row whose whole surface already means "switch to
-     this run", so the buttons stay out of the way until the row is under the cursor or key focus. */
   .menu .m-act { border: 0; background: transparent; color: var(--dim); cursor: pointer;
                  padding: 0 2px; font-size: 12px; line-height: 1; opacity: 0; }
   .menu li:hover .m-act, .menu .m-act:focus-visible { opacity: 1; }
   .menu .m-act:hover { color: var(--ink); }
   .menu .m-act[disabled] { display: none; }
-  /* The queue is a readout, not a picker: clicking a row does nothing, so it must not light up
-     under the cursor the way a run this page can switch to does. */
   .menu li.q-row, .menu li.q-foot { cursor: default; }
   .menu li.q-row:hover, .menu li.q-foot:hover { background: none; }
   .menu .q-pos { color: var(--dim); font-variant-numeric: tabular-nums; }
@@ -79,10 +61,8 @@
                     padding-top: 7px; color: var(--dim); font-size: 11.5px; white-space: normal; }
   main { padding: 16px; display: grid; gap: 14px;
          grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
-  /* `display: grid` beats the hidden attribute's UA rule, so the inactive tab needs saying twice. */
+  /* Override display:grid so the hidden attribute still hides inactive tabs. */
   main[hidden], section[hidden] { display: none; }
-  /* One thin outline all the way round. A live process stays green even when its health signals
-     need attention; the signal banner carries that separate state. */
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
           display: flex; flex-direction: column; }
   .card.ok { border-color: var(--ok); }
@@ -96,9 +76,6 @@
   .frame { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: var(--term-bg); display: block; }
   .frame.none { display: grid; place-items: center; color: var(--dim); font-size: 12px; }
   .frame.none[hidden], .frame[hidden] { display: none; }
-  /* The screenshot carries its own one affordance, laid over its top-right corner rather than put
-     in the button row below: it opens THIS picture's attempt in full, and a tile is read by looking
-     at the image. Dim at rest so it never competes with the frame, solid under the cursor. */
   .shot { position: relative; }
   .shot-full { position: absolute; top: 6px; right: 6px; z-index: 1; padding: 2px 7px 3px;
                font-size: 13px; line-height: 1.15; color: #fff; opacity: .55;
@@ -108,14 +85,9 @@
   .rows { padding: 8px 12px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12.5px; }
   .rows dt { color: var(--dim); }
   .rows dd { margin: 0; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Three of these rows are the agent's own vocabulary rather than prose about it: the action is
-     the JSON the actor emitted, and the leg type and the held object are identifiers out of the
-     scene. Mono, so a name is read character by character and a changed one is visible as a change. */
   .rows dd[data-ref="leg"], .rows dd[data-ref="action"], .rows dd[data-ref="held"] {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.8px; }
   .rows [hidden] { display: none; }
-  /* Banners sit between the log and the rows. The 4px bottom plus the rows' own 8px of padding
-     matches the 12px above, so the banner reads as evenly inset whichever one is showing. */
   .sig, .mismatch { margin: 12px 12px 4px; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
   .sig { background: rgba(224,85,63,.12); color: #f0a596; }
   .sig.watch { background: rgba(224,162,63,.12); color: #e8c48d; }
@@ -141,13 +113,9 @@
   .badge.verified.success { color: #a8dcbb; border-color: #2c4b38; background: rgba(79,169,107,.10); }
   .badge.verified.fail { color: #f0a596; border-color: #57302a; background: rgba(224,85,63,.10); }
   .badge.verified.invalid { color: #9aa4b2; border-color: #3a414c; background: rgba(154,164,178,.10); }
-  /* Halted because the prompt was already won: green, because nothing went wrong, but a darker and
-     duller green than a pass - this try scored nothing. */
   .badge.already { color: #7fb894; border-color: #24503a; background: rgba(31,94,58,.22); }
 
-  /* The terminal. A fixed height, not a max-height: a card must not resize as its log fills, or the
-     whole grid reflows under the reader every two seconds. overflow-anchor is off because the
-     autoscroll rule below is the only thing allowed to move this element. */
+  /* Fix log height to prevent polling from reflowing cards; script owns autoscroll. */
   pre.term { margin: 0; padding: 6px 8px; background: var(--term-bg); border: 0;
              border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
              font-size: 11.5px; line-height: 16px; color: #c3cbd6;
@@ -159,18 +127,12 @@
   pre.term::-webkit-scrollbar-thumb { background: #4a5260; border: 2px solid var(--term-bg);
                                       border-radius: 999px; }
   pre.term::-webkit-scrollbar-thumb:hover { background: #657080; }
-  /* 6 rows of 16px plus the 6px padding top and bottom: pinned to the tail it shows six whole lines
-     rather than five and a sliver. */
   .card pre.term { height: 108px; overflow-y: auto; }
 
-  /* The agent's final answer to the prompt. It is the agent speaking, not another readout, so it is
-     set as a quotation - speaker rule, quote marks, italics - and never as a row in the tables
-     beside it. Sits directly under the terminal wherever an attempt is shown, because it is the
-     last thing the run said. */
   .resp { margin: 10px 12px 0; padding: 6px 10px; border-left: 3px solid var(--accent, #4b8bd6);
           border-radius: 0 6px 6px 0; background: rgba(75,139,214,.10); font-size: 12px;
           line-height: 1.45; }
-  /* `display: block` on the children would otherwise outrank the hidden attribute's UA rule. */
+  /* Override child display rules so the hidden attribute still takes effect. */
   .resp[hidden] { display: none; }
   .resp .resp-label { display: block; margin-bottom: 2px; color: var(--dim); font-size: 10px;
                       letter-spacing: .07em; text-transform: uppercase; }
@@ -179,73 +141,42 @@
   .resp .resp-text::before { content: "\201C"; }
   .resp .resp-text::after { content: "\201D"; }
 
-  /* Human verdict. Deliberately a second row, below the log/kill row: it is a different kind of
-     action - a judgement about the run, not a thing done to it. */
   .verdict { padding: 0 12px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  /* The four verdicts are a judgement about the run; kill and retry above them do something to it.
-     Nothing in a row of identical buttons says which is which, so the verdicts are lifted out into
-     a well of their own - inset, rounded, labelled - and the buttons inside it go transparent so
-     the group reads as one control rather than as four more of what is above it. */
   .grades { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 5px 8px;
             border-radius: 14px; background: #15181d; border: 1px solid #262b33; }
   .grades-label { color: var(--dim); font-size: 10px; letter-spacing: .07em;
                   text-transform: uppercase; padding: 0 2px; }
-  /* A step lighter than the well they sit in, and no outline of their own: inside a group that is
-     already one shape, the fill is enough to make each verdict its own target - and lifting them
-     off the well rather than cutting them into it keeps them reading as buttons. */
   .grades button.vote { background: #22262e; border-color: #22262e; padding: 4px 8px; }
   .grades button.vote:hover { background: #2d323b; border-color: #2d323b; }
-  /* The review state belongs to the group it is about, at the end of the row it will be answered on
-     - not out beside it where it reads as one more thing the tile is telling you. */
   .grades .state { color: var(--dim); font-size: 11.5px; padding: 0 2px; }
-  /* Sized to the review state it sits beside rather than to the buttons: it is the note at the end
-     of the row, not a fifth verdict. */
   .grades button.link { padding: 0 2px; font-size: 11.5px; }
   button.vote.on[data-verdict="pass"] { background: #24402f; border-color: #2c4b38; color: #a8dcbb; }
   button.vote.on[data-verdict="fail"] { background: #3a221e; border-color: #57302a; color: #f0a596; }
   button.vote.on[data-verdict="invalid"] { background: #2b3038; border-color: #3a414c; color: #c3cbd6; }
   button.vote.on[data-verdict="already_successful"] { background: #16351f; border-color: #24503a; color: #7fb894; }
-  /* The other three verdicts lead with a glyph; this one leads with a letter, which reads as the
-     first word of the label unless it is set apart. Mono and bold makes it a mark like ✓ and ✗ -
-     and the same letter as the keyboard shortcut for it. */
   button.vote .vkey { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                       font-weight: 700; }
   button.link { background: none; border: none; color: var(--dim); padding: 5px 2px; text-decoration: underline; }
   button.link:hover { background: none; color: var(--ink); }
   .mismatch { background: rgba(224,162,63,.12); color: #e8c48d; }
 
-  /* -- tabs --------------------------------------------------------------------------------- */
-  /* Square panes butted straight onto the title bar, not folder tabs: no radius, no gap, no flares
-     out to a baseline. The strip is stuck under the header for the whole page rather than only at
-     the top of it, so which view you are in is still on screen after scrolling a long battery -
-     that is what the shape is in service of, since a rounded tab hanging off a sticky bar reads as
-     a floating control rather than as part of the bar it is attached to.
-
-     `--header-h` is measured from the header itself in script: it wraps, so its height is a fact
-     about the current window rather than a constant that could be written here. */
+  /* Tabs */
+  /* Script measures --header-h because the header can wrap. */
   .tabstrip { position: sticky; top: var(--header-h, 0px); z-index: 4;
               display: flex; align-items: stretch; gap: 0; padding: 0 18px;
               border-bottom: 1px solid var(--line); background: #0e1013; }
-  /* Two colours drive the whole shape - the fill and the outline - so a tab that is neither hovered
-     nor selected sets both to transparent and vanishes down to its label, and only the front tab is
-     drawn as a pane. Its bottom edge is painted with its own fill rather than its outline, which is
-     what opens the seam between the front tab and the view below it. */
   button.tab { --tab-fill: transparent; --tab-line: transparent;
                position: relative; margin-bottom: -1px; padding: 8px 16px; font-size: 12.5px;
                border: 1px solid var(--tab-line); border-bottom-color: var(--tab-fill);
                border-radius: 0; background: var(--tab-fill); color: var(--dim); }
   button.tab:hover { --tab-fill: #262b33; color: var(--ink); }
   button.tab.on { --tab-fill: var(--bg); --tab-line: var(--line); color: var(--ink); }
-  /* Adjacent panes share one rule instead of drawing two side by side. */
+  /* Share the border between adjacent tabs. */
   button.tab + button.tab { margin-left: -1px; }
 
-  /* -- overview ----------------------------------------------------------------------------- */
+  /* Overview */
   #overview { padding: 16px; }
   .ov-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-  /* A round info mark sitting with the export buttons: equal width and height with a radius past
-     half of either, so it is a circle rather than a very short pill, and it never stretches on the
-     flex row the way the export links do. The `i` is set in a serif, which is what keeps a single
-     lowercase letter reading as the info glyph rather than as a stray character in the UI font. */
   .ov-help { flex: none; width: 22px; height: 22px; padding: 0;
              border: 1px solid var(--line); border-radius: 999px; background: none;
              color: var(--dim); line-height: 1; font-family: Georgia, "Times New Roman", serif;
@@ -257,34 +188,25 @@
   table.ov { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
   table.ov th, table.ov td { padding: 5px 10px; text-align: left; white-space: nowrap;
                              border-bottom: 1px solid var(--line); }
-  /* `top: 0` and nothing else. The scroll box around this table is its own scrollport (it sets
-     overflow-x), so the head sticks against THAT box, not against the page - offsetting it by the
-     height of the page's sticky bars pushed it down over the first body rows. */
+  /* The table's scroll container owns sticky positioning; page-header offsets do not apply. */
   table.ov thead th { position: sticky; top: 0; z-index: 2; background: #22262e;
                       color: var(--dim); font-weight: 600; }
-  /* The task id follows the reader across a battery wide enough to scroll. Its own z-index sits
-     above the body rows and below the header, so the top-left corner still stacks correctly. */
+  /* Stack the sticky ID column above body cells but below the header. */
   table.ov .task { position: sticky; left: 0; z-index: 1; background: var(--panel); font-weight: 600; }
   table.ov thead .task { z-index: 3; background: #22262e; }
   table.ov tbody tr:hover td { background: #21252c; }
   table.ov tbody tr:hover .task { background: #21252c; }
-  /* The prompt takes every spare pixel, so the try and total columns stay packed on the right
-     instead of one of them stretching across half the table. */
   table.ov .ptext { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis;
                     color: var(--dim); }
   table.ov .num { text-align: right; font-variant-numeric: tabular-nums; }
   table.ov .res { text-align: center; }
 
-  /* A cell is always a button so the whole box is the hit target; the not-run cells simply stop
-     taking pointer events, which also keeps the hover card off them. */
   table.ov td.cell { padding: 0; }
   .cellbtn { display: block; width: 100%; min-width: 42px; padding: 6px 8px; border: 0;
              border-radius: 0; text-align: center; font-weight: 650; background: none;
              color: var(--dim); }
   .cellbtn:hover { background: none; box-shadow: inset 0 0 0 1px var(--dim); }
-  /* A P/F keystroke only repaints the cell once the verdict has round-tripped and the next poll
-     lands, which is far too late to read as a response. The cell answers the key itself: a wash of
-     light laid over whatever color it already has, decaying back on its own. */
+  /* Acknowledge keystrokes immediately while waiting for the verdict round-trip. */
   @keyframes cell-ack {
     0%, 12% { box-shadow: inset 0 0 0 1px var(--dim), inset 0 0 0 100px rgba(238,243,250,.45); }
     100%    { box-shadow: inset 0 0 0 1px var(--dim), inset 0 0 0 100px rgba(238,243,250,0); }
@@ -296,11 +218,7 @@
   .cell.w .cellbtn { background: rgba(128,98,198,.24); color: #d0c2f5; }
   .cell.q .cellbtn { background: rgba(79,143,208,.20); color: #a9cbec; }
   .cell.k .cellbtn { background: rgba(90,100,114,.28); color: var(--dim); }
-  /* Invalid: gray on purpose, and the same gray family as the killed cells - both are runs the
-     battery does not score. It must not read as a near-miss of pass or fail. */
   .cell.e .cellbtn { background: rgba(120,131,148,.20); color: #b3bcc9; }
-  /* Halted because a sibling had already won the prompt. Green, because nothing broke - but darker
-     in both the fill and the letter than the pass cell beside it, since this try scored nothing. */
   .cell.a .cellbtn { background: #192620; color: #6f9c81; }
   .cell.none .cellbtn { background: rgba(90,100,114,.08); color: #3f4753; pointer-events: none; }
   td.res { font-weight: 650; }
@@ -312,16 +230,11 @@
   table.ov tbody tr:hover td.res.f { background: rgba(224,85,63,.28); }
   table.ov tbody tr:hover td.res.q { background: rgba(79,143,208,.26); }
 
-  /* The keyboard shortcut is invisible otherwise, so it is stated both in the bar above the table
-     and again on the hover card, where a reviewer's eyes already are. */
   kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 4px; background: #262b33; color: var(--ink); font: inherit;
         font-size: .92em; font-weight: 650; line-height: 1.5; }
   #ov-note { margin-right: auto; }
 
-  /* The legend. Two columns, and only two: the cell exactly as the grid draws it, and what it
-     means. A shortcut is part of the meaning rather than a third column of its own, so the key
-     sits at the head of the description where it reads as a sentence. */
   #legend .overlay-box { width: min(560px, 100%); }
   #legend-rows { padding: 4px 14px 12px; overflow-y: auto;
                  scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
@@ -329,10 +242,7 @@
                        font-size: 12.5px; }
   #legend-rows td { padding: 6px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
   #legend-rows tr:last-child td { border-bottom: 0; }
-  /* A sample wears the grid's own .cell/.cellbtn classes, so its fill and letter can never drift
-     from the table's - a new cell colour cannot be added there without also landing here. The cell
-     is a span rather than a td so the column keeps its own padding, and inert throughout: nothing
-     in this panel is clickable. */
+  /* Reuse grid cell classes so legend colors track the table. */
   #legend-rows td.sample { width: 1%; padding-right: 14px; }
   #legend-rows .cell { display: inline-block; }
   #legend-rows .cellbtn { pointer-events: none; border-radius: 4px; }
@@ -341,36 +251,13 @@
   #legend-note { padding: 8px 14px 12px; color: var(--dim); font-size: 12px;
                  border-top: 1px solid var(--line); }
 
-  /* A run id is a timestamp and then the thing you actually named. The box is a fixed width so the
-     header stops reflowing every time the page switches to a run with a longer name - and so the
-     list of runs under it reads as a column of equal boxes rather than a ragged edge. One font-size
-     for every clip box, header and menu row alike, because `ch` is a zero's width and 28 of them is
-     only the same number of pixels twice if the zero is.
-
-     28ch. These names are almost all lowercase and hyphens, which run narrower than a zero, so the
-     box holds nearer 36 characters of one: enough for the whole of a longest-observed name
-     ("context-ablation-a2c-comprehensive", 34) once its 16-character timestamp is out of frame, and
-     wide enough that a short name like "20260730_205702-hard" sits in it entire.
-
-     The label is the half that means something, so the box is pinned to its START and the overflow
-     hangs off the right edge, where a reader can tell there is more. Hovering starts an endless
-     leftward crawl rather than a one-shot slide: a name is read by hovering it, and a slide that
-     finishes leaves the reader having to leave and come back to catch what they missed.
-
-     A ticker, then, and the whole point of one is that the space opening up on the right is already
-     filled. So the track is [copy][·][copy] and it travels leftwards by exactly copy+separator per
-     cycle: the frame it ends on shows the SECOND copy's start where it began showing the first's,
-     which is the same pixels, so the loop closes invisibly and the name never snaps back to its
-     start. The separator rides between them because a plain gap would drag a blank through the box
-     once a cycle, which is the same jarring beat by another name. The cycle also begins exactly at
-     the resting offset, so hovering never jumps. */
+  /* Use a fixed-width name box and matching fonts so ch units align across rows.
+     Hover scrolls [copy][separator][copy] by one copy plus separator for a seamless loop. */
   .pill-clip { flex: none; display: block; width: 28ch; font-size: 12px; overflow: hidden; }
   .pill-scroll { display: flex; width: max-content; white-space: nowrap;
                  transform: translateX(var(--clip-rest, 0px)); }
   .pill-copy { flex: none; }
-  /* Its own element, of a width this page picked, so one copy's measured width stays the width of
-     the text alone - a margin or padding on the copy would fold the gap into the number every other
-     offset is derived from. */
+  /* Keep separator width separate from the measured text width used by ticker offsets. */
   .pill-sep { flex: none; width: var(--clip-gap, 26px); text-align: center; opacity: .4; }
   @keyframes clip-crawl {
     from { transform: translateX(var(--clip-rest, 0px)); }
@@ -384,10 +271,6 @@
     .clip:focus-within .pill-scroll.loop { animation: none; }
   }
 
-  /* Settings. The two knobs that change how this page reads - which signals it shows, and how much
-     of the fleet it will lease - are preferences rather than readouts, so they leave the header row
-     and live behind the gear. Being a panel and not a badge, each one can say in a line what it
-     does, which is what the hover tooltips used to have to do. */
   button.pill.icon { padding: 3px 6px; color: var(--dim); }
   button.pill.icon svg { display: block; width: 14px; height: 14px; }
   .panel { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: 296px;
@@ -418,9 +301,6 @@
             background: rgba(79,169,107,.3); border-color: var(--ok); }
   .switch[aria-checked="true"] .knob { transform: translateX(16px); background: var(--ok); }
 
-  /* The sandbox pool in full. The header can only ever say how many there are; this is the same
-     answer `sari_bench status --json` gives, kept current while it is open, because the reason to
-     open it is always that something in the fleet is not behaving. */
   #fleet .overlay-box { width: min(820px, 100%); }
   #fleet-sum { padding: 4px 14px 10px; display: flex; flex-wrap: wrap; align-items: center;
                gap: 6px 10px; }
@@ -438,8 +318,6 @@
   #fleet-rows tr:last-child td { border-bottom: 0; }
   #fleet-rows td.dim { color: var(--dim); }
   #fleet-rows td.mono { font-variant-numeric: tabular-nums; }
-  /* Last column, right-hand edge, one button per row. Taking a machine out of the pool is the only
-     thing this panel does rather than reports, so it sits away from everything being read. */
   #fleet-rows td.act { width: 1%; padding-right: 0; text-align: right; white-space: nowrap; }
   #fleet-rows td.act button { padding: 2px 9px; font-size: 11.5px; }
 
@@ -448,23 +326,13 @@
   #fleet-rows .st.busy { color: #e8c48d; }
   #fleet-rows .st.bad { color: #f0a596; }
 
-  /* -- the battery's own numbers ------------------------------------------------------------- */
-  /* Out of the grid's tfoot and into two panels alongside it: the summary reads down the left, the
-     role split down the right. In the tfoot every label had to span a row of try cells, which left
-     each number stranded at the far edge of the table with a hand's width of nothing in front of it
-     - so the labels grew explanatory tails to fill it. The tails are now in the hover card and the
-     panels are only as wide as they need to be.
-
-     `flex-basis` is the breakpoint: two panels fit side by side while there is room for both at
-     their natural width, and below roughly 900px they wrap to the stacked full-width layout a phone
-     wants. No media query, because the number that matters is how wide THESE panels need to be. */
+  /* Battery statistics */
+  /* Flex basis lets summary panels wrap when their combined widths no longer fit. */
   .ov-foot { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-top: 12px; }
   .ov-foot > .ov-panel { flex: 1 1 420px; min-width: 0; overflow-x: auto;
                          border: 1px solid var(--line); border-radius: 10px;
                          background: var(--panel); }
   .ov-foot > .ov-panel[hidden] { display: none; }
-  /* The role rows are the longest lines here - a name, a bar, two token counts, a share and a call
-     count - so when there is slack to hand out that panel takes the larger share of it. */
   #ov-roles-panel { flex-grow: 1.35; }
   table.ovsum { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
   table.ovsum td { padding: 6px 10px; white-space: nowrap; font-weight: 600;
@@ -472,23 +340,17 @@
   table.ovsum tr:last-child td { border-bottom: 0; }
   table.ovsum tr:hover td { background: #21252c; }
   table.ovsum .lbl { color: var(--dim); font-weight: 500; }
-  /* The value column takes all the slack, so its number sits just past the longest label rather
-     than out at the panel's right edge. */
   table.ovsum .val { width: 100%; padding-left: 18px; }
 
-  /* The per-role breakdown. Hairline rules and an indent, so the block reads as a breakdown OF the
-     total on its heading row rather than as more totals beside it. */
   table.ovsum tr.head .lbl { color: var(--ink); font-weight: 650; }
   table.ovsum tr.role td { font-weight: 500; }
   table.ovsum tr.role .lbl { padding-left: 1.6em; }
   table.ovsum tr.role .share { color: var(--dim); font-weight: 500; }
-  /* The share bar sits in the label cell, so nothing can wrap it away from the name it belongs to. */
   table.ovsum tr.role .lbl span.bar { display: inline-block; height: .55em; margin-left: .6em;
                                       background: var(--accent, #4b8bd6); border-radius: 2px;
                                       vertical-align: baseline; min-width: 1px; }
 
-  /* The hover card. pointer-events off so it can sit under the cursor without stealing the
-     mouseover that keeps it alive. */
+  /* Ignore pointer events so the hover card cannot steal its trigger's mouseover. */
   #ov-tip { position: fixed; z-index: 30; display: none; pointer-events: none; width: 320px;
             background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
             overflow: hidden; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
@@ -504,8 +366,6 @@
   #ov-tip dt { color: var(--dim); }
   #ov-tip dd { margin: 0; font-variant-numeric: tabular-nums; overflow: hidden;
                text-overflow: ellipsis; white-space: nowrap; }
-  /* The hover card is 320px of glance, so the quote is clamped: enough to know what the agent
-     answered, and the cell's overlay for the rest of a long one. */
   #ov-tip .resp { margin: 7px 0 0; font-size: 11.5px; }
   #ov-tip .resp .resp-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
                              overflow: hidden; }
@@ -513,9 +373,7 @@
                       color: var(--dim); }
   #ov-tip .tip-hint[hidden] { display: none; }
 
-  /* The explainer tooltip. One node for the whole page, driven by [data-tip] on whatever the cursor
-     is over: the tags in the header, the status and verdict badges on a tile, the verdict buttons.
-     pointer-events off so it can never sit between the cursor and the thing it describes. */
+  /* Share one data-tip tooltip and ignore pointer events to preserve the trigger. */
   #tip-help { position: fixed; z-index: 35; display: none; pointer-events: none; width: 320px;
               padding: 9px 11px; background: var(--panel); border: 1px solid var(--line);
               border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); font-size: 12px;
@@ -526,13 +384,10 @@
   #tip-help .tip-meta { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line);
                         color: var(--dim); white-space: pre-wrap; }
   #tip-help .tip-meta[hidden], #tip-help .tip-term[hidden] { display: none; }
-  /* A tag is a definition, so say so: the cursor names it as one before the card even opens. */
   [data-tip] { cursor: help; }
   button[data-tip], a[data-tip] { cursor: pointer; }
 
-  /* Both overlays live outside #grid. The cards are patched in place now rather than rebuilt, but a
-     <video> mid-playback and a log the reader has scrolled back through are still the two things
-     most worth keeping away from the render loop entirely. */
+  /* Keep overlays outside #grid so polling cannot reset video playback or log scroll. */
   .overlay { position: fixed; inset: 0; z-index: 20; display: none; place-items: center;
              background: rgba(8,9,11,.82); padding: 24px; }
   .overlay.open { display: grid; }
@@ -541,11 +396,7 @@
   .overlay-head { padding: 10px 14px; display: flex; gap: 12px; align-items: baseline;
                   border-bottom: 1px solid var(--line); }
   #modal .overlay-box { width: min(1100px, 100%); }
-  /* The overlay scrolls, and left alone WebKit paints its default light scrollbar down the side of
-     a dark panel. Firefox takes the two-colour shorthand; WebKit needs the parts spelled out, the
-     way pre.term already does for the terminals. */
-  /* A column, so the log below can be told to take what is left rather than a share of the viewport
-     that the answer and the rows under it then have to fit around. */
+  /* Style scrollbars separately for Firefox and WebKit. */
   #modal-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
                 scrollbar-color: #4a5260 var(--panel); scrollbar-width: thin; }
   #modal-body::-webkit-scrollbar { width: 10px; height: 10px; background: var(--panel); }
@@ -554,30 +405,20 @@
   #modal-body::-webkit-scrollbar-thumb { background: #4a5260; border: 2px solid var(--panel);
                                          border-radius: 999px; }
   #modal-body::-webkit-scrollbar-thumb:hover { background: #657080; }
-  /* Short enough that the rows sit above the fold under it - the clip and the numbers are read
-     together, and a reviewer should not have to scroll to find out what they just watched. */
-  /* One row that is allowed to be shorter than the picture in it. The box is a flex item, so the log
-     and the rows below can shrink it to its min-height; an `auto` row would stay as tall as the
-     frame and let `overflow: hidden` crop the bottom off - taking the live badge and the replay
-     button down there with it. `minmax(0, 1fr)` makes the row follow the box, and `object-fit`
-     scales the frame down to match instead. */
+  /* minmax(0, 1fr) lets the media shrink with its flex container; object-fit preserves the frame. */
   #modal-media { position: relative; display: grid; grid-template-rows: minmax(0, 1fr);
                  place-items: center; min-height: min(48vh, 320px); max-height: 48vh;
                  overflow: hidden; background: #000; }
   #modal-video, #modal-still { grid-area: 1 / 1; width: 100%; height: 100%; max-height: 48vh;
                                background: #000; display: block; object-fit: contain; }
-  /* `display: block` above outranks the hidden attribute's UA rule - the same trap .frame has. */
+  /* Override display:block so the hidden attribute still hides media. */
   #modal-still[hidden] { display: none; }
   #modal-play { grid-area: 1 / 1; z-index: 1; width: 68px; height: 68px; padding: 0 0 2px 5px;
                 border: 1px solid rgba(255,255,255,.72); border-radius: 50%; font-size: 27px;
                 color: #fff; background: rgba(15,17,21,.78); box-shadow: 0 8px 28px rgba(0,0,0,.55); }
   #modal-play:hover { background: rgba(38,43,51,.94); transform: scale(1.04); }
   #modal-play[hidden] { display: none; }
-  /* A live attempt shows the run itself, not an offer to watch a recording of it, so the big ▶ is
-     replaced by the frames as they land. These two sit in the corners over that picture: what it is
-     on the left. Positioned against the box rather
-     than placed in its grid row, so they stay in the corners a reader can actually see however
-     short the log below squeezes the picture. */
+  /* Anchor live/replay badges to the visible box when the media row shrinks. */
   #modal-badge { position: absolute; bottom: 10px; z-index: 1; }
   #modal-badge { left: 10px; padding: 3px 9px; border-radius: 999px; font-size: 12px;
                  color: #cfe7d6; background: rgba(15,17,21,.78); border: 1px solid rgba(79,169,107,.5);
@@ -585,16 +426,10 @@
   #modal-badge[hidden] { display: none; }
   #modal-note { padding: 10px 14px; color: var(--dim); text-align: center; font-size: 12.5px; }
   #modal-rows { border-top: 1px solid var(--line); }
-  /* The overlay is where a log is actually read, so it is given the height the card cannot spare -
-     but only what is left after the answer and the rows below it. A fixed 46vh here stacked with the
-     media's 48vh above and pushed the response quote off the bottom of the box entirely, where it
-     sat behind the footer and read as missing. It shrinks to its floor before anything below it is
-     given up, and the body scrolls only once even that will not fit. */
+  /* Let the log shrink before forcing the answer below the overlay footer. */
   #modal-log { flex: 1 1 auto; min-height: 150px; max-height: min(46vh, 420px); overflow-y: auto; }
   #modal-foot { padding: 10px 14px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }
 
-  /* Verdict acknowledgements should never interrupt the next review. They stack beneath the
-     header in the top-right corner and quietly expire on their own. */
   #notifications { position: fixed; z-index: 40; top: 62px; right: 16px; width: min(380px, calc(100vw - 32px));
                    display: grid; gap: 8px; pointer-events: none; }
   .notification { display: flex; align-items: flex-start; gap: 8px;
@@ -602,21 +437,15 @@
                   background: #1d2a22; color: #c5e8d0; box-shadow: 0 10px 28px rgba(0,0,0,.45);
                   opacity: 0; transform: translateY(-6px); transition: opacity .16s ease, transform .16s ease; }
   .notification.on { opacity: 1; transform: translateY(0); }
-  /* Leaving is given longer than arriving. A banner arrives where the reader is already looking, so
-     it can afford to snap in; it leaves while they are reading something else, and a fade slow enough
-     to catch in peripheral vision is what makes it register as gone rather than as never having been
-     there. After .on, so it wins the transition when both are briefly set. */
+  /* Keep .leaving after .on so its transition wins when both classes are set. */
   .notification.out { opacity: 0; transform: translateY(-6px);
                       transition: opacity .38s ease, transform .38s ease; }
-  /* The stack ignores the mouse so it never swallows a click meant for a card beneath it. The two
-     things inside one that can be clicked have to take their own clicks back. */
+  /* Ignore clicks on the notification stack; interactive children opt back in. */
   .notification .n-body { flex: 1; padding: 0; border: 0; background: none; color: inherit;
                           font: inherit; text-align: left; }
   .notification.act { border-color: #2f4a66; background: #1d2532; color: #cfe0f2; }
   .notification.act .n-body { pointer-events: auto; cursor: pointer; }
   .notification.act:hover { background: #243040; }
-  /* Every banner can also be closed by hand: one the reader has already decided against should not
-     have to be waited out, short as the wait is. */
   .n-close { pointer-events: auto; flex: none; padding: 0 4px; border: 0; background: none;
              color: inherit; opacity: .55; font-size: 15px; line-height: 1.2; }
   .n-close:hover { background: none; opacity: 1; }

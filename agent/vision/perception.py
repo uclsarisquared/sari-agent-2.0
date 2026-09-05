@@ -40,21 +40,9 @@ CLIENT = OpenAI(
 ORIGINAL_WIDTH = 1920
 ORIGINAL_HEIGHT = 1080
 
-# --- Camera projection: MEASURED, not assumed --------------------------------------
-# The sim's agent camera is 60 deg VERTICAL FOV: SariSandboxV2/Assets/Prefabs/
-# "IK Humanoid Agent.prefab" carries `field of view: 60` with no m_FOVAxisMode override,
-# so Unity's default FOV axis (Vertical) applies. For a WxH frame with square pixels the
-# pinhole focal length in PIXELS is identical on both axes: f = (H/2) / tan(vFOV/2) ~= 935.
-# A bbox-centre offset (dx, dy) in pixels from the aim point maps to camera angles by
-# yaw = atan(dx/f), pitch = atan(dy/f) (see bbox_to_rotation).
-#
-# This REPLACES the old single linear gain `px_offset / 19.2` (19.2 = 1920/100 deg, i.e. an
-# assumed 100 deg *horizontal* FOV reused unchanged on the vertical axis - wrong on both
-# counts). Measured against the real 60 deg vertical FOV the correct near-centre gain is
-# f*pi/180 ~= 16.3 px/deg, so `/19.2` commanded only ~85% of the needed angle: a systematic
-# UNDERSHOOT a single open-loop shot could never recover, worsening toward the frame edges
-# where a straight line diverges from atan. Getting f right + closing the loop (see
-# center_object_on_screen) is what makes centring actually converge.
+# The simulator camera uses 60-degree vertical FOV (IK Humanoid Agent.prefab).
+# For square pixels, both focal lengths are (H/2) / tan(vFOV/2).
+# Convert pixel offsets with atan(offset/f), not a constant pixels-per-degree gain.
 CAMERA_VFOV_DEG = 60.0
 FOCAL_PX = (ORIGINAL_HEIGHT / 2.0) / math.tan(math.radians(CAMERA_VFOV_DEG / 2.0))
 
@@ -65,19 +53,10 @@ FOCAL_PX = (ORIGINAL_HEIGHT / 2.0) / math.tan(math.radians(CAMERA_VFOV_DEG / 2.0
 # model above, damped by `gain`. Good-enough-for-tracking, not a precision constant.
 PPD_YAW = 18.1
 PPD_PITCH = 16.4
-# COORDINATE ORDER is PER-BACKEND, not a global fact - both backends ignore whatever order the
-# prompt asks for and emit their own trained convention regardless (measured on both):
-#   - Qwen-VL emits xmin-first ([x1,y1,x2,y2]) - verified 2026-07-21: it boxed "Choco Crunchies" at
-#     [0,292,249,406], which is the real bottom-left product ONLY read as [xmin,ymin,xmax,ymax];
-#     read ymin-first it lands on the ceiling.
-#   - Gemini (Vertex) emits ymin-first ([y1,x1,y2,x2]) - Google's own reference bbox sample
-#     documents box_2d as [y_min, x_min, y_max, x_max]. Verified 2026-08-24: the "nestle gold corn
-#     flakes" miscentring bug (validation/artifacts/calibration/center/0824_172231/) was THIS - the
-#     raw response [371,646,610,849] reads as garbage xmin-first but lands exactly on the real
-#     product read ymin-first. A prior "confirmation" that xmin-first also worked for Gemini was a
-#     false negative: that box happened to be small and near-centered, where an x/y swap barely
-#     moves the computed centre - it only shows up clearly on an elongated/off-centre box.
-# So the parser (_bbox_dict_px) branches on the endpoint provider instead of assuming one order.
+# Models emit trained bbox conventions regardless of prompt wording, normalized
+# 0–1000: Qwen-VL uses [x1,y1,x2,y2]; Gemini/Vertex uses [y1,x1,y2,x2].
+# Validate new models on elongated, off-center boxes: near-centered boxes can hide
+# an axis swap. _bbox_dict_px selects the order by endpoint provider.
 BBOX_YMIN_FIRST = _ENDPOINT_PROFILE.provider == "vertex"
 PERCEPTION_PROMPT = load_prompt("vision/detect_one")
 PERCEPTION_PROMPT_MULTI = load_prompt("vision/detect_many")
@@ -466,33 +445,13 @@ def bbox_to_rotation(cx, cy, aim_x, aim_y, focal_px=FOCAL_PX):
 
 
 def _seed_front_instance(boxes, aim_x, aim_y, front_bias):
-    """Pick which detected instance the centring loop LOCKS onto at look 1 - biased toward the
-    FRONT-of-row item. Returns one box dict FROM `boxes` (must be non-empty). PURE (no sim/I/O)
-    so it can be A/B'd offline on saved frames - see center_offline_check.py.
+    """Choose an initial box by distance to aim, biased toward larger apparent area.
 
-    Why this exists (measured failure mode): a row of near-identical products stacks in DEPTH, so
-    several instances land almost on top of each other near the aim in the 2D frame. Pure
-    nearest-to-aim (the prior seed) can't tell the item in FRONT from the one behind it and would
-    sometimes lock the BACK one - which then also corrupts the reach, because RequestLidarCenter's
-    centre ray hits whatever is actually in front along the gaze, not the boxed back item.
-
-    The frontmost instance is CLOSEST to the camera, and a closer item projects a LARGER bbox (and,
-    occluding the ones behind it, a more complete one). So area is a cheap depth proxy - but only
-    WITHIN a same-size row; across different SKUs it is size, not depth. We therefore keep the seed
-    NEAR the aim (so the loop can still centre it and doesn't lock a big off-target item) and let
-    area only break the choice among the near cluster:
-
-        score(b) = dist_to_aim^2 / diag^2  -  front_bias * area(b) / frame_area      (minimise)
-
-    Both terms are normalised to [0,1] (frame diagonal, frame area), so front_bias is a single
-    dimensionless, resolution-independent knob:
-      * front_bias = 0.0  -> exact prior behaviour (pure nearest-to-aim) - use for A/B.
-      * larger front_bias -> stronger pull to the bigger/nearer instance; too large hijacks the
-        seed to the biggest box anywhere in frame. The default is UNVALIDATED - A/B on saved frames
-        with center_offline_check.py before trusting it (project doctrine: measure, don't assume).
-
-    Only the look-1 SEED uses this; after that the loop tracks the locked instance by predicted
-    position (PPD_YAW/PPD_PITCH), so front/back is decided once, here."""
+    Area is a depth proxy only among similar-sized products. Excessive front_bias
+    can select a large off-target box; zero gives pure nearest-to-aim selection.
+    The default bias needs validation on saved frames. Later looks track the chosen
+    instance by predicted position rather than reseeding.
+    """
     if front_bias <= 0.0 or len(boxes) == 1:
         return min(boxes, key=lambda b: (b['cx'] - aim_x) ** 2 + (b['cy'] - aim_y) ** 2)
     diag2 = float(ORIGINAL_WIDTH ** 2 + ORIGINAL_HEIGHT ** 2)
@@ -508,79 +467,21 @@ def _seed_front_instance(boxes, aim_x, aim_y, front_bias):
 
 def center_object_on_screen(target_info, aim_norm=(0.5, 0.5), max_iters=5, tol_px=20.0,
                             gain=0.8, max_step_deg=12.0, front_bias=0, debug_dir=None):
-    """Rotate the camera until the target's bbox centre sits on the aim point - CLOSED-LOOP.
+    """Rotate toward the target with repeated detection and bounded atan-model corrections.
 
-    Was a single open-loop shot with a wrong linear gain (see the FOCAL_PX note): detect
-    once, rotate once by px/19.2, never look again. It reliably undershot and never
-    recovered. Now:
+    Allow max_iters corrections plus a final measurement. gain damps overshoot;
+    max_step_deg limits view changes that could break the instance lock. Seed with
+    _seed_front_instance, then track the box nearest its predicted position.
 
-        detect (temp 0) -> measure residual from aim -> within tol_px? stop
-                        -> else rotate by the atan-model angle -> re-screenshot -> repeat
+    aim_norm is the normalized image aim (x, y). Centering moves the camera only:
+    low targets may still require crouching or hand-height adjustment to grab.
+    The front_bias default needs validation; zero selects purely by distance to aim.
 
-    up to max_iters corrective rotations, with one final measurement-only look. Because
-    TransformAgent rotations are relative deltas, each pass shrinks the residual, so any
-    leftover gain error self-corrects across iterations instead of standing as a permanent
-    miss.
-
-    gain (<1) DAMPS each correction - command only `gain` of the computed angle. This is a
-    deliberate under-shoot so the loop converges monotonically instead of overshooting and
-    ringing. It exists because the atan model is not perfect on both axes: MEASURED live
-    (phase-correlation, 2026-07-21) the true rates are pitch ~16.4 px/deg (matches the f=935
-    model) but yaw ~18.1 px/deg (~11% hotter than the model, so an undamped yaw over-rotates
-    and sails the target past centre). Rather than hard-code a second focal - the yaw rate is
-    depth-dependent (parallax over an oblique shelf) so no single constant is right - we damp:
-    gain 0.8 keeps net per-step motion below 1.0 even on the hot yaw axis, and smaller steps
-    also change the view less between looks, which curbs the detector re-locking onto a
-    different identical item (see the caveat below).
-
-    max_step_deg caps each rotation for that same reason: a large swing at a far-off target
-    changes the view enough to shrink/shift the candidate set and break the instance lock (seen
-    live - a 20 deg step dropped candidates 12 -> 3 and the lock jumped). Far targets are closed
-    over several BOUNDED looks instead of one jump; near targets never hit the cap.
-
-    TARGET LOCK (measured 2026-07-21): on a shelf of near-identical items the detector will
-    otherwise hop between instances as the view shifts - a step that "moves" the target further
-    than any camera rotation could is that hop, not a gain error, and it was the loop's actual
-    failure to converge. So detection returns ALL instances (_detect_boxes_px) and the loop
-    stays on ONE: the FRONT-of-row instance on look 1 (front_bias / _seed_front_instance), then
-    nearest to where that instance is PREDICTED to land (PPD_YAW/PPD_PITCH) on every look after.
-
-    front_bias: how strongly the look-1 SEED prefers the FRONT item of a row over merely the box
-      nearest the aim. A row of identical products stacks in depth and clusters near the aim in 2D,
-      so nearest-to-aim alone sometimes locked the BACK one (and, since the reach's RequestLidarCenter
-      ray hits whatever is in front along the gaze, that mismatched the grab too). The frontmost
-      instance is closest and projects the LARGEST bbox, so this biases the seed toward area among
-      the near cluster (see _seed_front_instance). front_bias=0.0 restores the pure nearest-to-aim
-      seed - use it to A/B this as one variable. The default is UNVALIDATED: A/B on saved frames
-      (center_offline_check.py) before trusting it. It touches ONLY look-1 seeding; the tracking
-      logic below is unchanged.
-
-    aim_norm: normalised (x, y) aim point. (0.5, 0.5) is the geometric centre. The grab
-      sweet-spot sits BELOW centre - the extended hand shows up around y~0.67 (see
-      ../center_object.py) - so aiming a grab will pass aim_norm=(0.5, 0.67). That is the
-      deliberate follow-up (Phase D); it is kept a parameter so the change is one argument,
-      not a rewrite. Default stays dead-centre so THIS change can be A/B'd as pure aiming
-      accuracy, one variable at a time.
-
-    Vertical caveat: this pitches the CAMERA onto the target; it does not lower the HAND.
-    For a low shelf the follow-on grab still needs crouch / hand-height, not just a centred
-    view (see extend_arm_until_grabbed's vertical-gap note). Centring gets the target in
-    front; it is not by itself a grab.
-
-    debug_dir: if set, each look writes {debug_dir}/look<i>_bbox.png (or ``.jpg`` in distributed
-    benchmark mode) - the frame with every VLM
-    candidate box (yellow), the locked instance (red) and the aim crosshair (green) - so a test
-    can show what the detector returned and which instance was tracked. None in production (no
-    image I/O beyond the annotate_target debug write).
-
-    Returns the last TransformAgent state dict, augmented with 'centered' (bool), 'detected'
-    (bool), 'residual_px' (dx, dy at the final look), 'iters' (looks taken), 'outcome'
-    (success | not_detected | detection_error | stalled | incomplete), 'center_message' (a human-readable line
-    the runner surfaces to the agent as `last_center`, so the actor and the episodic learner know
-    whether centring worked instead of guessing), and 'box' - the final locked bbox dict
-    (xmin/ymin/xmax/ymax/cx/cy in the ORIGINAL_WIDTH x ORIGINAL_HEIGHT virtual frame, plus label),
-    or None if the target was never detected. 'box' lets a caller OCR/crop exactly what was
-    centred (e.g. read the POS screen inside its own bbox) without re-detecting."""
+    If debug_dir is set, save each look with candidates, the locked box, and aim.
+    Return the simulator state plus centered, detected, residual_px, iters, outcome,
+    center_message, box, and detection_error. Box coordinates use the virtual
+    ORIGINAL_WIDTH x ORIGINAL_HEIGHT frame; callers can reuse them for cropping/OCR.
+    """
     aim_x = aim_norm[0] * ORIGINAL_WIDTH
     aim_y = aim_norm[1] * ORIGINAL_HEIGHT
     state = TransformAgent((0, 0, 0), (0, 0, 0))  # read current pose (no-op move)
@@ -693,24 +594,9 @@ def center_object_on_screen(target_info, aim_norm=(0.5, 0.5), max_iters=5, tol_p
     return state
 
 
-# ===== Phase 6.2: fixed-input centring on the checkout counter ===================================
-# center_to_counter is center_object_on_screen with the target and aim PINNED, so the scripted place
-# gate (and later the 6.3 actor) centre the counter with NO free-text target to misspell and no aim to
-# re-guess per call - the same "deterministic where we can be" philosophy as the rest of the pipeline.
-# The counter is a big, matte, unambiguous surface, so this SHOULD be the easy case for the centring
-# loop. If instead the front-item bias (commit 7042d09) pulls the look-1 seed onto a product sitting
-# ON the counter, that is a FINDING - fall back to the Phase-2 perpendicular yaw that NavSession.goto
-# already faces landmarks with, and trust the yaw - not a blocker (phase6 plan, "Centring the counter").
-#
-# UNMEASURED (2026-07-22): both constants below are PROVISIONAL - place_probe.py sets them from live
-# reads before this is trusted (project doctrine: measure, don't assume).
-#   - COUNTER_AIM_NORM is a knob because the counter TOP sits BELOW camera height: the LiDAR sample
-#     plan_place wants (a point ON the surface, not the front lip) may need the aim BELOW centre, the
-#     way the grab sweet-spot aims at y~0.67. Default dead-centre so the probe can A/B lowering it as
-#     one variable.
-#   - front_bias defaults to 0.0 here (pure nearest-to-aim), NOT the centring tool's 0.25: a single
-#     flat surface has no front-of-row depth stack to disambiguate, and 0.0 removes the one knob most
-#     likely to hijack the seed onto an item on the counter. A/B against 0.25 only if centring misses.
+# Fixed surface targets keep checkout centering consistent across callers.
+# Counter aim is provisional; probe below-center aiming if LiDAR hits the front lip.
+# Zero front bias avoids favoring products sitting on the surface.
 COUNTER_TARGET_INFO = ("main_goal=the checkout counter surface - the flat countertop you set items "
                        "down on, not the items on it "
                        "The top surface of the counter, not the entire counter.")
@@ -718,33 +604,16 @@ COUNTER_AIM_NORM = (0.5, 0.5)   # provisional; place_probe measures whether the 
 
 
 def center_to_counter(aim_norm=COUNTER_AIM_NORM, front_bias=0.0, **kwargs):
-    """center_object_on_screen bound to the checkout counter: fixed target + aim, zero-argument for the
-    caller. The scripted 6.2 gate and the 6.3 actor both centre the counter through THIS, so there is
-    no target string to misspell and no aim to re-guess per call. Returns exactly what
-    center_object_on_screen returns (the 'centered'/'outcome'/'center_message' contract is unchanged).
+    """Center on the counter with a fixed target and aim.
 
-    Note for callers CARRYING an item: do NOT stow the hands around this call (that drops the item and
-    undoes Phase 6.1). The REST carry pose is out of frame and LiDAR-culled, so centring reads a clean
-    frame with the hand active. See the module note above for the provisional constants and the
-    front-item-bias fallback."""
+    Keep carrying hands active at REST; disabling them drops the item.
+    """
     return center_object_on_screen(COUNTER_TARGET_INFO, aim_norm=aim_norm,
                                    front_bias=front_bias, **kwargs)
 
 
-# ===== Phase 6.2 (restructured): fixed-input centring on the barcode scanner =====================
-# The scan sibling of center_to_counter: cp54 is a SELF-CHECKOUT (POS screen + barcode scanner +
-# bagging tray, probe finding 2026-07-22), and the scan sequence needs the agent square on the
-# SCANNER PAD specifically - the tray centring above aims at the wrong third of the furniture.
-#
-# UNMEASURED (2026-07-22): wording and aim are PROVISIONAL seeds - place_probe's `scanner` command
-# (probe M2) measures whether the detector locks the pad, and the winning wording/aim get pinned
-# here, same as the counter's did. Prompt changes A/B on identical frames per project doctrine.
-#   - The pad is SMALL and dark (black scan pad under the scanner housing's red LED window) - the
-#     opposite detection regime from the big matte countertop. The wording names the visually
-#     loudest cue (the red LED window) and excludes the two look-alike neighbours (POS screen =
-#     also a dark rectangle; tray = also recessed/dark).
-#   - front_bias stays 0.0 for the same reason as the counter: no depth stack to disambiguate, and
-#     the bias is the knob most likely to hijack the seed onto an item or the screen.
+# Scan alignment targets the pad specifically, excluding the screen and bagging tray.
+# Wording and aim remain provisional until validated with place_probe's scanner command.
 SCANNER_TARGET_INFO = ("main_goal=the barcode scanner on the checkout counter - the black square "
                        "scan pad below the scanner head with the red LED window. Not the POS "
                        "screen, not the bagging tray, and not any product.")
@@ -752,27 +621,14 @@ SCANNER_AIM_NORM = (0.5, 0.5)   # provisional; place_probe `scanner [y]` dials i
 
 
 def center_to_scanner(aim_norm=SCANNER_AIM_NORM, front_bias=0.0, **kwargs):
-    """center_object_on_screen bound to the checkout's barcode scan pad: fixed target + aim, so the
-    scan sequence (align_to_scanner -> scan_held_item) centres the pad with no free-text target to
-    misspell. Returns exactly what center_object_on_screen returns ('centered'/'outcome'/
-    'center_message' contract unchanged).
-
-    Callers are CARRYING by construction (you centre the scanner in order to scan the held item) -
-    do NOT stow the hands around this call; the REST carry pose is out of frame and LiDAR-culled.
-    See the module note above: wording/aim are provisional until probe M2 pins them."""
+    """Center on the scan pad. Keep carrying hands active at REST."""
     return center_object_on_screen(SCANNER_TARGET_INFO, aim_norm=aim_norm,
                                    front_bias=front_bias, **kwargs)
 
 
-# ===== Phase 6.2 (restructured): centre on the BAGGING TRAY ======================================
-# The bag step's own target, split OFF center_to_counter after a live run (2026-07-23) dropped an item
-# on the SCANNER PAD: center_to_counter targets "the counter surface", whose bbox up close is huge and
-# ill-defined - its centre wobbles over the scan pad and STALLS, and even a clean centre lands on the
-# countertop near the scanner, not the recessed bagging bin. So the tray gets a dedicated canned target
-# the way the pad and screen did. The bin is a distinct recessed rectangle, so it SHOULD centre more
-# stably than the whole counter - but that (and the aim) are UNMEASURED: probe/gate confirms, then pins.
-# CONSEQUENCE (flagged, not hidden): PLACE_ENVELOPE's place_max=1.28 m was measured centring the COUNTER
-# SURFACE, not the tray - it must be RE-MEASURED with this target before the bag numbers are trusted.
+# Target the recessed tray: centering the whole counter can land on the scanner pad.
+# Tray wording/aim need live validation. PLACE_ENVELOPE was measured against the
+# counter surface and must be remeasured for this target.
 TRAY_TARGET_INFO = ("main_goal=the bagging tray - the empty recessed rectangular bin next to the "
                     "self-checkout where you drop bagged items. Not the flat counter top, not the "
                     "black barcode scan pad, not the POS screen, and not any product.")
@@ -780,22 +636,17 @@ TRAY_AIM_NORM = (0.5, 0.5)   # provisional; dial deeper (y>0.5) if releases catc
 
 
 def center_to_tray(aim_norm=TRAY_AIM_NORM, front_bias=0.0, **kwargs):
-    """center_object_on_screen bound to the bagging tray: fixed target + aim, the bag step's centring.
-    Returns the center_object_on_screen contract (incl. 'box'/'outcome'). Callers are CARRYING by
-    construction (you centre the tray to drop into it) - do NOT stow the hands. Wording/aim are
-    PROVISIONAL until a live probe/gate pins them, and the place envelope must be re-measured against
-    THIS target (see the module note above)."""
+    """Center on the tray. Keep carrying hands active at REST.
+
+    Validate the provisional aim and remeasure the place envelope for this target.
+    """
     return center_object_on_screen(TRAY_TARGET_INFO, aim_norm=aim_norm,
                                    front_bias=front_bias, **kwargs)
 
 
-# ===== Phase 6.2 (restructured): centre + region-OCR the POS screen ==============================
-# The scan has NO websocket query (BarcodeScanner.cs), so the measured scan signal is the receipt on
-# the POS screen. Reading the WHOLE frame drags in shelf text, product labels, the "Start" button -
-# noise that swamps the receipt lines. So: centre the SCREEN as a target, then OCR only its bbox
-# (read_text_in_box). Same canned-target pattern as the counter/scanner; wording is PROVISIONAL
-# until probe M5 pins it (the receipt text is big/flat/high-contrast - the easy case for both the
-# detector and paddleocr, but MEASURE it).
+# The scanner has no WebSocket status query; use the POS receipt as evidence.
+# OCR only the screen bbox to exclude shelf/product text. Validate the provisional
+# target wording with place_probe's POS screen probe.
 SCREEN_TARGET_INFO = ("main_goal=the self-checkout POS screen - the bright rectangular monitor "
                       "showing the receipt / item list and the green Start button. Not the barcode "
                       "scan pad, not the bagging tray, not any product.")
@@ -892,36 +743,14 @@ def _fuzzy_new_lines(before, after, ratio=0.8):
 
 
 def scan_held_item(hand="auto", baseline=None, max_extend=25, fuzzy_ratio=0.8, debug_dir=None):
-    """Scan the item currently held in `hand` by sweeping it through the checkout scan zone WITHOUT
-    releasing it, then confirm off the POS screen. Phase 6.2 - promoted from place_probe.sweep after
-    the in-hand-sweep mechanic passed live (M1/M3/M5, 2 datapoints, 2026-07-22: item scanned and
-    stayed held both runs at slant 0.84-0.89 m; OCR read real catalog IDs off the receipt).
+    """Sweep a held item through the aligned scan pad without opening the grip.
 
-    PRECONDITION: the agent is already ALIGNED on the scan pad (store_map.align_to_scanner) with the
-    item in hand. This tool does NOT move the body or the camera onto the pad - it sweeps the HAND
-    from where the agent stands, so a misaligned caller simply won't scan (an honest miss, not a
-    crash). The full-hand REST/GRAB ownership mirrors extend_arm_until_grabbed.
+    The caller must align first; the sweep moves only the hand, then restores REST
+    and centers the POS screen. A fuzzy receipt delta supplies the scanned verdict.
+    Pass the returned receipt as the next item's baseline; None assumes an empty
+    checkout. The OCR verdict is separate from human scan verification.
 
-    SEQUENCE: guard (must be holding; REFUSE otherwise) -> GRAB pose -> extend fully toward the pad
-    (the hand's stall / Unity 0.5 clamp is the stop; the user-enlarged Easy trigger box covers the
-    whole scan region, so a full extension transits it - there is NO stop-distance calibration) ->
-    retract exactly as far as extended -> restore REST. The grip is NEVER opened: a held item keeps
-    its Barcode MeshCollider live as a trigger (RetailItemRuntimeService.cs), so the sweep scans
-    without dropping. There is no drop-scan fallback (deleted by decision 2026-07-22).
-
-    VERIFICATION (no checkout websocket query exists yet - a filed RequestCheckoutState is the durable
-    fix): with the hand back at REST (out of frame, no occlusion), center_to_screen locks the POS
-    monitor and read_text_in_box OCRs the receipt inside its own bbox. A NEW receipt line vs
-    `baseline` (the receipt lines seen BEFORE this scan) => scanned. The diff is FUZZY (_fuzzy_new_lines)
-    so OCR char jitter across frames does not fake a scan. `baseline` MUST be threaded across a
-    multi-item session (the receipt accumulates - the previous item's line is still on screen); pass
-    the returned `receipt` as the next call's baseline. baseline=None treats the checkout as empty
-    (correct for the first scan of a fresh checkout, the common gate case).
-
-    Returns {'scanned': bool, 'still_holding': bool, 'receipt': [lines], 'new_lines': [lines],
-    'screen_detected': bool, 'reason': str} - surfaced to the actor/learner as `last_scan`. `scanned`
-    is the MEASURED signal (OCR delta); the gate also records the human `scanned_verified` separately
-    and never promotes one to the other.
+    Return scanned, still_holding, receipt, new_lines, screen_detected, reason, and hand.
     """
     # 'auto' resolves to the hand that IS holding (left-first when both hold - name 'right' to scan
     # the other item); an explicit empty hand is refused. Subsumes the old empty-hand guard.
@@ -980,21 +809,12 @@ def scan_held_item(hand="auto", baseline=None, max_extend=25, fuzzy_ratio=0.8, d
             "new_lines": new, "screen_detected": bool(box), "reason": reason, "hand": hand}
 
 
-# The hand can clip THROUGH the counter/tray in the sim (a physics limitation we cannot fix - user,
-# 2026-07-23), so a full-extension release would drop the item INSIDE or beyond the counter. Measured
-# release rule (user, personally measured): stop and open the grip when the hand's forward translation
-# z reaches (centre-LiDAR distance - this standoff), i.e. 0.1 m SHORT of the measured surface, so the
-# item falls ONTO the surface, not through it. Applies to the drop only; the scan sweep still extends
-# fully (an item passing through the scan zone is fine, and it is never released there).
+# Simulator hands can clip through surfaces. Release 0.1 m before the LiDAR distance;
+# scan sweeps still extend fully because they keep the grip closed.
 PLACE_CLIP_STANDOFF_M = 0.1
 
-# How off-centre a tray lock may be and still release (user, 2026-07-23): the drop does NOT need to be
-# dead-centre, only ON the tray and not out at the lip. The LiDAR samples FRAME CENTRE (= the drop
-# point); we accept when that point lands within the inner `edge_margin` fraction of the tray's OWN
-# bounding box - so at 0.6 the ray may sit up to 60% of the way from the box centre toward an edge,
-# leaving a 40% margin to the lip. Bigger = more permissive (fewer aborts) but riskier near the lip
-# (the aim confound - items catching the near lip roll off). Measured against the TRAY box, so an
-# off-centre accept can NOT drift onto the scanner (that was finding-8's center_to_COUNTER failure).
+# Accept the frame-center LiDAR ray within 60% of the tray's half-extents,
+# leaving a 40% margin to each lip. Larger values permit riskier off-center drops.
 PLACE_TRAY_EDGE_MARGIN = 0.6
 
 
@@ -1013,44 +833,19 @@ def _ray_in_box(box, edge_margin):
 def place_held_item(hand="auto", aim_norm=None, max_approach_iters=4, max_extend=25,
                     clip_standoff=PLACE_CLIP_STANDOFF_M, edge_margin=PLACE_TRAY_EDGE_MARGIN,
                     debug_dir=None):
-    """Release the held item onto the checkout bagging tray - the ONE deliberate release in the whole
-    checkout chain (everywhere else the grip stays closed). Phase 6.2.
+    """Center on the tray, approach within the place envelope, and release a held item.
 
-    PRECONDITION: at the counter (go_to_counter) and holding the (already scanned) item at REST. This
-    tool centres the tray itself, so the caller need not pre-centre.
+    Requires a scanned item at the counter. Re-center after each approach step.
+    The LiDAR ray must lie inside the tray's edge margin; repeated lock failures or
+    non-approachable verdicts abort while holding. Extend to distance - clip_standoff
+    (or an earlier stall), release, retract, and restore REST.
 
-    Sequence: guard (must hold; REFUSE otherwise) -> center_to_tray; ONLY when centring SUCCEEDS
-    (outcome=='success') is the depth gate trusted -> plan_place; if the verdict is 'move'/'back',
-    creep the body and re-centre, up to max_approach_iters, re-planning each time (the deterministic
-    depth gate owns the standoff - no dead-reckoning); once 'placeable' UNDER a successful centre,
-    GRAB-extend the held item OVER the tray, open the grip, retract, restore REST. A non-approachable
-    verdict (crouch/bail/recenter/unavailable) OR a centre that never locks aborts WITHOUT releasing -
-    better to keep carrying than drop the item off the tray.
+    placed records release under a placeable verdict, not proof of landing in the
+    tray; visual verification is separate. The envelope was measured on the counter
+    surface and needs remeasurement for the tray, especially after aim changes.
 
-    RELEASE-GATE (fixed 2026-07-23 after a live run dropped on the scanner pad; loosened same day):
-    a STALLED/INCOMPLETE centre used to fall through to a release, dropping the item wherever the
-    camera gave up. The release no longer requires a dead-centre lock - it requires the LiDAR ray (the
-    drop point) to fall within the inner `edge_margin` of the TRAY box (_ray_in_box): off-centre is
-    fine, near-the-lip is not, so a stall with the tray still well in frame is accepted. If the ray is
-    out near the lip / off the box, it re-centres; repeated failures abort HOLDING. Safe because the
-    check is against center_to_tray's OWN box, so an off-centre accept can't drift onto the scanner
-    (finding-8 was center_to_counter, whose bbox stalled near the scanner).
-
-    CLIP-STANDOFF (user measured, 2026-07-23): the hand can clip THROUGH the counter in the sim, so the
-    release does NOT extend to the reach clamp - it stops when the hand's forward z reaches
-    (plan['distance'] - clip_standoff), 0.1 m short of the measured surface, so the item drops ONTO the
-    tray rather than through it. If the hand stalls before that depth, it releases there (still short,
-    so still no clip-through).
-
-    Honest scoring: `placed` (the MEASURED signal) is True iff the grip actually opened AND the release
-    happened under a 'placeable' plan_place verdict at a SUCCESSFULLY-centred tray. It is NOT proof the
-    item is physically in the tray: the gate records `placed_verified` (a screenshot) separately and
-    never promotes this to it. UNVERIFIED: PLACE_ENVELOPE.place_max was measured on the COUNTER SURFACE,
-    not the tray - re-measure against this target. Aim confound: pass aim_norm=(0.5, y>0.5) to dial the
-    release deeper if the gate shows items catching the tray's near lip.
-
-    Returns {'placed', 'released', 'verdict', 'distance', 'surface_height', 'iters', 'reason'} -
-    surfaced as `last_place`."""
+    Return placed, released, verdict, distance, surface_height, iters, and reason.
+    """
     from manip.manipulation import plan_place, PLACE_ENVELOPE, set_hand_pose as _set_pose, resolve_release_hand
     # 'auto' resolves to the hand that IS holding (left-first when both hold - name 'right' to place
     # the other item); an explicit empty hand is refused. Subsumes the old empty-hand guard.

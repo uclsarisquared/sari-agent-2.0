@@ -369,13 +369,7 @@ def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
         safe_step = max(0.0, clearance - args.safety_margin)
         step_len = min(args.step_size, dist, safe_step)
 
-        # The straight-at-waypoint heading is blocked - before giving up on this waypoint
-        # entirely (holding position for a full replan), try small heading nudges around it.
-        # The real-time scan already tells us which side the obstruction is on
-        # (clearance_debug's az_rel_deg/lateral); a few-degree sidestep is often enough to
-        # clear it while still making progress toward the same waypoint, rather than
-        # discarding the whole path over an obstruction the global planner can't react to
-        # this granularly.
+        # Try small heading nudges around the obstruction before discarding the path.
         nudge_deg = 0.0
         if step_len < args.min_step and args.max_nudge_deg > 0:
             nudged = find_clear_heading(
@@ -400,36 +394,18 @@ def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
             # VoxelGrid.mark_blocked_region). Fall back to sensor height when there's no
             # offending hit (blocked by dist/step-size, not an obstacle) - a mid-band bin.
             blocked_h = clearance_debug["height_above_root"] if clearance_debug else args.sensor_height_offset
-            # A region, not a single point: one real obstacle spans many cells, and marking
-            # only the exact hit point took many repeated near-identical blocks to build up
-            # enough occupied area for inflation-aware A* to actually avoid the danger zone
-            # (or exclude a candidate goal too close to it). body_radius as the mark radius
-            # keeps this consistent with the same clearance the agent itself needs. Marked in
-            # the voxel grid (not the 2D grid, which the next collapse() would overwrite).
+            # Mark a body-radius region in the voxel grid so A* avoids the whole obstacle.
+            # A mark in the 2D grid would be overwritten by the next collapse.
             voxel.mark_blocked_region((blocked_x, blocked_z), blocked_h, radius_m=args.body_radius)
             # notify_blocked forces the planner back to NEED_GOAL (replan next step) and
             # blocklists the current goal, so whether we escape or hold below, the doomed
             # waypoint is abandoned rather than re-committed to.
             planner.notify_blocked((blocked_x, blocked_z))
 
-            # Wedge escape. The straight-at-waypoint heading is blocked AND every small
-            # find_clear_heading nudge above already failed - so the obstruction spans the
-            # whole forward arc and the only open space is off to the side/behind (a shelf-
-            # corner pocket, an aisle dead-end). Holding position just rescans the identical
-            # pose until the planner's no-movement circuit breaker ends the run early with
-            # the map half-built (the recurring "blocked path premature end"). Instead, step
-            # toward the most-open direction to physically leave the pocket; the forced replan
-            # above then plans from the new, un-wedged cell, and the blocked-region mark
-            # deters A* from routing right back in. Bounded by --max-escapes so a pathological
-            # approach<->escape oscillation (e.g. a frontier only reachable through the
-            # A*-vs-clearance dead band) still terminates instead of thrashing to --max-steps.
-            #
-            # Gate on safe_step (clearance - safety_margin) < min_step, NOT just step_len <
-            # min_step: step_len is ALSO driven to ~0 when the agent simply arrives at its
-            # waypoint (dist-to-waypoint ~0) with the path's last waypoint un-advanceable -
-            # e.g. parked at an observation vantage. That is not a wedge (clearance is wide
-            # open there); escaping it would waste a 0.5m detour and burn escape budget. Only
-            # a genuine close obstruction (clearance < safety_margin + min_step) is a wedge.
+            # If all forward nudges fail, escape toward open space and replan.
+            # Bound retries with max_escapes to prevent approach/escape oscillation.
+            # Use safe_step, not step_len: reaching a waypoint also makes step_len zero,
+            # but only insufficient clearance indicates a wedge.
             escaped = False
             if args.escape_when_wedged and total_escapes < args.max_escapes and safe_step < args.min_step:
                 escape = find_escape_heading(
@@ -464,21 +440,9 @@ def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
                       f"{nav.target_world_xz}; holding position and rescanning"
                       f"{_format_clearance_debug(clearance_debug)}")
         else:
-            # The agent was already rotated above to face its travel direction - either
-            # straight at the waypoint (normal) or the nudged heading that steered around a
-            # close obstruction (nudge_deg != 0; see find_clear_heading). Either way "forward"
-            # now points where we want to go, so a body-relative step is the same (0, 0,
-            # step_len) in both cases: the sim rotates it into world space itself via
-            # EgocentricToWorldTranslation (it must NOT be pre-rotated here, or the sim would
-            # rotate it a second time). On the nudge branch the next iteration recomputes
-            # delta_yaw fresh from the new position, re-correcting toward the actual waypoint
-            # once past the obstruction.
-            #
-            # step_agent's `collided` return is intentionally discarded (`_`) - it comes from
-            # the Rigidbody's Discrete collision detection with no root collider, which is known
-            # unreliable (misses real contact; a false positive would inject a phantom obstacle
-            # into the map). LiDAR (integrate() + swept_clearance_ahead) is the only source of
-            # truth for both mapping and step-safety.
+            # The simulator rotates body-relative movement into world space; send straight
+            # forward after turning to avoid rotating twice. Ignore its unreliable collision
+            # flag; LiDAR supplies obstacle and movement-clearance evidence.
             pos, rot, _ = step_agent((0, 0, step_len), (0, 0, 0), args.uri)
 
         nudge_str = f" nudge={nudge_deg:+.1f}deg" if nudge_deg else ""

@@ -98,12 +98,8 @@ def build_vlm_parser():
     parser = build_parser()
     parser.description = ("Frontier exploration navigated by a VLM instead of A*. Shares "
                           "explore.py's parser and run loop; only the planner differs.")
-    # None is a sentinel meaning "not chosen explicitly" - run() then resolves it to a PER-TAG
-    # subdirectory. It cannot default to a fixed directory: the arms write several UNTAGGED files
-    # (grid_final.npy/.png, points_final.*, and every periodic grid_<step>.npy from
-    # _explore_loop), so two arms sharing one directory silently overwrite each other's maps, and
-    # --clear-output (default true) additionally wipes the earlier arm's reports outright. The
-    # A/B this whole harness exists for would destroy its own control, with no warning.
+    # Resolve an unspecified output directory per tag: workers write untagged map
+    # files, and shared output or --clear-output would overwrite another run.
     parser.set_defaults(output_dir=None)
     for action in parser._actions:
         # argparse exposes no public way to amend an inherited action's help, and this flag's

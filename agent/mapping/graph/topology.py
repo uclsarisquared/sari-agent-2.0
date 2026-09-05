@@ -53,12 +53,8 @@ DEFAULT_MIN_BRANCH_LENGTH_M = 0.5
 DEFAULT_DOORWAY_MAX_WIDTH_M = 1.2
 DEFAULT_DOORWAY_WIDTH_RATIO = 0.7
 
-# Half the agent's passable width (matches the default body_radius used by A*/exploration).
-# A checkpoint whose distance to the nearest occupied cell is below this sits somewhere the
-# agent's body can't actually occupy - typically a spot the skeleton threaded into through a
-# sub-body-width gap in a ragged/under-observed shelf face, producing a junction/doorway/end
-# INSIDE a shelf. Production pipelines pass this to extract_topology to drop those; the
-# function itself defaults to 0.0 (off) so direct callers/tests keep the raw skeleton graph.
+# Minimum standable clearance for production topology, matching body_radius.
+# Direct callers default to 0.0 to retain the raw skeleton graph.
 DEFAULT_MIN_CHECKPOINT_CLEARANCE_M = 0.3
 
 # Guards a topologically malformed skeleton (e.g. a pure loop with no degree!=2 pixel

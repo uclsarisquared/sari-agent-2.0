@@ -205,15 +205,9 @@ def default_uri() -> str:
     return os.environ.get("SARI_WS_URI") or FALLBACK_WS_URI
 
 
-# How long an ordinary command may go unanswered before the sandbox is presumed wedged rather
-# than merely slow. MEASURED 2026-08-21: a Unity instance that stops answering mid-attempt left
-# two benchmark processes parked in `await websocket.recv()` for over an hour (no timeout existed
-# anywhere below this point) - CPU-idle, no log output, no crash, invisible to every retry/requeue
-# path sari_bench already has, because none of them ever got a chance to run. Sandboxes and the
-# agent run on the same local network, so 10s is already generous for a live one; past that,
-# something is wrong, not just slow. Configurable (run config `environment.sandbox_command_timeout`
-# / `bench.sandbox_command_timeout`, or $SARI_SANDBOX_COMMAND_TIMEOUT directly) for a host under
-# unusual load.
+# Bound unanswered commands so a wedged sandbox reaches retry/requeue handling.
+# Override via environment.sandbox_command_timeout, bench.sandbox_command_timeout,
+# or SARI_SANDBOX_COMMAND_TIMEOUT for slower hosts.
 SANDBOX_COMMAND_TIMEOUT_ENV = "SARI_SANDBOX_COMMAND_TIMEOUT"
 DEFAULT_SANDBOX_COMMAND_TIMEOUT = 10.0
 
@@ -470,12 +464,8 @@ def TransformHands(leftTranslation: Tuple[float],
     object_hovered_over_right = lines[7].split(": ")[-1]
     is_grip_closed_right = lines[8].split(": ")[-1].strip() == "True"
 
-    # Current simulator builds append the physical attachment state to the legacy reply.  The old
-    # `*GrippedState` fields only described the gripper toggle: a hand that lost/dropped its item
-    # could remain "gripped" forever, making resolve_grab_hand treat it as occupied and poisoning
-    # every later grab.  Preserve compatibility with older builds, but when the stronger signal is
-    # available make the long-standing public fields mean what their callers/documentation assume:
-    # an item is actually attached to that hand.
+    # Prefer physical attachment state over the legacy gripper-toggle fields:
+    # a closed empty hand must not count as holding. Fall back for older simulators.
     labelled = {}
     for line in lines:
         if ": " in line:

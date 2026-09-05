@@ -87,17 +87,9 @@ def grab_and_read_item(hand="left", max_attempts=30, text_read_fn=None):
     return ["No object grabbed"]
 
 
-# ===== Phase 6.1: hand-pose state machine (REST / GRAB) =========================================
-# Hands stay ACTIVE throughout a task now (no longer disabled for nav/perception), parked at a named
-# REST pose so a carried item is never dropped by a mode change - it rides at REST. The two poses are
-# the user's manual calibration (2026-07-22), LEFT-hand agent-local xyz, validated live by the step-0
-# calibration (validation/calibration/step0_hand_pose_probe.py, user-confirmed working 2026-07-22).
-# HAND FRAME DEFINITION (dual-hand, 2026-07-23). All poses here are AGENT-LOCAL xyz, the frame
-# TransformHands reports in: +x = the AGENT'S RIGHT, +y = up, +z = forward. "Left hand" = the hand
-# resting on the agent's LEFT side (negative x); "right hand" = its counterpart at positive x. The
-# calibration below is the LEFT hand's (user-measured 2026-07-22); the RIGHT hand is defined as that
-# same pose MIRRORED across the sagittal plane x = 0 - i.e. x negated, y and z unchanged (user
-# directive 2026-07-23: the right hand's rest/active positions are the left's mirror along x).
+# Hands remain active at REST while carrying, including during navigation and perception.
+# Poses are agent-local xyz (+x right, +y up, +z forward), calibrated for the left
+# hand on 2026-07-22. Right-hand poses mirror x across the agent's midline.
 REST_POSE = (-0.213, -0.09, 0.26)  # LEFT-hand out-of-frame resting pose: navigate, perceive, CARRY
                                    # (z revised 0.2 -> 0.26, user-validated 2026-07-22).
                                    # Right hand rests at (+0.213, -0.09, 0.26) via pose_for_hand.
@@ -360,14 +352,9 @@ def rotate_right_to_next_inspection_face(times=1):
     return _next_inspection_face("right")
 
 
-# ===== Dual-hand selection policy (2026-07-23) ==================================================
-# Every grab-side tool takes hand='left'|'right'|'auto'. 'auto' resolves DETERMINISTICALLY from the
-# live grip state (one TransformHands no-op read) - the VLM picks a side only when it wants to:
-#   grabbing   -> a FREE hand, LEFT preferred (the left is the measured calibration; the right is its
-#                 x-mirror). Both full -> None: refuse, don't force-open (that drops a carried item).
-#   releasing  -> the hand that IS holding (scan/place/drop act on a held item). Both holding ->
-#                 LEFT first (stable order, the caller can name 'right' to pick the other item).
-#                 Neither holding -> None: refuse.
+# Auto hand selection reads live grip state: grab with a free hand (left preferred),
+# release from a holding hand (left first). Return None if neither is eligible;
+# never force-open a carrying hand.
 
 def hand_grip_states():
     hs = TransformHands((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0))
@@ -405,50 +392,13 @@ def resolve_release_hand(hand="auto"):
 
 
 def extend_arm_until_grabbed(times=1, hand="auto", max_extend=25, max_pitch_deg=20.0):
-    """Set the GRAB pose, extend the hand straight forward until a grabbable item comes under it, grip
-    it, then retract to REST (Phase 6.1 - the tool owns both poses). If the hand reaches its limit
-    empty-handed, report out-of-reach and let the CALLER reposition - this tool no longer moves the
-    body. hand='auto' (default) picks a FREE hand via resolve_grab_hand (left preferred, right when
-    the left is carrying); 'left'/'right' forces a side, refused if that hand is full.
+    """Extend from GRAB until an item is hovered, toggle grip once, then restore REST.
 
-    Phase 6.1 hand-pose ownership: this tool sets GRAB_POSE at entry and restores REST_POSE on EVERY
-    exit path (success, miss, exception), so a gripped item rides back to the carry pose. It also
-    REFUSES (returns {'blocked': True, ...}) if the hand is already gripping at entry, rather than
-    force-opening it - force-opening would drop a carried item mid-task.
-
-    This REPLACES grab_item_in_view_* (md_tools.py), whose ReachAtPixel command does NOT exist in
-    SariSandboxMY - it lands in the sim's `default: Unknown command` branch. This tool uses only
-    commands the sim actually implements: TransformHands (extend/pull the hand), ToggleGrip, and
-    TransformAgent (creep the body).
-
-    GRAB mechanism, verified against SariSandboxV2/Assets/Scripts/AgentControllerBase.cs:
-      * Each extend step returns the hand state; `<side>HoveredObject` is the id of the item under
-        the hand's collision detector, or "null" when nothing is there.
-      * ToggleGrip reads that SAME detector: a toggle from the open hand runs InstantiateItemFromBBox
-        iff an item is detected (ToggleGrip, ~line 809). So hovered-non-null <=> a grip toggle will
-        actually pick the item up. We therefore extend until hovered, then toggle exactly once.
-      * The hand's local offset is clamped at handMoveRange = 0.5 (TranslateHand, ~line 656), so
-        from the default pose the hand only reaches a little further before it stalls. We detect the
-        stall (world position stops changing) and stop reaching from this spot.
-
-    NO FORWARD-CREEP (removed 2026-07-21, user directive): the reach is short, so it often stalls
-    just shy of the item. This tool used to nudge the BODY forward and re-reach - but that motion
-    deviated the agent off the centred target (a small lateral drift, amplified as it closed in, so
-    the hand ended up over the NEIGHBOURING item). It now does ONE reach from where it stands and,
-    if it can't grab, REPORTS out-of-reach for the caller to fix: move the body closer, then
-    RE-CENTER (center_object_on_screen, since moving de-centres the target) and retry.
-      * VERTICAL vs HORIZONTAL miss (reported in `reason` to guide that adjustment): if the camera
-        is pitched steeply (|pitch| > max_pitch_deg) the target is a low/high row and moving forward
-        can't close a vertical gap - raise/lower the hand (or crouch, once wired) instead. Otherwise
-        the item is simply too far - close the distance.
-
-    The caller is expected to have CENTRED the target in view first (perception). `times` is accepted
-    so the mode-machine's `action_ref(time_units)` dispatch works, but it is IGNORED.
-
-    NOT yet verified in a live Play-mode run; the mechanism is read off the C#.
-
-    Returns {'gripped': bool, 'hovered': <id|None>[, 'reason': str]}, or
-    {'blocked': True, 'reason': 'hand already holding an item'} if it refused (full-hand guard).
+    The caller must center the target first. Auto selects a free hand, preferring left;
+    an occupied hand is refused. Stop at the extension limit or stall and let the
+    caller reposition and re-center. This tool never moves the body.
+    REST is restored on success, miss, or exception. times is accepted for dispatch
+    compatibility but ignored. Return grip/hover state, hand, and any failure reason.
     """
     # Resolve the side FIRST (auto -> a free hand; explicit -> validated free). This replaces the old
     # entry-time full-hand guard: a full/unavailable hand is refused here, never force-opened.
@@ -545,16 +495,9 @@ def extend_arm_until_grabbed(times=1, hand="auto", max_extend=25, max_pitch_deg=
         set_hand_pose(REST_POSE, hand=hand)
 
 
-# ===== Phase D: depth-gated reach planning ======================================================
-# plan_reach turns ONE RequestLidarCenter sample into a reach verdict. The tool still never moves the
-# body (the 2026-07-21 no-creep directive); this only DECIDES, and the router acts on the verdict.
-#
-# REACH_ENVELOPE - MEASURED 2026-07-22 from 24 reach_probe grabs. The hand extends along the CAMERA
-# GAZE, so a grab lands iff the SLANT distance to the centred target is within reach - it is NOT a
-# vertical band + horizontal standoff (that model, hand_drop/r_eff/standoff, was REFUTED by the data:
-# same-height items grabbed or missed purely on distance; see mapping/plans/phaseD_reach_and_grab.md).
-# Every grab was <=0.885 m, every miss >=0.900 m - a clean split, and `reachable iff distance<=0.89`
-# predicted all 24 rows. Re-fit from a fresh CSV with `python fit_envelope.py`.
+# Reach uses slant distance along camera gaze; the router owns body movement.
+# In 24 probes (2026-07-22), grabs were <=0.885 m and misses >=0.900 m.
+# Refit with validation/calibration/fit_envelope.py.
 REACH_ENVELOPE = {
     "max_reach": 0.85,   # grab if the slant distance <= this (m). The ~0.89 m boundary minus a margin,
                          # so you grab INSIDE the edge, not at it. fit_envelope sets this from the CSV.
@@ -579,30 +522,12 @@ def _reach_result(verdict, sample=None, move_steps=0, target_height=None,
 
 
 def plan_reach(sample, envelope=REACH_ENVELOPE):
-    """Turn ONE RequestLidarCenter sample into a reach verdict - the deterministic geometry brain of
-    Phase D. PURE function (no sim, no I/O), unit-tested in test_plan_reach.py.
+    """Plan reach from a LiDAR sample without moving the simulator.
 
-    MEASURED MODEL (2026-07-22, 24 reach_probe grabs): the hand extends along the CAMERA GAZE, so
-    reachability is decided by ONE quantity - the SLANT distance to the centred target - not by a
-    vertical band + horizontal standoff. Every grab had distance <= 0.885 m, every miss >= 0.900 m
-    (clean split, 24/24), and same-HEIGHT items with opposite outcomes were separated only by distance.
-    The earlier hand_drop/r_eff/standoff model was refuted; see mapping/plans/phaseD_reach_and_grab.md.
-
-    Geometry (slant range d, gaze pitch theta [+ = down], camera world-Y cam_h):
-        vertical_offset = d * sin(theta)     # + = target BELOW the camera; equals cam_h - target_height
-        horizontal_gap  = d * cos(theta)     # forward distance (a body move is horizontal)
-        target_height   = cam_h - vertical_offset
-    Moving forward shrinks horizontal_gap (so the slant distance) but NOT vertical_offset (the item does
-    not move), and the smallest slant distance reachable by moving alone is |vertical_offset|. So if
-    |vertical_offset| already exceeds max_reach, moving can't help - you must change posture.
-
-    Verdicts:
-      reachable   - distance <= max_reach: grab now.
-      move        - too far but |vertical_offset| <= max_reach: move `move_steps` forward, re-centre, retry.
-      crouch      - too far AND target more than max_reach BELOW the camera: crouch to get closer, re-measure.
-      bail        - too far AND target more than max_reach ABOVE the camera: moving/crouching can't reach it.
-      recenter    - miss (nothing solid at centre): don't plan off a meaningless distance.
-      unavailable - sample lacks pose (old sim build, pre-Phase-D recompile): caller falls back.
+    Reachability uses slant distance along camera gaze. Forward movement reduces
+    horizontal distance but cannot close a vertical offset beyond max_reach:
+    targets below require crouching, while targets above are unreachable.
+    Missing pose data returns unavailable; a ray miss requests re-centering.
     """
     if not sample or sample.get("error"):
         return _reach_result("recenter", sample,
@@ -653,26 +578,11 @@ def plan_reach(sample, envelope=REACH_ENVELOPE):
                                 f"gap from {horizontal_gap:.2f} to ~{needed_gap:.2f} m")
 
 
-# ===== Phase 6.2: depth-gated PLACE planning ====================================================
-# plan_place is plan_reach's sibling for RELEASING onto the bagging tray. Same measured model - the
-# held item hangs off the hand which extends along the CAMERA GAZE, so whether a release lands on the
-# surface is decided by the SLANT distance to the centred surface - but a place can have BOTH a far
-# bound (too far -> the item falls SHORT of the tray) and a near bound (too close -> the hand can't
-# clear the tray's front lip). See fit_place_envelope.py, which fits the range and FLAGS a near bound.
-#
-# PLACE_ENVELOPE - PROVENANCE (honest, 2026-07-23): the boundary is bracketed from two probe sessions,
-# NOT a single clean fit, because the landing rows and the miss rows live in different runs:
-#   - LANDS at slant <= 1.29 m  (first place_probe run, finding 2, 2026-07-22)
-#   - MISSES at 1.36 / 1.44 / 1.48 m (M7 run, place_envelope.csv) and 1.64 m (first run)
-# So the far edge sits in (1.29, 1.36): midpoint 1.325 - MARGIN 0.04 = 1.28 -> place_max = 1.28.
-# NO near bound was observed (every miss was FARTHER than every land), so place_min = None (the
-# too-close verdict stays dormant). CAVEAT: the current place_envelope.csv holds ONLY the M7 misses;
-# the <=1.29 land row is from the earlier session and is not in the file, so `fit_place_envelope.py`
-# cannot re-derive place_max until a landing row is logged again. Re-fit from a CSV that has BOTH
-# sides before trusting a tighter number. There is also an unresolved aim confound (Option B, deferred
-# by user 2026-07-23): the misses could be "fell short" OR "rolled off the front edge" (center_to_counter's
-# un-dialed aim) - if the gate shows drops rolling off, dial COUNTER_AIM_NORM deeper and re-measure;
-# the envelope may then widen.
+# Placement uses slant distance with optional near and far bounds.
+# Probes landed at <=1.29 m and missed at >=1.36 m; midpoint minus 0.04 m gives 1.28 m.
+# No near bound was observed. The current CSV contains only misses: log landings
+# before refitting with fit_place_envelope.py. Aim may also cause near-lip roll-off;
+# remeasure the envelope after changing the target or aim.
 PLACE_ENVELOPE = {
     "place_max": 1.28,   # release lands on the tray iff slant distance <= this (m)
     "place_min": None,   # no near bound observed; None disables the too-close ('back') verdict
