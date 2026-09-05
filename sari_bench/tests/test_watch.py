@@ -466,6 +466,18 @@ def test_rotated_requeue_dir_stays_separate() -> None:
         print("ok  a rotated-aside requeue dir does not merge into its replacement")
 
 
+def test_scan_attempt_accepts_a_symlinked_battery_root(tmp_path):
+    battery = tmp_path / "battery"
+    run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(2))
+    alias = tmp_path / "alias"
+    alias.symlink_to(battery, target_is_directory=True)
+
+    view = scan.scan_attempt(run_dir.resolve(), alias, time.time()).as_dict()
+
+    assert view["key"] == "p/try01"
+    assert view["frame"] == "p/try01/leg00/step02.png"
+
+
 def test_pending_retry_scan_contract_and_legacy_default() -> None:
     with tempfile.TemporaryDirectory() as temp:
         battery = Path(temp) / "b"

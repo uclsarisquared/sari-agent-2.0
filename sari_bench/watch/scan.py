@@ -543,7 +543,8 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
 
     frame = _latest_frame(run_dir)
     if frame is not None:
-        view.frame = str(frame.relative_to(battery_root))
+        # Normalize aliases such as macOS /var -> /private/var for relative paths.
+        view.frame = str(frame.resolve().relative_to(battery_root.resolve()))
 
     if view.state in {"starting", "running"}:
         elapsed_fraction = None
