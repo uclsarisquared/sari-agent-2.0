@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.8.1 (2026-09-05)
+
+### Bug Fixes
+
+- **watch**: Normalize symlinked battery root for frame paths
+  ([`c5cc594`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c5cc5944b04a38a0bc7b0ffd6796482f47568d3b))
+
+### Chores
+
+- Large cleanup of comments and dead code
+  ([`7e5bfbd`](https://github.com/uclsarisquared/sari-agent-2.0/commit/7e5bfbd86e213ad05501944ca358905564ad1ec2))
+
+### Testing
+
+- **bench**: Cover orphan command matching on every platform
+  ([`78e310a`](https://github.com/uclsarisquared/sari-agent-2.0/commit/78e310a61e7401fdb12ad716c85b6da07e90f30d))
+
+- **bench**: Run package-local tests in the validation suite
+  ([`e77b6b0`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e77b6b0cfe957dba5cf5646e30735d436ad23c50))
+
+- **validation**: Refresh agent and mapping test contracts
+  ([`e02b4a9`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e02b4a953aa28707e80fb562834d6c140c83923c))
+
+
 ## v1.8.0 (2026-09-02)
 
 ### Bug Fixes
