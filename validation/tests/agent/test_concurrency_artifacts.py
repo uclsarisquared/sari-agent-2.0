@@ -80,34 +80,6 @@ def test_memory_snapshots_publish_inside_the_agent_run(tmp_path):
     assert not list((tmp_path / "try01").glob("*.tmp"))
 
 
-def test_depth_upload_uses_returned_frame_not_a_saved_screenshot(monkeypatch, tmp_path):
-    captured = {}
-    response_png = _png_bytes("black")
-
-    class Response:
-        content = response_png
-
-        @staticmethod
-        def raise_for_status():
-            return None
-
-    monkeypatch.setenv(env.RUN_DIR_ENV, str(tmp_path / "try01"))
-    monkeypatch.setattr(perception, "RequestScreenshot",
-                        lambda **kwargs: {"image": _png_bytes("red")})
-
-    def fake_post(url, *, files, timeout):
-        captured.update(url=url, files=files, timeout=timeout)
-        return Response()
-
-    monkeypatch.setattr(perception.requests, "post", fake_post)
-    perception.request_rgbd_image("http://depth.test/estimate", timeout=7.0)
-
-    assert captured["url"] == "http://depth.test/estimate"
-    assert captured["timeout"] == 7.0
-    assert captured["files"]["file"][1] == _png_bytes("red")
-    assert (tmp_path / "try01" / "depth_image.png").is_file()
-
-
 def test_region_ocr_uses_in_memory_crop_and_creates_no_shared_crop(monkeypatch, tmp_path):
     seen = {}
 

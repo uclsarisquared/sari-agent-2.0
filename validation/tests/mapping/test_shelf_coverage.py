@@ -8,6 +8,7 @@ instances directly, the same pattern test_frontier_planner.py/test_topology.py u
 Run with:
     uv run pytest validation/tests/mapping/test_shelf_coverage.py
 """
+from functools import partial
 import os
 import sys
 import unittest
@@ -21,9 +22,14 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from occupancy_grid import OccupancyGrid  # noqa: E402
 from frontier_planner import _inflate_occupied  # noqa: E402
 from topology import Checkpoint, TopologyEdge, TopologyGraph  # noqa: E402
-from shelf_coverage import (  # noqa: E402
-    find_shelf_checkpoint, sweep_edge_side, splice_shelf_checkpoints, _douglas_peucker,
-)
+import shelf_coverage  # noqa: E402
+from shelf_coverage import _douglas_peucker  # noqa: E402
+
+# Fix synthetic geometry independently of the live-store calibration defaults.
+_GEOMETRY = {"max_reading_distance_m": 1.5, "search_radius_m": 3.0}
+find_shelf_checkpoint = partial(shelf_coverage.find_shelf_checkpoint, **_GEOMETRY)
+sweep_edge_side = partial(shelf_coverage.sweep_edge_side, interval_m=1.0, **_GEOMETRY)
+splice_shelf_checkpoints = partial(shelf_coverage.splice_shelf_checkpoints, interval_m=1.0, **_GEOMETRY)
 
 
 def _open_grid(size_m=6.0, resolution=0.1):
@@ -59,6 +65,14 @@ def _reachable_from(start_id, checkpoints):
 
 
 class TestFindShelfCheckpoint(unittest.TestCase):
+    def test_default_reading_distance_is_one_metre(self):
+        grid = _open_grid()
+        grid.log_odds[30, 10] = 5.0
+        result = shelf_coverage.find_shelf_checkpoint(
+            grid, (30, 30), direction=(1, 0), side="right")
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["reading_distance_m"], 1.0)
+
     def test_uses_max_reading_distance_when_there_is_room(self):
         grid = _open_grid()
         grid.log_odds[30, 10] = 5.0  # shelf 2.0m away
@@ -79,7 +93,7 @@ class TestFindShelfCheckpoint(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result["reading_distance_m"], 1.2, places=6)
 
-    def test_shelf_at_exactly_max_distance_places_checkpoint_at_the_path_point(self):
+    def test_shelf_within_max_distance_places_checkpoint_at_the_path_point(self):
         # If the shelf is already at (or within) the max reading distance, the path
         # point itself is already a fine reading distance - no offset needed.
         grid = _open_grid()

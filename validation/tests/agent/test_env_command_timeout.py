@@ -5,7 +5,7 @@ import time
 import pytest
 
 from sim import env
-from mapping.core import lidar_client
+import lidar_client
 
 
 def test_send_command_times_out_when_sandbox_never_replies(monkeypatch):

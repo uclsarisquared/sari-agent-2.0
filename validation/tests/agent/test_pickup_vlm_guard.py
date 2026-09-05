@@ -24,6 +24,7 @@ from orchestrator.pickup_vlm_guard import (
     make_unknown_guard,
 )
 from agent_core.llm import DEFAULT_API_MAX_ATTEMPTS, configure_api_retries
+from agent_core.prompt_loader import load_prompt
 
 
 @pytest.fixture(autouse=True)
@@ -135,10 +136,7 @@ def test_inspection_uses_bound_frame_query_answer_and_auxiliary_context():
     assert "Three." in content[1]["text"]
     assert "nearest_checkpoint" in content[1]["text"]
     system = client.completions.calls[0]["messages"][0]["content"]
-    assert "directly face the camera" in system
-    assert "oblique" in system and "upside-down" in system
-    assert "must directly and concretely answer the query" in system
-    assert "needs rotation" in system and "match=false" in system
+    assert system == load_prompt("orchestrator/inspect_guard")
 
 
 def test_inspection_sends_earlier_evidence_frames_before_the_current_frame():
@@ -162,8 +160,7 @@ def test_inspection_sends_earlier_evidence_frames_before_the_current_frame():
     assert content[5]["image_url"]["url"].endswith("current-frame")
     assert "Which has less sugar?" in content[6]["text"]
     system = client.completions.calls[0]["messages"][0]["content"]
-    assert "CONSIDERED TOGETHER" in system
-    assert "never reject an answer merely because no single image shows every item" in system
+    assert system == load_prompt("orchestrator/inspect_guard")
 
 
 def test_inspection_without_evidence_keeps_the_single_image_request_shape():
@@ -221,15 +218,10 @@ def test_inspection_visibility_uses_fresh_minimal_context_and_request():
     assert "nutritional facts" in first_call["messages"][1]["content"][1]["text"]
     assert "expiration date" in second_call["messages"][1]["content"][1]["text"]
     system = first_call["messages"][0]["content"]
-    assert "fresh-frame visibility gate" in system
-    assert "LEGIBILITY IS MANDATORY" in system
-    assert "panel outline" in system and "relevant value rows must be readable" in system
-    assert "every character of the complete date must be readable" in system
-    assert "If uncertain" in system and "match=false" in system
-    assert "Do not extract or report the values yourself" in system
+    assert system == load_prompt("orchestrator/inspection_visibility")
 
 
-def test_inspection_label_presence_locks_recognizable_unreadable_label_side():
+def test_inspection_label_presence_sends_frame_query_and_dedicated_prompt():
     client = _Client(
         '{"match": true, "reason": "Nutrition Facts panel is recognizable but too small to read"}')
     result = classify_inspection_label_presence(
@@ -240,13 +232,7 @@ def test_inspection_label_presence_locks_recognizable_unreadable_label_side():
     assert call["temperature"] == 0
     assert "label-frame" in call["messages"][1]["content"][0]["image_url"]["url"]
     assert "nutritional facts" in call["messages"][1]["content"][1]["text"]
-    system = call["messages"][0]["content"]
-    assert "less strict than the separate legibility gate" in system
-    assert "STOP ROTATING" in system
-    assert "DIRECTLY FACING THE CAMERA" in system
-    assert "perspective foreshortening" in system
-    assert "lines seen obliquely" in system and "match=false" in system
-    assert "barcode" in system and "unrelated text" in system
+    assert call["messages"][0]["content"] == load_prompt("orchestrator/inspection_label_presence")
 
 
 def test_inspection_legibility_receives_untrusted_paddleocr_auxiliary_text():
@@ -260,8 +246,7 @@ def test_inspection_legibility_receives_untrusted_paddleocr_auxiliary_text():
     user_text = call["messages"][1]["content"][1]["text"]
     assert 'PADDLEOCR AUXILIARY TEXT: ["Nutrition Facts", "Calories 140"]' in user_text
     system = call["messages"][0]["content"]
-    assert "UNTRUSTED AUXILIARY EVIDENCE" in system
-    assert "OCR never relaxes the front-facing requirement" in system
+    assert system == load_prompt("orchestrator/inspection_visibility")
 
 
 def test_image_bound_inspection_guard_caches_identical_checks_within_step():

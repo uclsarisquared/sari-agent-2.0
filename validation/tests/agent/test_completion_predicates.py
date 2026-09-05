@@ -13,10 +13,14 @@ The load-bearing cases are the three the pre-6.3 keyword guards got WRONG and th
 
     uv run pytest validation/tests/agent/test_completion_predicates.py   # or: pytest validation/tests/agent/test_completion_predicates.py
 """
-import os
-import sys
+import json
 import logging
+import os
+import re
+import sys
 from unittest.mock import patch
+
+import pytest
 
 _ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "agent")  # agent/
 if _ROOT not in sys.path:
@@ -152,25 +156,33 @@ def test_parse_never_emits_type_outside_vocab():
     assert "inspect" in SUBTASK_TYPES
 
 
-def test_decomposer_prompt_defines_read_only_inspection_and_separate_pickup():
-    prompt = sc.TYPED_DECOMPOSER_SYSTEM.lower()
-    assert "inspect" in prompt and "read-only observation" in prompt
-    assert "must not pick up" in prompt
-    assert "pick up the one that is not expired" in prompt
-    assert '"type": "inspect"' in prompt and '"type": "pickup"' in prompt
-
-
-def test_decomposer_prompt_requires_a_goto_before_a_product_inspect():
-    """An inspect leg gets NO plan-time checkpoints (plan_legs) and cannot travel (the inspect scope
-    gate), so a bare inspect naming a product answers from wherever the agent spawned - measured
-    2026-07-30 on 'find choco mallows and check its price', which inspected from spawn and never saw
-    the product. The prompt must both require the leading goto AND permit a product as a goto
-    location; the location resolver already falls through to the product resolver."""
-    prompt = sc.TYPED_DECOMPOSER_SYSTEM.lower()
-    assert "name of a product" in prompt          # goto accepts a product destination
-    assert "preceded by a goto" in prompt         # the rule itself
-    assert "on this shelf" in prompt              # ... and its already-there exemption
-    assert '"type": "goto", "location": "choco mallows"' in prompt
+@pytest.mark.parametrize(
+    "task, types",
+    [
+        ("Find choco mallows and check its price", ["goto", "inspect"]),
+        ("pick up the one that is not expired", ["inspect", "pickup"]),
+        (
+            "Compare the nutritional facts of the two cereals and tell me which has less sugar",
+            ["pickup", "pickup", "inspect"],
+        ),
+        (
+            "Navigate to Aisle 1 and count how many unique products are there",
+            ["goto", "inspect"],
+        ),
+    ],
+)
+def test_decomposer_examples_follow_the_typed_contract(task, types):
+    examples = dict(
+        re.findall(
+            r'Example input: "([^"\n]+)"\s+Example output: (\[[^\n]+\])',
+            sc.TYPED_DECOMPOSER_SYSTEM,
+        )
+    )
+    raw = examples[task]
+    parsed = parse_decomposition(raw, task)
+    assert parsed == json.loads(raw)
+    assert [leg["type"] for leg in parsed] == types
+    assert all(leg.get("query") for leg in parsed if leg["type"] == "inspect")
 
 
 def test_inspection_answer_uses_only_structured_report_not_stop_placeholder():

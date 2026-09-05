@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_core import prompt_loader
 from agent_core.prompt_loader import PROMPT_ROOT, load_prompt, render_prompt
 
 
@@ -9,11 +10,21 @@ def test_prompt_root_is_central_asset_directory():
     assert PROMPT_ROOT == Path(__file__).resolve().parents[3] / "agent" / "prompts"
 
 
-def test_loader_adds_markdown_suffix_and_caches():
-    first = load_prompt("runtime/episodic_associative")
-    second = load_prompt("runtime/episodic_associative.md")
-    assert first is second
-    assert first.startswith("You are an Episodic Associative Learner")
+def test_loader_adds_markdown_suffix_and_reads_once(monkeypatch, tmp_path):
+    asset = tmp_path / "example.md"
+    asset.write_text("Example prompt\n", encoding="utf-8")
+    monkeypatch.setattr(prompt_loader, "PROMPT_ROOT", tmp_path)
+    reads = []
+    read_text = Path.read_text
+
+    def tracked_read(path, **kwargs):
+        reads.append(path)
+        return read_text(path, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read)
+    assert load_prompt("example") == "Example prompt"
+    assert load_prompt("example.md") == "Example prompt"
+    assert reads == [asset]
 
 
 def test_renderer_replaces_only_explicit_tokens():

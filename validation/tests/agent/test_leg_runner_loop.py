@@ -152,7 +152,7 @@ def test_action_step_uses_session_state_and_event_assembler(monkeypatch, tmp_pat
     monkeypatch.setattr(
         leg_runner, "_REQUEST_SCREENSHOT_", lambda: {"image": b"frame"}
     )
-    monkeypatch.setattr(leg_artifacts, "downscale_for_storage", lambda data: data)
+    monkeypatch.setattr(leg_artifacts, "downscale_for_storage_jpeg", lambda data, **kwargs: data)
     agent = _Agent(
         [
             {
