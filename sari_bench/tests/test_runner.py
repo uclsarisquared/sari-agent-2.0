@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -1751,6 +1753,29 @@ async def test_resume_deletes_and_reruns_only_an_interrupted_attempt() -> None:
     print("ok  resume deletes and cleanly reruns only the interrupted logical attempt")
 
 
+@pytest.mark.parametrize("command, expected", [
+    (["python", "agent.py", "--run-dir", "target"], [123]),
+    (["python", "agent.py", "--run-dir", "target-other"], []),
+    (["python", "other.py", "--run-dir", "target"], []),
+])
+def test_orphan_discovery_matches_exact_command_arguments(monkeypatch, tmp_path, command, expected):
+    import sari_bench.runner as runner_module
+
+    proc = tmp_path / "proc"
+    process = proc / "123"
+    process.mkdir(parents=True)
+    (process / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in command) + b"\0")
+    (proc / "456").mkdir()  # A process may exit before its command line is read.
+    (proc / "self").mkdir()
+    real_path = Path
+    monkeypatch.setattr(runner_module, "Path", lambda path: proc if path == "/proc" else real_path(path))
+    runner = object.__new__(BenchmarkRunner)
+    runner.agent_entry = "agent.py"
+
+    assert runner._matching_run_pids(Path("target")) == expected
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").is_file(), reason="orphan discovery requires Linux procfs")
 async def test_resume_stops_an_orphan_before_pid_publication() -> None:
     coordinator, url = await _start_coordinator()
     sandbox = FakeSandbox("sandbox-a", 51001)
