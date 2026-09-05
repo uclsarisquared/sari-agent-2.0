@@ -64,13 +64,16 @@ version_toml = ["pyproject.toml:project.version"]
 match = "main"
 
 [tool.pytest.ini_options]
-testpaths = ["validation/tests"]
-pythonpath = [".", "agent", "agent/mapping"]
+testpaths = ["validation/tests", "sari_bench/tests"]
+pythonpath = [".", "agent", "agent/mapping", "agent/mapping/core"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
     "poethepoet>=0.37.0",
     "pytest>=8.3",
+    "pytest-asyncio>=1.0,<2",
     "python-semantic-release>=9.0.0",
 ]
 
