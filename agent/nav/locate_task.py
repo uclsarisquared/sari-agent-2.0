@@ -197,15 +197,13 @@ def endpoint_json(system, prompt, schema, image_paths=(), model=None, timeout=18
 qwen_json = endpoint_json
 
 
-def backend_callable(backend: str):
+def backend_callable(backend: str, *, model=None, effort="medium", base_url=None):
     """Return the shared resolver/advisor call shape for a configured backend."""
     if backend == "claude-cli":
         return lambda system, prompt, schema, images=(): claude_json(
-            system, prompt, schema, images
-        )
+            system, prompt, schema, images, model=model or "sonnet", effort=effort)
     return lambda system, prompt, schema, images=(): endpoint_json(
-        system, prompt, schema, images
-    )
+        system, prompt, schema, images, model=model, base_url=base_url)
 
 
 def normalize_backend(value):
@@ -217,13 +215,8 @@ def normalize_backend(value):
 
 
 def make_backend(args):
-    if args.backend == "claude-cli":
-        return lambda system, prompt, schema, images=(): claude_json(
-            system, prompt, schema, images, model=args.model_name or "sonnet",
-            effort=args.effort)
-    return lambda system, prompt, schema, images=(): endpoint_json(
-        system, prompt, schema, images, model=args.model_name or agent_model(),
-        base_url=args.base_url)
+    model = args.model_name or (None if args.backend == "claude-cli" else agent_model())
+    return backend_callable(args.backend, model=model, effort=args.effort, base_url=args.base_url)
 
 
 # the task
@@ -279,10 +272,9 @@ def near_miss(target_name, seen_instead):
 
 def order_candidates(sm, candidates, from_cp):
     """Valid shelf checkpoints only, nearest-by-graph first. Spatial ordering is code's job."""
-    valid = [c for c in dict.fromkeys(candidates) if c in sm.by_id
-             and c in sm.shelf_checkpoints()]
-    return sorted(valid, key=lambda c: (sm.hops(from_cp, c) is None,
-                                        sm.hops(from_cp, c) or 0))
+    shelves = set(sm.shelf_checkpoints())
+    hops = {c: sm.hops(from_cp, c) for c in dict.fromkeys(candidates) if c in shelves}
+    return sorted(hops, key=lambda c: (hops[c] is None, hops[c] or 0))
 
 
 def verify(call, task, resolution, cp_info, views):

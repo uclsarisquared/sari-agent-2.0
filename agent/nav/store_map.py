@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+from collections import deque
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _AGENT_DIR = os.path.dirname(_THIS_DIR)  # agent/ — packages + mapping live under here
@@ -155,28 +156,16 @@ class StoreMap:
         """BFS hop count between checkpoints, or None if disconnected. Used to order candidate
         visits by graph distance - a spatial judgment, so it is code's job, never the resolver
         LLM's (the graph owns spatial truth)."""
-        if a == b:
-            return 0
-        from collections import deque
-        seen, q = {a}, deque([(a, 0)])
-        while q:
-            cur, d = q.popleft()
-            for n in self._neighbors.get(cur, []):
-                if n == b:
-                    return d + 1
-                if n not in seen:
-                    seen.add(n)
-                    q.append((n, d + 1))
-        return None
+        path = self.hop_path(a, b)
+        return None if path is None else len(path) - 1
 
     def hop_path(self, a, b):
         """BFS shortest checkpoint path a -> b INCLUSIVE of both ends, or None if disconnected.
         The per-hop companion to hops(): the graph-advised navigator (agent._advised_goto) needs
-        the route's NEXT HOP as advice each step, and path[1] is exactly that. Same BFS as hops()
-        with parent tracking - a spatial judgment, so it is code's job, never a VLM's."""
+        the route's NEXT HOP as advice each step, and path[1] is exactly that. hops() is its length.
+        A spatial judgment, so it is code's job, never a VLM's."""
         if a == b:
             return [a]
-        from collections import deque
         prev, q = {a: None}, deque([a])
         while q:
             cur = q.popleft()
@@ -457,6 +446,29 @@ def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_it
             "checkpoint": cp_id, "iters": iters, "reason": reason}
 
 
+def _approach_checkout(nav, hands, steps, drive, debug_dir):
+    """Shared checkout approach: REST the held hands and drive (optional), align on the pad, read
+    the baseline receipt from the aligned pose (screen legible now), then re-face the pad (reading
+    the screen yaws the body; rotation-only, so the aligned slant is kept).
+    Returns (failure_reason | None, aligned, baseline)."""
+    from vision.perception import center_to_screen, center_to_scanner, read_text_in_box
+    from manip.manipulation import set_hand_pose
+
+    if drive:
+        for h in hands:
+            set_hand_pose("rest", hand=h)
+        res = go_to_counter(nav)
+        steps["counter"] = res
+        if not res.get("arrived"):
+            return f"could not reach the counter: {res.get('reason', 'path blocked')}", False, []
+    al = align_to_scanner(nav, debug_dir=debug_dir)
+    steps["align"] = al
+    sres = center_to_screen(debug_dir=debug_dir)
+    baseline = read_text_in_box(sres.get("box")) if sres.get("box") else []
+    center_to_scanner(debug_dir=debug_dir)
+    return None, bool(al.get("aligned")), baseline
+
+
 # Phase 6.2 (restructured): the deterministic checkout macro
 def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, debug_dir=None):
     """Check out the item currently in hand: drive to the checkout (optional), align on the scan pad,
@@ -483,10 +495,8 @@ def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, deb
     scanned AND placed - both MEASURED (OCR delta / released-under-a-placeable-verdict). Honest scoring
     only: the human/gate owns `scanned_verified` (beep) and `placed_verified` (in-tray screenshot);
     this macro never promotes measured to verified."""
-    from vision.perception import (scan_held_item, place_held_item, center_to_screen,
-                            center_to_scanner, read_text_in_box)
-    from manip.manipulation import set_hand_pose, resolve_release_hand
-    from sim.env import TransformHands
+    from vision.perception import scan_held_item, place_held_item
+    from manip.manipulation import resolve_release_hand
 
     steps = {"counter": None, "align": None, "scan": None, "place": None}
 
@@ -501,26 +511,10 @@ def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, deb
     if hand is None:
         return _out(False, False, False, refuse_reason + " - nothing to check out")
 
-    # 1. Drive to the checkout (carry-safe: REST first, then go_to_counter resyncs + faces cp54).
-    if drive:
-        set_hand_pose("rest", hand=hand)
-        res = go_to_counter(nav)
-        steps["counter"] = res
-        if not res.get("arrived"):
-            return _out(False, False, False,
-                        f"could not reach the counter: {res.get('reason', 'path blocked')}")
-
-    # 2. Align on the scan pad.
-    al = align_to_scanner(nav, debug_dir=debug_dir)
-    steps["align"] = al
-    aligned = bool(al.get("aligned"))
-
-    # 3. Baseline receipt from the ALIGNED pose (screen legible now), then re-acquire the pad so the
-    #    sweep goes toward it (center_to_screen yaws the body to the screen; this is rotation-only, so
-    #    the slant align set is preserved).
-    sres = center_to_screen(debug_dir=debug_dir)
-    baseline = read_text_in_box(sres.get("box")) if sres.get("box") else []
-    center_to_scanner(debug_dir=debug_dir)
+    # 1-3. Drive, align on the pad, read the baseline receipt, re-face the pad.
+    failure, aligned, baseline = _approach_checkout(nav, [hand], steps, drive, debug_dir)
+    if failure:
+        return _out(False, False, False, failure)
 
     # 4. Scan the held item (item stays in hand).
     sc = scan_held_item(hand=hand, baseline=baseline, debug_dir=debug_dir)
@@ -544,7 +538,6 @@ def checkout_held_item(nav, hand="auto", drive=True, bag_if_unscanned=False, deb
     #    blocked path and can stall. Stepping back 5 units (~0.5 m, body-relative; still facing the
     #    counter) clears the agent off the obstacle so the following leg plans freely.
     if placed:
-        from sim.env import move_backward
         move_backward(5)
 
     reason = ("checked out: scanned and bagged" if (scanned and placed)
@@ -567,10 +560,8 @@ def checkout_held_items(nav, drive=True, bag_if_unscanned=False, debug_dir=None)
     hand=None, and per_hand details. These measured verdicts remain separate from
     human verification of scanning and landing.
     """
-    from vision.perception import (scan_held_item, place_held_item, center_to_screen,
-                            center_to_scanner, read_text_in_box)
-    from manip.manipulation import set_hand_pose, hand_grip_states
-    from sim.env import move_backward
+    from vision.perception import scan_held_item, place_held_item, center_to_scanner
+    from manip.manipulation import hand_grip_states
 
     steps = {"counter": None, "align": None, "scans": {}, "places": {}}
     hands = [h for h in ("left", "right") if hand_grip_states()[h]]
@@ -589,26 +580,10 @@ def checkout_held_items(nav, drive=True, bag_if_unscanned=False, debug_dir=None)
         return checkout_held_item(nav, hand=hands[0], drive=drive,
                                   bag_if_unscanned=bag_if_unscanned, debug_dir=debug_dir)
 
-    # 1. Drive to the checkout ONCE (carry-safe: REST every held hand first so the items ride the drive).
-    if drive:
-        for h in hands:
-            set_hand_pose("rest", hand=h)
-        res = go_to_counter(nav)
-        steps["counter"] = res
-        if not res.get("arrived"):
-            return _out(False, False, False,
-                        f"could not reach the counter: {res.get('reason', 'path blocked')}")
-
-    # 2. Align on the scan pad ONCE - both sweeps go from this stance.
-    al = align_to_scanner(nav, debug_dir=debug_dir)
-    steps["align"] = al
-    aligned = bool(al.get("aligned"))
-
-    # 3. Baseline receipt from the ALIGNED pose (screen legible now), then re-acquire the pad so the
-    #    first sweep goes toward it (reading the screen yaws the body; this is rotation-only).
-    sres = center_to_screen(debug_dir=debug_dir)
-    baseline = read_text_in_box(sres.get("box")) if sres.get("box") else []
-    center_to_scanner(debug_dir=debug_dir)
+    # 1-3. Drive and align ONCE - both sweeps go from this stance.
+    failure, aligned, baseline = _approach_checkout(nav, hands, steps, drive, debug_dir)
+    if failure:
+        return _out(False, False, False, failure)
 
     # 4. Sweep-scan EACH held hand before bagging any. scan_held_item ends on a screen read, so its
     #    returned receipt is the running baseline; re-centre the pad before the next sweep.

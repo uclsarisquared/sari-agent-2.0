@@ -69,6 +69,8 @@ _ENTRY_RE = re.compile(r"^@ (?:leg \d+ step|timestep) \d+: (.*)$", re.M)
 # emptied the retention replay without erroring.
 _SECTION_RE = re.compile(r"^--- ([A-Z][A-Za-z ()/]+) ---$", re.M)
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_FINDINGS_RE = re.compile(r"^\[FINDINGS SUMMARY\]\n", re.M)
+_LOG_TAG_RE = re.compile(r"^\[[A-Z]", re.M)
 
 
 # Corpus loading
@@ -166,10 +168,9 @@ def _findings_sizes(agent_log_text: str) -> list:
     """Sizes of the between-leg findings summaries, read off the orchestrator's own printout. The
     summaries are not persisted as files, so agent.log is the only record of what was generated."""
     sizes = []
-    for match in re.finditer(r"^\[FINDINGS SUMMARY\]\n", agent_log_text, re.M):
-        rest = agent_log_text[match.end():]
-        end = re.search(r"^\[[A-Z]", rest, re.M)
-        sizes.append(len(rest[:end.start()] if end else rest).__int__())
+    for match in _FINDINGS_RE.finditer(agent_log_text):
+        end = _LOG_TAG_RE.search(agent_log_text, match.end())
+        sizes.append((end.start() if end else len(agent_log_text)) - match.end())
     return sizes
 
 
@@ -487,13 +488,16 @@ def _words(text: str) -> set:
     return {w for w in _WORD_RE.findall(text.lower()) if len(w) > 3}
 
 
+def _is_near_dup(entry: str, previous: list, threshold: float, window: int = 8) -> bool:
+    return any(difflib.SequenceMatcher(None, entry, other).ratio() > threshold
+               for other in previous[-window:])
+
+
 def _dedupe(entries: list, threshold: float, window: int = 8) -> list:
     kept = []
     for entry in entries:
-        if any(difflib.SequenceMatcher(None, entry, other).ratio() > threshold
-               for other in kept[-window:]):
-            continue
-        kept.append(entry)
+        if not _is_near_dup(entry, kept, threshold, window):
+            kept.append(entry)
     return kept
 
 
@@ -506,8 +510,7 @@ def redundancy(attempts: list, threshold: float = 0.72, window: int = 8) -> dict
         if len(entries) < 8:
             continue
         dup = sum(1 for i, e in enumerate(entries)
-                  if any(difflib.SequenceMatcher(None, e, f).ratio() > threshold
-                         for f in entries[max(0, i - window):i]))
+                  if _is_near_dup(e, entries[max(0, i - window):i], threshold, window))
         shares.append(dup / len(entries))
         counts.append(len(entries))
     if not shares:
@@ -526,24 +529,27 @@ def retention_replay(legs: list, threshold: float = 0.80, keep_last: int = 12) -
     """
     coverage, kept_fraction, kept_counts = [], [], []
     for leg in legs:
-        entries = []
+        # _dedupe is a streaming filter, so the retained set and word unions grow incrementally.
+        entries, kept, kept_words, full = [], [], [], set()
         for dump in leg:
             recall = _words(dump.router.get("recall") or "")
             if entries and recall:
-                full = set().union(*[_words(e) for e in entries])
                 base = len(recall & full) / len(recall)
                 if base > 0:
-                    subset = _dedupe(entries, threshold)[-keep_last:] if keep_last else \
-                        _dedupe(entries, threshold)
-                    got = set().union(*[_words(e) for e in subset]) if subset else set()
+                    subset = kept_words[-keep_last:] if keep_last else kept_words
+                    got = set().union(*subset) if subset else set()
                     coverage.append((len(recall & got) / len(recall)) / base)
             new = dump.router.get("new_semantic_memory") or ""
             if new:
+                words = _words(new)
+                full |= words
+                if not _is_near_dup(new, kept, threshold):
+                    kept.append(new)
+                    kept_words.append(words)
                 entries.append(new)
         if len(entries) >= 15:
-            surviving = _dedupe(entries, threshold)
-            kept_fraction.append(len(surviving) / len(entries))
-            kept_counts.append(len(surviving[-keep_last:] if keep_last else surviving))
+            kept_fraction.append(len(kept) / len(entries))
+            kept_counts.append(len(kept[-keep_last:] if keep_last else kept))
     if not coverage:
         return {}
     coverage.sort()

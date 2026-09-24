@@ -96,6 +96,44 @@ def init_logger(run_name: str, directory: str = "logs"):
 MAX_SAVE_W, MAX_SAVE_H = 1920, 1080
 
 
+def _fit(img, max_w, max_h):
+    """Shrink a PIL image to fit max_w x max_h (aspect preserved); never upscales."""
+    from PIL import Image
+    w, h = img.size
+    if w <= max_w and h <= max_h:
+        return img
+    scale = min(max_w / w, max_h / h)
+    return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+
+
+def _jpeg_bytes(img, quality):
+    from io import BytesIO
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, subsampling=0)
+    return buf.getvalue()
+
+
+def _write_atomic(path, data, *, fsync=False):
+    """Publish `data` at `path` via a same-directory temp file + os.replace."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            if fsync:
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def downscale_for_storage(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
     """Return `image_bytes` shrunk to fit within max_w x max_h (aspect preserved), as PNG bytes.
     A frame already within bounds is returned byte-for-byte unchanged; this NEVER upscales. Best-
@@ -108,10 +146,8 @@ def downscale_for_storage(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
         w, h = img.size
         if w <= max_w and h <= max_h:
             return image_bytes
-        scale = min(max_w / w, max_h / h)
-        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
         buf = BytesIO()
-        img.save(buf, format="PNG")
+        _fit(img, max_w, max_h).save(buf, format="PNG")
         return buf.getvalue()
     except Exception:
         return image_bytes
@@ -127,13 +163,7 @@ def downscale_for_storage_jpeg(image_bytes, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H, 
         from io import BytesIO
         from PIL import Image
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
-        w, h = img.size
-        if w > max_w or h > max_h:
-            scale = min(max_w / w, max_h / h)
-            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=quality, subsampling=0)
-        return buf.getvalue()
+        return _jpeg_bytes(_fit(img, max_w, max_h), quality)
     except Exception:
         return image_bytes
 
@@ -144,54 +174,16 @@ def downscale_pil_for_storage(img, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
     original on any error). For LOGGING/debug frames drawn at capture resolution - NEVER a functional
     image (a VLM input, an OCR crop, a depth map)."""
     try:
-        from PIL import Image
-        w, h = img.size
-        if w <= max_w and h <= max_h:
-            return img
-        scale = min(max_w / w, max_h / h)
-        return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        return _fit(img, max_w, max_h)
     except Exception:
         return img
 
 
-def downscale_pil_for_storage_jpeg(img, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
-    """Bound a debug PIL image and return it as 4:4:4 JPEG bytes.
-
-    This is intentionally storage-only. Callers retain their original in-memory frame for model
-    decisions, OCR, and guards.
-    """
-    from io import BytesIO
-
-    bounded = downscale_pil_for_storage(img, max_w=max_w, max_h=max_h).convert("RGB")
-    out = BytesIO()
-    bounded.save(out, format="JPEG", quality=85, subsampling=0)
-    return out.getvalue()
-
-
 def save_jpeg_atomic(path, image, *, quality=85, max_w=MAX_SAVE_W, max_h=MAX_SAVE_H):
     """Atomically publish a bounded 4:4:4 JPEG artifact."""
-    from io import BytesIO
-
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    bounded = downscale_pil_for_storage(image, max_w=max_w, max_h=max_h).convert("RGB")
-    data = BytesIO()
-    bounded.save(data, format="JPEG", quality=quality, subsampling=0)
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp",
-        dir=os.path.dirname(os.path.abspath(path)),
-    )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data.getvalue())
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
+    bounded = downscale_pil_for_storage(image, max_w=max_w, max_h=max_h)
+    _write_atomic(path, _jpeg_bytes(bounded, quality), fsync=True)
 
 
 # Which sandbox this process talks to. A plain local run needs no configuration; Distributed Sari
@@ -285,24 +277,9 @@ def _process_command_response(command: Dict[str, Any], response: Any):
             # Save the image file in the specified folder
             file_path = os.path.join(folder_name, file_name) if folder_name else file_name
 
-            # Several benchmark workers may share this checkout and therefore this legacy
-            # filename.  Writing it in place exposes a zero-length/partial PNG to readers in
-            # another process (Pillow then reports "image file is truncated").  Publish a
-            # complete file atomically instead.  The final image may still be whichever
-            # worker wrote most recently, but it can never be a half-written PNG.
-            fd, temp_path = tempfile.mkstemp(
-                prefix=f".{file_name}.", suffix=".tmp", dir=folder_name or "."
-            )
-            try:
-                with os.fdopen(fd, "wb") as file:
-                    file.write(downscale_for_storage(image_bytes))
-                os.replace(temp_path, file_path)
-            except BaseException:
-                try:
-                    os.unlink(temp_path)
-                except FileNotFoundError:
-                    pass
-                raise
+            # Parallel workers may share this legacy filename; publish atomically so readers
+            # never see a partial PNG.
+            _write_atomic(file_path, downscale_for_storage(image_bytes))
 
         # The RETURN is left full-resolution: only the on-disk copy is capped. Live consumers
         # (e.g. a VLM call on the returned bytes) get the raw frame; storage is what we shrink.
@@ -356,13 +333,22 @@ async def SendCommand(command: Dict[str, Any], uri: str = None, timeout: float =
     return _process_command_response(command, response)
 
 
+def _send(command: Dict[str, Any], uri: str = None):
+    """Synchronously run one bounded SendCommand round trip."""
+    return asyncio.get_event_loop().run_until_complete(SendCommand(command, uri))
+
+
+def _as_text(result) -> str:
+    return result.decode(errors="replace") if isinstance(result, (bytes, bytearray)) else str(result)
+
+
 def _v1_or_raise(result, cmd, n_tuples, n_lines):
     """env.py speaks the sim's V1 TEXT protocol: it parses `cmd` replies POSITIONALLY (n_tuples
     `(x,y,z)` groups over >= n_lines lines). If the sim's WebSocketHandler has
     `sariSandboxV1CompatibilityLayer` turned OFF it returns JSON instead (one line, no `(...)`
     groups), which this parser cannot read - and the grip/hover toggles break the same way. Detect
     that and raise something ACTIONABLE instead of an opaque IndexError/AssertionError."""
-    text = result.decode(errors="replace") if isinstance(result, (bytes, bytearray)) else str(result)
+    text = _as_text(result)
     lines = text.split("\n")
     tuples = re.findall(r'\((.*?)\)', text, re.DOTALL)
     if len(tuples) != n_tuples or len(lines) < n_lines:
@@ -379,11 +365,11 @@ def _v1_or_raise(result, cmd, n_tuples, n_lines):
 def TransformAgent(translation: Tuple[float],
                    rotation: Tuple[float],
                    uri: str = None) -> Dict[str, Tuple[float]]:
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "TransformAgent",
         "translation": translation,
         "rotation": rotation
-    }, uri))
+    }, uri)
 
     lines, extracted_state = _v1_or_raise(result, "TransformAgent", 2, 3)
     is_colliding = lines[2].split(": ")[-1].strip() == "True"
@@ -413,9 +399,9 @@ def SetCrouch(active: bool, uri: str = None) -> str:
     OR'd together agent-side, so this never fights a human holding the key. Applied immediately, so
     a RequestScreenshot right after this call already sees the lowered viewpoint.
     """
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "SetCrouch", "active": active
-    }, uri))
+    }, uri)
     return result
 
 def SetHandsActive(active: bool, side: str = None, uri: str = None) -> str:
@@ -427,7 +413,7 @@ def SetHandsActive(active: bool, side: str = None, uri: str = None) -> str:
     command = {"command": "SetHandsActive", "active": active}
     if side:
         command["side"] = side
-    result = asyncio.get_event_loop().run_until_complete(SendCommand(command, uri))
+    result = _send(command, uri)
     return result
 
 
@@ -438,9 +424,9 @@ def ResetHands(uri: str = None):
     reset acknowledgement, read the established hand-state channel so callers always receive the
     same translations, rotations, hover targets, and grip booleans as TransformHands.
     """
-    asyncio.get_event_loop().run_until_complete(SendCommand({
+    _send({
         "command": "ResetHands"
-    }, uri))
+    }, uri)
     zero = (0, 0, 0)
     return TransformHands(zero, zero, zero, zero, uri=uri)
 
@@ -450,13 +436,13 @@ def TransformHands(leftTranslation: Tuple[float],
                    rightTranslation: Tuple[float],
                    rightRotation: Tuple[float],
                    uri: str = None):
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "TransformHands",
         "leftTranslation": leftTranslation,
         "leftRotation": leftRotation,
         "rightTranslation": rightTranslation,
         "rightRotation": rightRotation
-    }, uri))
+    }, uri)
     
     lines, extracted_state = _v1_or_raise(result, "TransformHands", 4, 9)
     object_hovered_over_left = lines[2].split(": ")[-1]
@@ -493,40 +479,36 @@ def TransformHands(leftTranslation: Tuple[float],
     }
     return current_state
 
+def _toggle_grip(command: str, uri: str = None):
+    return {"gripped": "True" in _send({"command": command}, uri)}
+
+
 def ToggleLeftGrip(uri: str = None):
     # The single-agent /commands handler names this `ToggleLeftHandGrip`
     # (SariAgentCommandBehavior.cs). The bare `ToggleLeftGrip`/`ToggleRightGrip` names live only in
     # SariMultiplayerBehavior.cs (a different ws path); sending them here lands in the sim's
     # `default: Unknown command` branch, so the hand never grips (translation still works). Verified
     # live 2026-07-22: `ToggleLeftGrip` -> "Unknown command", `ToggleLeftHandGrip` -> "Left Grip: True".
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
-        "command": "ToggleLeftHandGrip"
-    }, uri))
+    return _toggle_grip("ToggleLeftHandGrip", uri)
 
-    if "True" in result:    return {"gripped": True}
-    return {"gripped": False}
 
 def ToggleRightGrip(uri: str = None):
     # See ToggleLeftGrip: the /commands handler uses `ToggleRightHandGrip`, not `ToggleRightGrip`.
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
-        "command": "ToggleRightHandGrip"
-    }, uri))
+    return _toggle_grip("ToggleRightHandGrip", uri)
 
-    if "True" in result:    return {"gripped": True}
-    return {"gripped": False}
 
 def RequestScreenshot(prefix: str="", suffix: str="", folder_name: str | None = None,
                       save_image=False, uri: str = None):
     # Resolve at CALL time: subtask_agents sets SARI_RUN_DIR after importing sim.env.
     if folder_name is None:
         folder_name = screenshot_dir()
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "RequestScreenshot",
         "prefix": prefix,
         "suffix": suffix,
         "folder_name": folder_name,
         "save_image": save_image,
-    }, uri))
+    }, uri)
     return result
 
 def Reset(degrees: float | None = None, uri: str = None):
@@ -541,7 +523,7 @@ def Reset(degrees: float | None = None, uri: str = None):
     payload = {"command": "ResetEnvironment"}
     if degrees is not None:
         payload["degrees"] = float(degrees)
-    asyncio.get_event_loop().run_until_complete(SendCommand(payload, uri))
+    _send(payload, uri)
 
 
 def GetStatus(uri: str = None) -> Dict[str, Any]:
@@ -551,10 +533,10 @@ def GetStatus(uri: str = None) -> Dict[str, Any]:
     current builds. `state` is one of Booting / Resetting / Ready / Leased. A sim too old to know
     this command replies "Unknown command: GetStatus", reported back as state "unknown".
     """
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "GetStatus"
-    }, uri))
-    text = result.decode(errors="replace") if isinstance(result, (bytes, bytearray)) else str(result)
+    }, uri)
+    text = _as_text(result)
     try:
         return json.loads(text)
     except (ValueError, TypeError):
@@ -587,7 +569,7 @@ def wait_for_ready(uri: str = None, timeout: float = 180.0, poll_seconds: float 
             time.sleep(poll_seconds)
             continue
 
-        text = result.decode(errors="replace") if isinstance(result, (bytes, bytearray)) else str(result)
+        text = _as_text(result)
         if "Ready" in text:
             return True
 
@@ -606,17 +588,15 @@ def wait_for_ready(uri: str = None, timeout: float = 180.0, poll_seconds: float 
     return False
 
 def RequestAnnotation(uri: str = None):
-    result = asyncio.get_event_loop().run_until_complete(SendCommand(
-        {
+    result = _send({
         "command": "RequestAnnotation"
-    }, uri))
+    }, uri)
     return result
 
 def RequestJson(uri: str = None):
-    result = asyncio.get_event_loop().run_until_complete(SendCommand(
-        {
+    result = _send({
         "command": "RequestJson"
-    }, uri))
+    }, uri)
     return result
 
 def RequestLidarCenter(uri: str = None) -> Dict[str, Any]:
@@ -638,9 +618,9 @@ def RequestLidarCenter(uri: str = None) -> Dict[str, Any]:
     not occlude this read. A pre-Phase-D sim build omits pitch_deg/camera_height; plan_reach treats
     that as `unavailable` and the caller falls back to a blind reach.
     """
-    result = asyncio.get_event_loop().run_until_complete(SendCommand({
+    result = _send({
         "command": "RequestLidarCenter"
-    }, uri))
+    }, uri)
     try:
         return json.loads(result)
     except (ValueError, TypeError):
@@ -677,7 +657,16 @@ _REQUEST_SCREENSHOT_ = lambda prefix="", suffix="", folder_name="", save_image=F
 # _MOVE_FWD_ = (0,0,0.1) means "0 right, 0 up, 0.1 forward". The sim rotates that into world space
 # itself (see _move_relative). The public move_* functions below build the same body-relative
 # vectors from a (forward, right) pair and are what the agent/actions.py use.
-def _move_relative(forward, right, units):
+def _repeat(step, units, cap, what):
+    """Run `step` min(units, cap) times, warning when the request exceeds `cap`."""
+    if units > cap:
+        print(f"Warning: {what} more than {cap} units at once may cause instability. "
+              f"Setting to {cap} units.")
+    for _ in range(min(units, cap)):
+        step()
+
+
+def _move_relative(forward, right, units, what):
     """Step the agent `units` x 0.1m along a BODY-RELATIVE (forward, right) direction.
 
     The sim's TranslateAgent treats the incoming translation as EGOCENTRIC - (x=right, y=up,
@@ -695,124 +684,26 @@ def _move_relative(forward, right, units):
     merge, so move_forward drifted off at an angle equal to the agent's yaw - the "forward isn't
     forward" bug. Fix: send the body-relative vector unrotated and let the sim own the one rotation.
     Re-verify with probe_translation.py if the sim's dispatcher contract changes again."""
-    units = min(units, 10)
-    if units <= 0:
-        return
-    for _ in range(units):
-        TransformAgent((right, 0.0, forward), (0, 0, 0))
+    _repeat(lambda: TransformAgent((right, 0.0, forward), (0, 0, 0)), units, 10, what)
 
-def move_forward(units):
-    if units > 10:
-        print("Warning: Moving forward more than 10 units at once may cause instability. Setting to 10 units.")
-    _move_relative(0.1, 0.0, units)
 
-def move_backward(units):
-    if units > 10:
-        print("Warning: Moving backward more than 10 units at once may cause instability. Setting to 10 units.")
-    _move_relative(-0.1, 0.0, units)
-
-def move_left(units):
-    if units > 10:
-        print("Warning: Moving left more than 10 units at once may cause instability. Setting to 10 units.")
-    _move_relative(0.0, -0.1, units)
-
-def move_right(units):
-    if units > 10:
-        print("Warning: Moving right more than 10 units at once may cause instability. Setting to 10 units.")
-    _move_relative(0.0, 0.1, units)
-
-def pan_left(units):
-    if units > 15:
-        print("Warning: Panning left more than 15 units at once may cause instability. Setting to 15 units.")
-    for _ in range(min(units, 15)):
-        _PAN_LEFT_()
-
-def pan_right(units):
-    if units > 15:
-        print("Warning: Panning right more than 15 units at once may cause instability. Setting to 15 units.")
-    for _ in range(min(units, 15)):
-        _PAN_RIGHT_()
-
-def tilt_up(units):
-    if units > 10:
-        print("Warning: Tilting up more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _TILT_UP_()
-
-def tilt_down(units):
-    if units > 10:
-        print("Warning: Tilting down more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _TILT_DOWN_()
-
-def extend_left_hand_forward(units):
-    if units > 10:
-        print("Warning: Extending left hand forward more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _XTNFWD_LEFT_()
-
-def extend_right_hand_forward(units):
-    if units > 10:
-        print("Warning: Extending right hand forward more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _XTNFWD_RIGHT_()
-
-def pull_left_hand_backward(units):
-    if units > 10:
-        print("Warning: Pulling left hand backward more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _PLLBCK_LEFT_()
-
-def pull_right_hand_backward(units):
-    if units > 10:
-        print("Warning: Pulling right hand backward more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _PLLBCK_RIGHT_()
-
-def raise_left_hand(units):
-    if units > 10:
-        print("Warning: Raising left hand more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _RSE_LEFT_()
-
-def lower_left_hand(units):
-    if units > 10:
-        print("Warning: Lowering left hand more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _LWR_LEFT_()
-
-def raise_right_hand(units):
-    if units > 10:
-        print("Warning: Raising right hand more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _RSE_RIGHT_()
-
-def lower_right_hand(units):
-    if units > 10:
-        print("Warning: Lowering right hand more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _LWR_RIGHT_()
-
-def rotate_left_clockwise(units):
-    if units > 10:
-        print("Warning: Rotating left hand clockwise more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _ROT_LEFT_CLOCK_()
-
-def rotate_left_counterclockwise(units):
-    if units > 10:
-        print("Warning: Rotating left hand counterclockwise more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _ROT_LEFT_CTRCLOCK_()
-
-def rotate_right_clockwise(units):
-    if units > 10:
-        print("Warning: Rotating right hand clockwise more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _ROT_RIGHT_CLOCK_()
-
-def rotate_right_counterclockwise(units):
-    if units > 10:
-        print("Warning: Rotating right hand counterclockwise more than 10 units at once may cause instability. Setting to 10 units.")
-    for _ in range(min(units, 10)):
-        _ROT_RIGHT_CTRCLOCK_()
+def move_forward(units): _move_relative(0.1, 0.0, units, "Moving forward")
+def move_backward(units): _move_relative(-0.1, 0.0, units, "Moving backward")
+def move_left(units): _move_relative(0.0, -0.1, units, "Moving left")
+def move_right(units): _move_relative(0.0, 0.1, units, "Moving right")
+def pan_left(units): _repeat(_PAN_LEFT_, units, 15, "Panning left")
+def pan_right(units): _repeat(_PAN_RIGHT_, units, 15, "Panning right")
+def tilt_up(units): _repeat(_TILT_UP_, units, 10, "Tilting up")
+def tilt_down(units): _repeat(_TILT_DOWN_, units, 10, "Tilting down")
+def extend_left_hand_forward(units): _repeat(_XTNFWD_LEFT_, units, 10, "Extending left hand forward")
+def extend_right_hand_forward(units): _repeat(_XTNFWD_RIGHT_, units, 10, "Extending right hand forward")
+def pull_left_hand_backward(units): _repeat(_PLLBCK_LEFT_, units, 10, "Pulling left hand backward")
+def pull_right_hand_backward(units): _repeat(_PLLBCK_RIGHT_, units, 10, "Pulling right hand backward")
+def raise_left_hand(units): _repeat(_RSE_LEFT_, units, 10, "Raising left hand")
+def lower_left_hand(units): _repeat(_LWR_LEFT_, units, 10, "Lowering left hand")
+def raise_right_hand(units): _repeat(_RSE_RIGHT_, units, 10, "Raising right hand")
+def lower_right_hand(units): _repeat(_LWR_RIGHT_, units, 10, "Lowering right hand")
+def rotate_left_clockwise(units): _repeat(_ROT_LEFT_CLOCK_, units, 10, "Rotating left hand clockwise")
+def rotate_left_counterclockwise(units): _repeat(_ROT_LEFT_CTRCLOCK_, units, 10, "Rotating left hand counterclockwise")
+def rotate_right_clockwise(units): _repeat(_ROT_RIGHT_CLOCK_, units, 10, "Rotating right hand clockwise")
+def rotate_right_counterclockwise(units): _repeat(_ROT_RIGHT_CTRCLOCK_, units, 10, "Rotating right hand counterclockwise")

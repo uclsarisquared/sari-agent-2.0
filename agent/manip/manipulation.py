@@ -7,84 +7,10 @@ from sim.env import (
     _GRIP_RIGHT_,
     _PLLBCK_LEFT_,
     _PLLBCK_RIGHT_,
-    _RSE_LEFT_,
-    _RSE_RIGHT_,
-    _REQUEST_SCREENSHOT_,
     ResetHands,
     TransformAgent,
     TransformHands,
-    rotate_right_clockwise,
-    rotate_left_clockwise,
-    move_backward
 )
-from sim.hand_reset import reset_hands_in_front2, reset_hands_in_front
-
-def reset_agent_cam_to_forward():
-    pitch = TransformAgent((0,0,0), (0,0,0))['rotation'][0]
-    return TransformAgent((0,0,0), (0-pitch,0,0))
-
-def reach_and_grasp(hand='left', max_attempts=20):
-    grasped = False
-    attempts = 0
-
-    while not grasped and attempts < max_attempts:
-        if hand == 'left':
-            _XTNFWD_LEFT_()  # e.g., moves hand slightly forward
-            grasped = _GRIP_LEFT_()['gripped']
-        elif hand == 'right':
-            _XTNFWD_RIGHT_()
-            grasped = _GRIP_RIGHT_()['gripped']
-        attempts += 1
-
-    return grasped, attempts
-
-
-
-def pull_back(hand='left', max_frames=10):
-    frames_captured = 0
-
-    while frames_captured < max_frames:
-        if hand == 'left':
-            _PLLBCK_LEFT_()
-        elif hand == 'right':
-            _PLLBCK_RIGHT_()
-        
-        frames_captured += 1
-
-
-def rotate_and_read(hand="left", max_frames=10, retract_steps=5, text_read_fn=None):
-    # Step 2: Rotate and OCR
-    texts = []
-    rotate_fn = rotate_left_clockwise if hand == 'left' else rotate_right_clockwise
-
-    for i in range(4):  # Full 360° sweep
-        _REQUEST_SCREENSHOT_()
-        if text_read_fn:
-            texts.append(text_read_fn())
-        rotate_fn(units=6)
-    return texts
-
-
-def raise_hand_to_eye_level(hand="left", raise_steps=5):
-    if hand == "left":
-        for i in range(raise_steps):
-            _RSE_LEFT_()
-    elif hand == "right":
-        for i in range(raise_steps):
-            _RSE_RIGHT_()
-
-
-def grab_and_read_item(hand="left", max_attempts=30, text_read_fn=None):
-    print('[REACH AND GRAB]')
-    accessed, attempts = reach_and_grasp(hand=hand, max_attempts=max_attempts)
-
-    if accessed:
-        move_backward(units=5)
-        reset_agent_cam_to_forward()
-        reset_hands_in_front2(extra_elevation=-0.1, hand=hand)
-        raise_hand_to_eye_level(hand=hand)
-        return rotate_and_read(hand=hand, text_read_fn=text_read_fn)
-    return ["No object grabbed"]
 
 
 # Hands remain active at REST while carrying, including during navigation and perception.
@@ -206,14 +132,22 @@ def _reset_inspection_sweep(hand):
     _INSPECTION_SWEEP_STEP[str(hand).lower()] = 0
 
 
-def _inspection_transform(hand, pose):
-    hand = str(hand).lower()
+def _inspection_refusal(hand):
+    """Blocked result unless `hand` is a valid side that holds an item."""
     grips = hand_grip_states()
     if hand not in grips:
         return {"blocked": True, "executed": False, "reason": "hand must be 'left' or 'right'"}
     if not grips[hand]:
         return {"blocked": True, "executed": False,
                 "reason": f"the {hand} hand is empty; inspection actions require a held item"}
+    return None
+
+
+def _inspection_transform(hand, pose):
+    hand = str(hand).lower()
+    refused = _inspection_refusal(hand)
+    if refused:
+        return refused
 
     if pose == "inspection":
         # The restricted inspection macro resets both hands immediately before calling this action.
@@ -293,12 +227,9 @@ _INSPECTION_SWEEP_STEP = {"left": 0, "right": 0}
 
 def _next_inspection_face(hand):
     hand = str(hand).lower()
-    grips = hand_grip_states()
-    if hand not in grips:
-        return {"blocked": True, "executed": False, "reason": "hand must be 'left' or 'right'"}
-    if not grips[hand]:
-        return {"blocked": True, "executed": False,
-                "reason": f"the {hand} hand is empty; inspection actions require a held item"}
+    refused = _inspection_refusal(hand)
+    if refused:
+        return refused
 
     step = _INSPECTION_SWEEP_STEP[hand]
     if step >= len(INSPECTION_ROTATION_DELTAS):
@@ -521,6 +452,35 @@ def _reach_result(verdict, sample=None, move_steps=0, target_height=None,
     }
 
 
+def _sample_problem(sample, fallback, miss_reason):
+    """(verdict, reason) when a LiDAR sample can't be planned from, else None."""
+    if not sample or sample.get("error"):
+        return "recenter", f"lidar error: {(sample or {}).get('error', 'no sample')}"
+    if sample.get("pitch_deg") is None or sample.get("camera_height") is None:
+        return "unavailable", ("sample has no pose (pitch_deg/camera_height) - the sim needs the "
+                               f"Phase-D recompile; falling back to {fallback}")
+    if not sample.get("hit", False):
+        return "recenter", miss_reason
+    return None
+
+
+def _slant_geometry(sample):
+    """(slant d, vertical_offset [+ = below camera], horizontal_gap, target world height)."""
+    d = float(sample["distance"])
+    theta = math.radians(float(sample["pitch_deg"]))
+    vertical_offset = d * math.sin(theta)
+    return d, vertical_offset, d * math.cos(theta), float(sample["camera_height"]) - vertical_offset
+
+
+def _gap_at_slant(slant, vertical_offset):
+    """Horizontal gap at which the slant distance equals `slant`."""
+    return math.sqrt(max(0.0, slant ** 2 - vertical_offset ** 2))
+
+
+def _move_steps(gap_to_close, envelope):
+    return max(1, min(envelope["move_cap"], math.ceil(gap_to_close / envelope["move_unit"])))
+
+
 def plan_reach(sample, envelope=REACH_ENVELOPE):
     """Plan reach from a LiDAR sample without moving the simulator.
 
@@ -529,24 +489,13 @@ def plan_reach(sample, envelope=REACH_ENVELOPE):
     targets below require crouching, while targets above are unreachable.
     Missing pose data returns unavailable; a ray miss requests re-centering.
     """
-    if not sample or sample.get("error"):
-        return _reach_result("recenter", sample,
-                             reason=f"lidar error: {(sample or {}).get('error', 'no sample')}")
-    if sample.get("pitch_deg") is None or sample.get("camera_height") is None:
-        return _reach_result("unavailable", sample,
-                             reason="sample has no pose (pitch_deg/camera_height) - the sim needs the "
-                                    "Phase-D recompile; falling back to a blind reach")
-    if not sample.get("hit", False):
-        return _reach_result("recenter", sample,
-                             reason="no surface at frame centre (gap / occlusion / beyond range) - "
-                                    "re-center on the target and retry")
+    bad = _sample_problem(sample, "a blind reach",
+                          "no surface at frame centre (gap / occlusion / beyond range) - "
+                          "re-center on the target and retry")
+    if bad:
+        return _reach_result(bad[0], sample, reason=bad[1])
 
-    d = float(sample["distance"])
-    theta = math.radians(float(sample["pitch_deg"]))
-    cam_h = float(sample["camera_height"])
-    vertical_offset = d * math.sin(theta)        # + = target below the camera
-    horizontal_gap = d * math.cos(theta)
-    target_height = cam_h - vertical_offset
+    d, vertical_offset, horizontal_gap, target_height = _slant_geometry(sample)
     max_reach = envelope["max_reach"]
 
     if d <= max_reach:
@@ -568,9 +517,8 @@ def plan_reach(sample, envelope=REACH_ENVELOPE):
                                     f"(> reach {max_reach:.2f} m) - moving or crouching can't reach it")
 
     # Reachable once close enough: move forward to bring the slant distance down to max_reach.
-    needed_gap = math.sqrt(max(0.0, max_reach ** 2 - vertical_offset ** 2))
-    move_steps = max(1, min(envelope["move_cap"],
-                            math.ceil((horizontal_gap - needed_gap) / envelope["move_unit"])))
+    needed_gap = _gap_at_slant(max_reach, vertical_offset)
+    move_steps = _move_steps(horizontal_gap - needed_gap, envelope)
     return _reach_result("move", sample, move_steps=move_steps, target_height=target_height,
                          horizontal_gap=horizontal_gap,
                          reason=f"move_forward {move_steps} (~{move_steps * envelope['move_unit']:.1f} m): "
@@ -629,32 +577,20 @@ def plan_place(sample, envelope=PLACE_ENVELOPE):
       recenter    - miss (nothing solid at centre): don't plan off a meaningless distance.
       unavailable - sample lacks pose (old sim build): caller falls back.
     """
-    if not sample or sample.get("error"):
-        return _place_result("recenter", sample,
-                             reason=f"lidar error: {(sample or {}).get('error', 'no sample')}")
-    if sample.get("pitch_deg") is None or sample.get("camera_height") is None:
-        return _place_result("unavailable", sample,
-                             reason="sample has no pose (pitch_deg/camera_height) - the sim needs the "
-                                    "Phase-D recompile; falling back to a blind place")
-    if not sample.get("hit", False):
-        return _place_result("recenter", sample,
-                             reason="no surface at frame centre (aimed past the tray / at the floor) - "
-                                    "re-center on the tray and retry")
+    bad = _sample_problem(sample, "a blind place",
+                          "no surface at frame centre (aimed past the tray / at the floor) - "
+                          "re-center on the tray and retry")
+    if bad:
+        return _place_result(bad[0], sample, reason=bad[1])
 
-    d = float(sample["distance"])
-    theta = math.radians(float(sample["pitch_deg"]))
-    cam_h = float(sample["camera_height"])
-    vertical_offset = d * math.sin(theta)        # + = surface below the camera
-    horizontal_gap = d * math.cos(theta)
-    surface_height = cam_h - vertical_offset
+    d, vertical_offset, horizontal_gap, surface_height = _slant_geometry(sample)
     place_max = envelope["place_max"]
     place_min = envelope.get("place_min")
 
     # Near bound (only if measured): too close, the hand can't clear the tray lip - back off.
     if place_min is not None and d < place_min:
-        needed_gap = math.sqrt(max(0.0, place_min ** 2 - vertical_offset ** 2))
-        move_steps = max(1, min(envelope["move_cap"],
-                                math.ceil((needed_gap - horizontal_gap) / envelope["move_unit"])))
+        needed_gap = _gap_at_slant(place_min, vertical_offset)
+        move_steps = _move_steps(needed_gap - horizontal_gap, envelope)
         return _place_result("back", sample, move_steps=move_steps, surface_height=surface_height,
                              horizontal_gap=horizontal_gap,
                              reason=f"too close: slant {d:.2f} m < place_min {place_min:.2f} m - "
@@ -678,9 +614,8 @@ def plan_place(sample, envelope=PLACE_ENVELOPE):
                                     f"(> place_max {place_max:.2f} m) - not a countertop; can't place here")
 
     # Placeable once close enough: move forward to bring the slant down to place_max.
-    needed_gap = math.sqrt(max(0.0, place_max ** 2 - vertical_offset ** 2))
-    move_steps = max(1, min(envelope["move_cap"],
-                            math.ceil((horizontal_gap - needed_gap) / envelope["move_unit"])))
+    needed_gap = _gap_at_slant(place_max, vertical_offset)
+    move_steps = _move_steps(horizontal_gap - needed_gap, envelope)
     return _place_result("move", sample, move_steps=move_steps, surface_height=surface_height,
                          horizontal_gap=horizontal_gap,
                          reason=f"move_forward {move_steps} (~{move_steps * envelope['move_unit']:.1f} m): "

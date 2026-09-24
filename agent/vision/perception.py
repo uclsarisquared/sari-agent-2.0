@@ -1,17 +1,15 @@
 import ast
 import json
-import random
+import math
 import os
+import re
+from io import BytesIO
 from pathlib import Path
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from openai import OpenAI
 from PIL import Image, ImageDraw
-from io import BytesIO
-import requests
-import ast
-import re
-import math
+
 from .ocr_client import OcrUnavailable, ocr_lines
 # Repo-root secrets.env (agent/vision/ -> repo root is three parents up), resolved from __file__
 # so it loads regardless of CWD.
@@ -22,14 +20,22 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / 'secrets.env')
 # replaces Gemini here, identically in BOTH A/B arms; bbox quality vs Gemini is unmeasured and
 # shared, so it cannot skew the arms.
 from agent_core.llm import (
-    EndpointProfile, MalformedContentError, call_with_api_retries, effective_max_tokens,
-    completion_result_from_response, image_url_part, structured_chat_completion,
+    EndpointProfile, MalformedContentError, image_url_part, structured_chat_completion,
 )
-from agent_core.prompt_loader import load_prompt, render_prompt
-# Every LLM call in this module is perception's cost - bbox, centering and OCR-bbox reasoning alike.
-# The role blocks wrap call_with_api_retries, not the lambda inside it, so a flaky call's retries are
-# billed to perception as well; the endpoint charged for them.
+from agent_core.prompt_loader import load_prompt
+# Every LLM call in this module is perception's cost; retries are billed to perception too.
 from agent_core import token_meter
+from sim.env import (
+    RequestLidarCenter, RequestScreenshot, ToggleLeftGrip, ToggleRightGrip, TransformAgent,
+    TransformHands, artifact_path, benchmark_artifact_mode, downscale_pil_for_storage,
+    move_backward, move_forward, save_jpeg_atomic, screenshot_dir,
+    # Per-step hand primitives: scan/place need the state after each 0.025 m step.
+    _XTNFWD_LEFT_, _PLLBCK_LEFT_, _XTNFWD_RIGHT_, _PLLBCK_RIGHT_,
+)
+from manip.manipulation import (
+    PLACE_ENVELOPE, plan_place, resolve_release_hand, set_hand_pose,
+)
+
 _ENDPOINT_PROFILE = EndpointProfile.from_env()
 MODEL_NAME = _ENDPOINT_PROFILE.model
 CLIENT = OpenAI(
@@ -60,9 +66,6 @@ PPD_PITCH = 16.4
 BBOX_YMIN_FIRST = _ENDPOINT_PROFILE.provider == "vertex"
 PERCEPTION_PROMPT = load_prompt("vision/detect_one")
 PERCEPTION_PROMPT_MULTI = load_prompt("vision/detect_many")
-FIND_MOST_SIMILAR_OCR_BBOX_PROMPT = load_prompt("vision/match_ocr_box")
-
-EXTRACTABLE_JSON_PATTERN = re.compile(r'```\s*json\s*([\s\S]*?)\s*```', re.DOTALL)
 
 BBOX_ENTRY_SCHEMA = {
     "type": "object",
@@ -84,82 +87,19 @@ def _bbox_schema(max_entries):
         "items": BBOX_ENTRY_SCHEMA,
     }
 
-from sim.env import *
-from manip.manipulation import *
-# `import *` skips underscore names, so pull the per-step hand primitives scan_held_item needs
-# explicitly (the public extend_left_hand_forward loops N steps without returning per-step state;
-# the sweep needs the state each 0.025 m to detect the stall). Same lambdas the probe used.
-from sim.env import _XTNFWD_LEFT_, _PLLBCK_LEFT_, _XTNFWD_RIGHT_, _PLLBCK_RIGHT_
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def _ocr_lines(source):
-    """Send a path/PIL image/PNG body to the central OCR service and return validated lines."""
-    return ocr_lines(source)
-
-
-def _encode_image(image: Image.Image) -> dict:
+def _encode_image(image) -> dict:
+    """PNG image part. Raw PNG bytes (the sim's screenshot) pass through without re-encoding."""
+    if isinstance(image, (bytes, bytearray)):
+        if bytes(image[:8]) == _PNG_SIGNATURE:
+            return image_url_part(bytes(image), "image/png")
+        image = Image.open(BytesIO(image))
     buf = BytesIO()
     image.save(buf, format='PNG')
     return image_url_part(buf.getvalue(), "image/png")
-
-
-def read_text(image_path=None):
-    image_path = image_path or os.path.join(screenshot_dir(), "ClientScreenshot.png")
-    return "\n".join(_ocr_lines(image_path))
-
-def extract_text_from_image(image_path):
-    # The second element was historically raw Paddle output. It is now the service's parsed line
-    # list so no Paddle result shape leaks into an agent process.
-    lines = _ocr_lines(image_path)
-    return "\n".join(lines), lines
-
-def find_most_similar_bbox_to_target_name(target_name, ocr_result):
-    bboxes = '\n'.join([f'* {box}' for box in ocr_result])
-    def request():
-        response = CLIENT.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": f"{FIND_MOST_SIMILAR_OCR_BBOX_PROMPT}\n\ntarget_name={target_name}\n\n{bboxes}"}],
-            temperature=0.5,
-            max_tokens=effective_max_tokens(
-                _ENDPOINT_PROFILE.provider, 400, "localization",
-                _ENDPOINT_PROFILE.thinking_level,
-            ),
-            extra_body=_ENDPOINT_PROFILE.extra_body,
-        )
-        result = completion_result_from_response(
-            response, provider=_ENDPOINT_PROFILE.provider,
-            thinking_level=_ENDPOINT_PROFILE.thinking_level,
-            workload="localization", requested_max_tokens=400,
-        )
-        if not result.text or result.finish_reason == "length":
-            raise MalformedContentError(
-                f"OCR box-match response was empty or truncated ({result.diagnostic()})",
-                content=result.text, completion_result=result,
-            )
-        return result.text
-
-    def validate(content):
-        match = re.search(EXTRACTABLE_JSON_PATTERN, content or "")
-        try:
-            parsed = ast.literal_eval(match.group(1) if match else str(content or "").strip())
-            box = parsed["box_2d"]
-            if not isinstance(box, (list, tuple)) or len(box) != 4:
-                raise ValueError("box_2d must contain four coordinates")
-        except (KeyError, TypeError, SyntaxError, ValueError) as error:
-            raise MalformedContentError(
-                f"OCR box-match response was malformed: {error}", content=content
-            ) from error
-        return box
-
-    with token_meter.role(token_meter.ROLE_PERCEPTION):
-        return call_with_api_retries(
-            request,
-            call_name="perception.ocr_box_match",
-            validator=validate,
-        )
-
-def transform_paddle_result_to_coco_label_format(paddle_result):
-    return [(b[0][0][0],b[0][0][1], b[0][2][0], b[0][2][1], b[1][0]) for b in paddle_result[0]]
 
 
 def annotate_target(ymin, xmin, ymax, xmax, file_path=None,
@@ -501,7 +441,7 @@ def center_object_on_screen(target_info, aim_norm=(0.5, 0.5), max_iters=5, tol_p
         image = Image.open(BytesIO(screenshot["image"]))
         image.load()
         try:
-            boxes = _detect_boxes_px(image, target_info)
+            boxes = _detect_boxes_px(screenshot["image"], target_info)
         except BBoxResponseParseError as error:
             detection_error = str(error)
             print(f"[CENTER] look {i}: detector parse failure - {error}")
@@ -708,7 +648,7 @@ def read_text_in_box(box, pad_frac=0.04, image_path=None, source_image=None):
         crop = img.crop((x0, y0, x1, y1))
         # The crop stays in memory and is encoded as PNG by the API-only client. No scratch-file
         # handoff and no process-local Paddle model exist in an agent.
-        return _ocr_lines(crop)
+        return ocr_lines(crop)
     except Exception as e:
         raise OcrUnavailable(
             f"read_text_in_box failed ({type(e).__name__}: {e}). Region OCR is REQUIRED by the "
@@ -754,7 +694,6 @@ def scan_held_item(hand="auto", baseline=None, max_extend=25, fuzzy_ratio=0.8, d
     """
     # 'auto' resolves to the hand that IS holding (left-first when both hold - name 'right' to scan
     # the other item); an explicit empty hand is refused. Subsumes the old empty-hand guard.
-    from manip.manipulation import resolve_release_hand
     hand, refuse_reason = resolve_release_hand(hand)
     if hand is None:
         print(f"[scan_held_item] REFUSED: {refuse_reason}")
@@ -846,7 +785,6 @@ def place_held_item(hand="auto", aim_norm=None, max_approach_iters=4, max_extend
 
     Return placed, released, verdict, distance, surface_height, iters, and reason.
     """
-    from manip.manipulation import plan_place, PLACE_ENVELOPE, set_hand_pose as _set_pose, resolve_release_hand
     # 'auto' resolves to the hand that IS holding (left-first when both hold - name 'right' to place
     # the other item); an explicit empty hand is refused. Subsumes the old empty-hand guard.
     hand, refuse_reason = resolve_release_hand(hand)
@@ -915,7 +853,7 @@ def place_held_item(hand="auto", aim_norm=None, max_approach_iters=4, max_extend
     # target_z is the hand-forward depth to release at: (centre distance - clip_standoff). Extending
     # to the reach clamp instead would let the hand clip THROUGH the counter and drop the item beyond
     # it (user-measured, 2026-07-23). Stop on reaching target_z OR a stall, whichever is first.
-    _set_pose("grab", hand=hand)
+    set_hand_pose("grab", hand=hand)
     target_z = float(plan["distance"]) - clip_standoff
     moved = 0
     released = False
@@ -936,7 +874,7 @@ def place_held_item(hand="auto", aim_norm=None, max_approach_iters=4, max_extend
     finally:
         for _ in range(moved):                     # retract exactly as far as we extended
             pull_fn()
-        _set_pose("rest", hand=hand)
+        set_hand_pose("rest", hand=hand)
 
     placed = bool(released)                         # released UNDER a 'placeable' verdict (we broke on it)
     reason = (f"released 0.1 m short of the tray (hand z={release_z:.2f} vs slant {plan['distance']:.2f} m, "

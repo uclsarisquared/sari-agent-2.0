@@ -1,41 +1,23 @@
 import os
 from PIL import ImageDraw, Image
-from sim.env import (
-    TransformAgent, RequestScreenshot, artifact_path, benchmark_artifact_mode,
-    save_jpeg_atomic, screenshot_dir,
-)
+from sim.env import artifact_path, benchmark_artifact_mode, save_jpeg_atomic, screenshot_dir
 
-def annotate_located_object(image: Image.Image | str, bbox: dict, color="red", radius=20):
-    """
-    Draws a circle at the best patch center location based on CLIP locate result.
 
-    Args:
-        image (PIL.Image): The original image.
-        result (dict): The result dict from locate_object_in_frame().
-        color (str): Color of the annotation. Default "red".
-        radius (int): Radius of the annotation circle. Default 20.
-
-    Returns:
-        PIL.Image: Annotated image.
-    """
+def annotate_located_object(image: Image.Image | str, bbox, color="red", radius=20):
+    """Return a copy of `image` with `bbox` (x0, y0, x1, y1) outlined and a frame-centre crosshair.
+    `radius` is unused; kept for call compatibility."""
     if isinstance(image, (str, os.PathLike)):
         with Image.open(image) as opened:
             opened.load()
-            image = opened.copy()
-    width, height = image.size
-
-    annotated_image = image.copy()
+            annotated_image = opened.copy()
+    else:
+        annotated_image = image.copy()
+    width, height = annotated_image.size
     draw = ImageDraw.Draw(annotated_image)
-
-    # Draw a circle centered at (x, y)
-    draw.rectangle(xy=(bbox), outline=color, width=4)
-
-    # Optional: Draw a smaller crosshair at frame center too
-    # frame_center = result["frame_center"]
+    draw.rectangle(xy=bbox, outline=color, width=4)
     fx, fy = width // 2, height // 2
     draw.line((fx - 10, fy, fx + 10, fy), fill="blue", width=2)
     draw.line((fx, fy - 10, fx, fy + 10), fill="blue", width=2)
-
     return annotated_image
 
 

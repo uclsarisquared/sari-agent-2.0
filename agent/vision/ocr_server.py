@@ -236,9 +236,9 @@ class OcrApplication:
             )
         try:
             with Image.open(BytesIO(body)) as opened:
-                opened.load()
                 if opened.format != "PNG":
                     raise ValueError("request body is not a PNG image")
+                opened.load()
                 image = opened.convert("RGB")
         except (UnidentifiedImageError, OSError) as error:
             raise ValueError("request body is not a valid PNG image") from error
