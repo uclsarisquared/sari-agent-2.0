@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.8.3 (2026-09-24)
+
+### Bug Fixes
+
+- **agent-core**: Fix navigation ranking, history, token dump and config validation bugs
+  ([`f371a1a`](https://github.com/uclsarisquared/sari-agent-2.0/commit/f371a1a46c6ce721215adc6f1d41f103ef6ae26e))
+
+
 ## v1.8.2 (2026-09-24)
 
 ### Chores
