@@ -159,6 +159,8 @@
   button.link { background: none; border: none; color: var(--dim); padding: 5px 2px; text-decoration: underline; }
   button.link:hover { background: none; color: var(--ink); }
   .mismatch { background: rgba(224,162,63,.12); color: #e8c48d; }
+  /* These set display, which would otherwise override the hidden attribute. */
+  .verdict[hidden], #modal-foot[hidden], .rows[hidden] { display: none; }
 
   /* Tabs */
   /* Script measures --header-h because the header can wrap. */
@@ -740,13 +742,19 @@ async function submitFleetCap() {
   if (capText(fleet) === (limit === null ? "all" : String(limit))) return;
   capSubmitting = true;
   input.blur();
-  const response = await fetch("/api/fleet/cap", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ limit }),
-  });
-  const data = await response.json();
-  capSubmitting = false;
+  let data;
+  try {
+    const response = await fetch("/api/fleet/cap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit }),
+    });
+    data = await response.json();
+  } catch {
+    data = { ok: false, error: "the watcher did not answer" };
+  } finally {
+    capSubmitting = false;
+  }
   if (!data.ok) {
     notify("Could not update the lease cap: " + (data.error || "unknown error"));
     input.value = capText(fleet);
@@ -1866,14 +1874,25 @@ const tipCache = new Map();
 const TIP_CACHE_MAX = 40;
 let tipKey = null;
 
+// A live frame keeps its path while its pixels change, and a retry reuses the path, so live frames
+// are never cached and cached ones are keyed by run as well as path.
+const tipToken = a => `${a.run_id || ""}|${a.frame}`;
+let tipLiveURL = null;
+
 async function frameURL(a) {
   if (!a || !a.frame) return null;
-  const cached = tipCache.get(a.frame);
+  const live = isLive(a);
+  const cached = live ? null : tipCache.get(tipToken(a));
   if (cached) return cached;
   const fetched = await fetchFrame(a.key, null);
   if (!fetched) return null;
   const url = fetched.url;
-  tipCache.set(a.frame, url);
+  if (live) {
+    if (tipLiveURL) URL.revokeObjectURL(tipLiveURL);
+    tipLiveURL = url;
+    return url;
+  }
+  tipCache.set(tipToken(a), url);
   while (tipCache.size > TIP_CACHE_MAX) {
     const oldest = tipCache.keys().next().value;
     URL.revokeObjectURL(tipCache.get(oldest));
@@ -1930,26 +1949,28 @@ function showTip(key) {
   tipRefs.hint.hidden = !hints.length;
   tip.classList.add("on");
 
-  if (a.frame === tipFrame) return;
-  const cached = a.frame ? tipCache.get(a.frame) : null;
-  if (cached) {
-    tipFrame = a.frame;
-    tipRefs.img.src = cached;
-    tipRefs.img.hidden = false;
-    tipRefs.none.hidden = true;
-    return;
+  const live = isLive(a);
+  const token = a.frame ? tipToken(a) : null;
+  if (!live && token === tipFrame) return;
+  const cached = !live && token ? tipCache.get(token) : null;
+  if (cached) { showTipFrame(token, cached); return; }
+  // A live tip keeps its current picture while the next one loads.
+  if (!(live && token === tipFrame)) {
+    tipFrame = null;
+    tipRefs.img.hidden = true;
+    tipRefs.none.hidden = false;
+    setText(tipRefs.none, a.frame ? "loading frame…" : "no frame");
   }
-  tipFrame = null;
-  tipRefs.img.hidden = true;
-  tipRefs.none.hidden = false;
-  setText(tipRefs.none, a.frame ? "loading frame…" : "no frame");
   frameURL(a).then(url => {
-    if (tipKey !== key || !url) return;
-    tipFrame = a.frame;
-    tipRefs.img.src = url;
-    tipRefs.img.hidden = false;
-    tipRefs.none.hidden = true;
+    if (tipKey === key && url) showTipFrame(token, url);
   });
+}
+
+function showTipFrame(token, url) {
+  tipFrame = token;
+  tipRefs.img.src = url;
+  tipRefs.img.hidden = false;
+  tipRefs.none.hidden = true;
 }
 
 function hideTip() {
@@ -2500,7 +2521,18 @@ function setTab(tab) {
   refresh();
 }
 
+// One poll at a time; a refresh asked for mid-poll runs once more after it, so none land out of order.
+let refreshing = null, refreshQueued = false;
+
 async function refresh() {
+  if (refreshing) { refreshQueued = true; return refreshing; }
+  refreshing = (async () => {
+    do { refreshQueued = false; await refreshOnce(); } while (refreshQueued);
+  })();
+  try { await refreshing; } finally { refreshing = null; }
+}
+
+async function refreshOnce() {
   let state;
   // The poll in flight when a battery is picked answers for the battery just left. Rendering it
   // would put the old run back on the page - and the self-heal below would then treat it as the

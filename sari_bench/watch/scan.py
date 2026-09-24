@@ -46,6 +46,10 @@ LIVE_GRACE_SECONDS = 120.0
 
 # Run dirs look like <prompt_id>/try01, plus <prompt_id>/try01.requeue00 for rotated-aside ones.
 _TRY_DIR = re.compile(r"^try\d+(\.requeue\d+)?$")
+
+
+def is_try_dir_name(name: str) -> bool:
+    return bool(_TRY_DIR.match(name))
 _LEG_JSONL = re.compile(r"^leg(\d+)\.jsonl$")
 _STEP_FRAME = capture._STEP_FRAME  # one definition of a step frame name
 
@@ -273,8 +277,8 @@ def is_verifiable(state: str, _end_reason: str) -> bool:
 # "already_successful" is the fourth answer and, like "invalid", scores nothing - but for the
 # opposite reason. The run is not broken: it was halted because another try of the same prompt had
 # already been judged a success, so it never got a task to fail at. Excluded, not failed.
-VERDICTS = ("pass", "fail", "invalid", "already_successful")
 ALREADY_SUCCESSFUL = "already_successful"
+VERDICTS = ("pass", "fail", "invalid", ALREADY_SUCCESSFUL)
 # The verdicts that write no `verified_success` at all, because neither True nor False is honest.
 EXCLUDED_VERDICTS = frozenset({"invalid", ALREADY_SUCCESSFUL})
 AUTO_INVALID_OUTCOMES = frozenset({"agent_error"})

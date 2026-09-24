@@ -2256,3 +2256,65 @@ def test_dashboard_revalidates_and_json_gzips() -> None:
             server.shutdown()
             server.server_close()
     print("ok  the page revalidates and JSON is gzipped on request")
+
+
+def test_battery_finished_with_no_successes_posts_amber() -> None:
+    from sari_bench.watch import notify
+
+    discord, posts = _recording_discord()
+    discord.battery_finished({"battery_id": "b", "counts": {}, "attempts": [{"success": False}]})
+    assert posts[0][0]["embeds"][0]["color"] == notify._AMBER
+    print("ok  a battery with no successes still announces its completion")
+
+
+def test_log_delta_returns_every_new_line() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(2), pid=os.getpid())
+        state = WatchState(bench_root=Path(temp), fixed_battery=battery,
+                           discord=Discord(enabled=False), min_interval=0.0)
+        cursor = state.log_tail("p/try01")["offset"]
+        burst = [f"burst {i}" for i in range(100)]
+        with (run_dir / "agent.log").open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(burst) + "\n")
+        assert state.log_tail("p/try01", since=cursor)["lines"] == burst
+        assert state.log_tail("p/try01", since=cursor, full=True)["lines"] == burst
+    print("ok  a log delta is never cut to the tail window")
+
+
+def test_safe_run_dir_accepts_only_run_dirs() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(2))
+        (run_dir.parent / "try01.requeue00").mkdir()
+        assert _safe_run_dir(battery, "p/try01") == run_dir.resolve()
+        assert _safe_run_dir(battery, "p/try01.requeue00") is not None
+        for key in ("", ".", "p", "p/try01/leg00", "p/notatry", "../b/p/try01/.."):
+            assert _safe_run_dir(battery, key) is None, key
+    print("ok  attempt keys resolve only to <prompt>/<try> run dirs")
+
+
+def test_rename_drops_runner_retries_under_the_old_id() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        battery = root / "old"
+        make_attempt(battery, "p", 1, steps=healthy_steps(2), state="finished", outcome="completed")
+        (battery / scan.BATTERY_MANIFEST).write_text("{}", encoding="utf-8")
+        stale = time.time() - scan.LIVE_GRACE_SECONDS - 60
+        for path in (battery / scan.BATTERY_MANIFEST, battery):
+            os.utime(path, (stale, stale))
+        state = WatchState(bench_root=root, fixed_battery=None, discord=Discord(enabled=False),
+                           min_interval=0.0)
+        state._runner_retries[("old", "p/try01")] = {"key": "p/try01", "battery_id": "old"}
+        assert state.rename_battery("old", "new")["ok"]
+        assert not state._runner_retries
+    print("ok  a rename leaves no queue rows under the old battery id")
+
+
+def test_dashboard_hides_display_styled_elements_and_serialises_polls() -> None:
+    dashboard = (Path(__file__).parents[1] / "watch" / "static" / "dashboard.html").read_text()
+    assert ".verdict[hidden], #modal-foot[hidden], .rows[hidden] { display: none; }" in dashboard
+    assert "if (refreshing) { refreshQueued = true; return refreshing; }" in dashboard
+    assert "const cached = live ? null : tipCache.get(tipToken(a));" in dashboard
+    assert "} finally {\n    capSubmitting = false;" in dashboard
+    print("ok  dashboard guards hidden styling, poll overlap, live tip frames and cap retries")

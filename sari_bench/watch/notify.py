@@ -24,6 +24,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from sari_bench.watch.scan import ALREADY_SUCCESSFUL
+
 WEBHOOK_ENV = "SARI_BENCH_DISCORD_WEBHOOK"
 
 # Discord's Cloudflare front-end 403s (error code 1010) the default urllib User-Agent on POST,
@@ -48,6 +50,7 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 _RED = 0xE0553F
 _GREEN = 0x4FA96B
 _BLUE = 0x4F7FA9
+_AMBER = 0xE0A23F
 
 class Discord:
     """Fail-soft Discord webhook client with per-key cooldowns."""
@@ -176,7 +179,7 @@ class Discord:
         useful in reports, but a Discord notification should only say that a run ended and provide
         the evidence for a person to review.
         """
-        if attempt.get("end_reason") == "already_successful":
+        if attempt.get("end_reason") == ALREADY_SUCCESSFUL:
             return
         key = attempt.get("key", "")
         if key in self._seen_finished:

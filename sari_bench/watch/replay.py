@@ -33,6 +33,7 @@ from typing import Any
 
 from sari_bench import video
 from sari_bench.watch import notify
+from sari_bench.watch.scan import ALREADY_SUCCESSFUL
 
 # Deep enough to absorb a burst of simultaneous finishes, shallow enough that a wedged encode fails
 # loudly instead of hoarding attempt dicts forever.
@@ -95,7 +96,7 @@ class ReplayNotifier(threading.Thread):
         worker is off, the queue is backed up, or the key was already claimed (in which case
         `Discord.attempt_finished` will no-op on its own dedupe and nothing is sent twice).
         """
-        if attempt.get("end_reason") == "already_successful":
+        if attempt.get("end_reason") == ALREADY_SUCCESSFUL:
             return True
         if not self.announce_enabled:
             return False

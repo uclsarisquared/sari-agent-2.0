@@ -203,6 +203,9 @@ class WatchState:
             for job in self._retry_jobs.values():
                 if job.get("battery_id") == battery_id:
                     job["battery_id"] = wanted
+            # Re-derived under the new id on its next scan.
+            for identity in [i for i in self._runner_retries if i[0] == battery_id]:
+                self._runner_retries.pop(identity)
             self._invalidate_locked()
         _log(f"renamed bench run {battery_id} -> {wanted}")
         return {"ok": True, "battery_id": wanted, "renamed": True}
@@ -1347,7 +1350,8 @@ class WatchState:
 
         text = raw.decode("utf-8", errors="replace")
         return {
-            "lines": text.splitlines() if bootstrap and full else text.splitlines()[-lines:],
+            # Only a tail bootstrap is windowed; a delta must return every line it advances past.
+            "lines": text.splitlines()[-lines:] if bootstrap and not full else text.splitlines(),
             "offset": start + len(raw),
             "size": size,
             "partial": partial.decode("utf-8", errors="replace"),
@@ -1472,10 +1476,10 @@ def _int_param(
 
 def _safe_run_dir(battery: Path, key: str) -> Path | None:
     """Resolves an HTTP-supplied attempt key to a run dir, refusing anything outside the battery."""
+    root = battery.resolve()
     candidate = (battery / key).resolve()
-    try:
-        candidate.relative_to(battery.resolve())
-    except ValueError:
+    # Exactly <prompt>/<tryNN[.requeueNN]>: not the battery, a prompt dir, or anything deeper.
+    if candidate.parent.parent != root or not scan.is_try_dir_name(candidate.name):
         return None
     return candidate if candidate.is_dir() else None
 
