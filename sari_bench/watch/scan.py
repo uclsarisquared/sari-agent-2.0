@@ -21,7 +21,7 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ LIVE_GRACE_SECONDS = 120.0
 # Run dirs look like <prompt_id>/try01, plus <prompt_id>/try01.requeue00 for rotated-aside ones.
 _TRY_DIR = re.compile(r"^try\d+(\.requeue\d+)?$")
 _LEG_JSONL = re.compile(r"^leg(\d+)\.jsonl$")
-_STEP_FRAME = re.compile(r"^step(\d+)(?:_[^.]+)?\.(?:png|jpe?g)$", re.IGNORECASE)
+_STEP_FRAME = capture._STEP_FRAME  # one definition of a step frame name
 
 
 @dataclass
@@ -417,8 +417,50 @@ def _latest_frame(run_dir: Path) -> Path | None:
     )
 
 
+# Stopped attempts are re-scanned every poll but almost never change. Their views are reused while
+# the run dir's top-level stat signature holds, once nothing has been written for QUIET_SECONDS.
+QUIET_SECONDS = 60.0
+_STOPPED_CACHE_MAX = 4096
+_stopped_cache: dict[tuple[str, str], tuple[tuple, float | None, AttemptView]] = {}
+
+
+def _run_dir_signature(run_dir: Path) -> tuple[tuple, float] | None:
+    """(name, mtime_ns, size) of every top-level entry, plus the newest mtime among them."""
+    try:
+        entries = sorted(os.scandir(run_dir), key=lambda entry: entry.name)
+        stats = [(entry.name, entry.stat()) for entry in entries]
+        own = run_dir.stat()
+    except OSError:
+        return None
+    signature = tuple((name, st.st_mtime_ns, st.st_size) for name, st in stats)
+    newest = max([own.st_mtime, *(st.st_mtime for _, st in stats)])
+    return (own.st_mtime_ns, *signature), newest
+
+
 def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
-    """Builds one tile's worth of state from a run dir."""
+    """Builds one tile's worth of state from a run dir, reusing a quiescent stopped attempt's view."""
+    cache_key = (str(run_dir), str(battery_root))
+    signed = _run_dir_signature(run_dir)
+    cached = _stopped_cache.get(cache_key)
+    if signed is not None and cached is not None and cached[0] == signed[0]:
+        leg_mtime, view = cached[1], cached[2]
+        return replace(
+            view,
+            seconds_since_step=None if leg_mtime is None else round(now - leg_mtime, 1),
+        )
+
+    view, leg_mtime = _scan_attempt(run_dir, battery_root, now)
+    stopped = view.state == "finished" or is_archived_requeue(view.state, view.pending_retry)
+    if signed is not None and stopped and time.time() - signed[1] > QUIET_SECONDS:
+        if len(_stopped_cache) >= _STOPPED_CACHE_MAX:
+            _stopped_cache.clear()
+        _stopped_cache[cache_key] = (signed[0], leg_mtime, view)
+    else:
+        _stopped_cache.pop(cache_key, None)
+    return view
+
+
+def _scan_attempt(run_dir: Path, battery_root: Path, now: float) -> tuple[AttemptView, float | None]:
     manifest = _read_json(run_dir / ATTEMPT_MANIFEST)
     outcome = str(manifest.get("outcome") or "")
     verdict = effective_verdict(manifest)
@@ -512,6 +554,7 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
 
     legs = _leg_files(run_dir)
     steps: list[dict[str, Any]] = []
+    leg_mtime: float | None = None
     if legs:
         records = read_step_records(legs[-1])
         steps = [r for r in records if r.get("event") == "step"]
@@ -537,7 +580,8 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
             view.gripped_name = last.get("gripped_name")
             view.goal_met = last.get("goal_met")
         try:
-            view.seconds_since_step = round(now - legs[-1].stat().st_mtime, 1)
+            leg_mtime = legs[-1].stat().st_mtime
+            view.seconds_since_step = round(now - leg_mtime, 1)
         except OSError:
             view.seconds_since_step = None
 
@@ -561,7 +605,7 @@ def scan_attempt(run_dir: Path, battery_root: Path, now: float) -> AttemptView:
     else:
         view.health = health.HealthReport().as_dict()
 
-    return view
+    return view, leg_mtime
 
 
 def find_batteries(root: Path) -> list[Path]:
@@ -584,32 +628,37 @@ def find_batteries(root: Path) -> list[Path]:
     return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def _flocked(path: Path) -> bool:
-    """Whether some process holds an flock on `path`, asked without taking one.
+def _held_flocks() -> frozenset[str]:
+    """`<maj>:<min>:<inode>` of every held flock, from /proc/locks; empty without procfs.
 
-    Trying for the lock would answer the same question and is what the runner itself does - but the
-    runner asks non-blockingly and aborts if it loses, so a watcher holding that lock for even a
-    microsecond could stop a battery from starting. /proc/locks is the read-only way to ask: one line
-    per held lock, carrying the owner's device and inode.
+    Read-only on purpose: taking the runner's lock, even briefly, could stop a battery starting.
     """
-    try:
-        stat = path.stat()
-    except OSError:
-        return False
-    wanted = f"{os.major(stat.st_dev):02x}:{os.minor(stat.st_dev):02x}:{stat.st_ino}"
+    held = set()
     try:
         with open("/proc/locks", encoding="utf-8") as handle:
             for line in handle:
                 fields = line.split()
                 # "<n>: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> <start> <end>"
-                if len(fields) > 5 and fields[1] == "FLOCK" and fields[5] == wanted:
-                    return True
+                if len(fields) > 5 and fields[1] == "FLOCK":
+                    held.add(fields[5])
     except OSError:
-        return False  # no procfs: the recency fallback is the only signal left
-    return False
+        pass  # no procfs: the recency fallback is the only signal left
+    return frozenset(held)
 
 
-def battery_live(battery: Path, now: float | None = None) -> bool:
+def _flocked(path: Path, held: frozenset[str] | None = None) -> bool:
+    """Whether some process holds an flock on `path`, asked without taking one."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    wanted = f"{os.major(stat.st_dev):02x}:{os.minor(stat.st_dev):02x}:{stat.st_ino}"
+    return wanted in (_held_flocks() if held is None else held)
+
+
+def battery_live(
+    battery: Path, now: float | None = None, held: frozenset[str] | None = None
+) -> bool:
     """Whether a runner is still working on this battery.
 
     The exact signal is `.runner.lock`, which a full battery runner flocks for its whole life. A
@@ -617,7 +666,7 @@ def battery_live(battery: Path, now: float | None = None) -> bool:
     recency fallback on the battery's own bookkeeping. Deliberately O(1) per battery - this runs for
     every battery on every state poll, so nothing here may walk the run dirs.
     """
-    if _flocked(battery / RUNNER_LOCK):
+    if _flocked(battery / RUNNER_LOCK, held):
         return True
 
     now = time.time() if now is None else now
@@ -633,6 +682,7 @@ def battery_live(battery: Path, now: float | None = None) -> bool:
 def describe_batteries(paths: list[Path], now: float | None = None) -> list[dict[str, Any]]:
     """The picker's view of every battery on disk: what to call it, and whether it is running."""
     now = time.time() if now is None else now
+    held = _held_flocks() if paths else frozenset()
     described = []
     for path in paths:
         try:
@@ -642,7 +692,7 @@ def describe_batteries(paths: list[Path], now: float | None = None) -> list[dict
         described.append({
             "id": path.name,
             "path": str(path),
-            "live": battery_live(path, now),
+            "live": battery_live(path, now, held),
             "mtime": mtime,
         })
     return described

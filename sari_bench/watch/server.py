@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import gzip
 import json
 import os
 import shutil
@@ -48,6 +49,7 @@ WATCH_POLL_SECONDS = 1.0
 LOG_TAIL_LINES = 25
 LOG_MAX_LINES = 2000
 LOG_BOOTSTRAP_BYTES = 16_384
+GZIP_MIN_BYTES = 1024
 # Same string the runner stamps as a cancelled try's end_reason and the scanner classifies as the
 # `already_successful` verdict; one definition so the three can never drift.
 ALREADY_SUCCESSFUL = scan.ALREADY_SUCCESSFUL
@@ -65,6 +67,11 @@ RUNNER_GONE = "runner_gone"
 VERDICT_FIELDS = (
     "verified_verdict", "verified_success", "verified_at", "verified_by", "verified_note",
 )
+FLEET_FIELDS = (
+    "capacity_limit", "effective_capacity", "active_leases",
+    "registered_sandboxes", "eligible_sandboxes", "quarantined_sandboxes",
+)
+COORDINATOR_TIMEOUT_SECONDS = 10.0
 
 
 def _log(message: str) -> None:
@@ -112,13 +119,10 @@ class WatchState:
         # own workers, which is the point: a retry queues behind them and nothing else can say so.
         self._pool_waiting = 0
         self._fleet_status: dict[str, Any] = {
-            "capacity_limit": None,
-            "effective_capacity": 0,
-            "active_leases": 0,
-            "registered_sandboxes": 0,
-            "eligible_sandboxes": 0,
-            "quarantined_sandboxes": 0,
+            name: None if name == "capacity_limit" else 0 for name in FLEET_FIELDS
         }
+        # (monotonic time, find_batteries result), reused within one poll window.
+        self._found: tuple[float, list[Path]] = (float("-inf"), [])
         self._announced_start = False
         self._announced_done = False
         self.battery: Path | None = None
@@ -126,27 +130,29 @@ class WatchState:
         self._runner_retries: dict[tuple[str, str], dict[str, Any]] = {}
 
     def resolve_battery(self) -> Path | None:
-        """Auto-discovery with a single-battery override.
-
-        `--run-dir` pins one battery; otherwise the newest under `bench_root` wins and the watcher
-        follows the fleet from battery to battery without a restart.
-        """
+        """The `--run-dir` pin, else the newest battery under `bench_root`."""
         if self.fixed_battery is not None:
             return self.fixed_battery
-        batteries = scan.find_batteries(self.bench_root)
+        batteries = self._batteries()
         return batteries[0] if batteries else None
 
-    def battery_for(self, battery_id: str | None) -> Path | None:
-        """The battery one request is about, which need not be the one this watcher follows.
+    def _batteries(self) -> list[Path]:
+        """`find_batteries`, cached briefly: every request and poll resolves a battery through it."""
+        now = time.monotonic()
+        found_at, found = self._found
+        if now - found_at >= min(self.min_interval, 1.0):
+            found = scan.find_batteries(self.bench_root)
+            self._found = (now, found)
+        return found
 
-        Matching is by directory name against what discovery found, never by joining the caller's
-        string onto a path: an id that names no battery on disk resolves to the watched one rather
-        than to somewhere else on the filesystem. `newest` asks for follow-the-fleet explicitly,
-        which is how a browser opts out of a `--run-dir` pin without restarting the server.
+    def battery_for(self, battery_id: str | None) -> Path | None:
+        """The battery one request names, matched by dir name (never joined onto a path).
+
+        Unknown ids fall back to the watched battery; `newest` opts out of a `--run-dir` pin.
         """
         if not battery_id:
             return self.resolve_battery()
-        batteries = scan.find_batteries(self.bench_root)
+        batteries = self._batteries()
         if battery_id == "newest":
             return batteries[0] if batteries else None
         for battery in batteries:
@@ -155,14 +161,9 @@ class WatchState:
         return self.resolve_battery()
 
     def rename_battery(self, battery_id: str, new_name: str) -> dict[str, Any]:
-        """Renames a battery's directory. The id IS the directory name, so this renames the run.
+        """Renames a battery's directory (its id). Unknown ids are errors, never a fallback.
 
-        Unlike `battery_for`, an id that names nothing is an error rather than a fallback to the
-        watched battery: falling back on a read shows the wrong page, but falling back on a rename
-        would rename the wrong directory - and there would be no way to tell from the answer.
-
-        Refused while a runner is working, because everything under the battery is open by absolute
-        path in eight agent subprocesses that were told where to write before the rename happened.
+        Refused while a runner or retry is working: they hold absolute paths into the battery.
         """
         wanted = storage.battery_dir_name(new_name)
         if not wanted:
@@ -181,9 +182,6 @@ class WatchState:
                 return {"ok": False, "error": f"{wanted} already exists under bench_runs/"}
             if scan.battery_live(match):
                 return {"ok": False, "error": "its runner is still working - stop it first"}
-            # A retry holds a run dir the same way a runner does, and it was handed that path when
-            # it was queued. Renaming under it produces a subprocess writing into a directory nobody
-            # will ever read again.
             busy = next(
                 (key for key, job in self._retry_jobs.items()
                  if job.get("battery_id") == battery_id and job.get("state") != "failed"),
@@ -197,9 +195,7 @@ class WatchState:
             except OSError as error:
                 return {"ok": False, "error": f"{error!r}"}
 
-            # Everything the watcher holds this battery by is a path or an id, and both just moved.
-            # Carrying `self.battery` across is what keeps `snapshot` from reading the rename as a
-            # new battery and announcing a finished run's start over again.
+            # Carry the paths across so `snapshot` does not read the rename as a new battery.
             if self.fixed_battery == match:
                 self.fixed_battery = target
             if self.battery == match:
@@ -215,23 +211,16 @@ class WatchState:
         """Drops every cached payload. The caller must hold `self._lock`."""
         self._cached_at = 0.0
         self._views.clear()
+        self._found = (float("-inf"), [])
 
     def view(self, battery_id: str | None = None) -> dict[str, Any]:
-        """`/api/state` for one battery, which may not be the one being watched.
-
-        Looking at another run is a read: it must not move `self.battery`, and it must not hand the
-        notifier a battery whose finishes were all announced hours ago. So only the watched battery
-        goes through `snapshot`, and everything else is scanned into a cache of its own.
-        """
+        """`/api/state` for one battery. Only the watched one goes through `snapshot` (and notifies)."""
         battery = self.battery_for(battery_id)
         watched = self.resolve_battery()
         if battery is None or battery == watched:
             return self.snapshot()
 
-        # Announcements and replay renders are driven by this poll and nothing else, so reading
-        # another battery must not silence them: the watched snapshot is still rebuilt for its side
-        # effects, and only its payload is discarded. That is one extra scan per poll, which is the
-        # price of a reviewer reading yesterday's run while today's is halfway through.
+        # Still rebuilt for its notification side effects; only the payload is discarded.
         self.snapshot()
 
         with self._lock:
@@ -239,21 +228,32 @@ class WatchState:
             cached_at, cached = self._views.get(battery.name, (0.0, {}))
             if cached and now - cached_at < self.min_interval:
                 return cached
-            view = scan.scan_battery(
-                battery, now, discovered=scan.find_batteries(self.bench_root)
-            ).as_dict()
-            self._sync_runner_retries(view, battery.name)
-            view["pool"] = self._pool
-            view["pool_error"] = self._pool_error
-            view["fleet"] = dict(self._fleet_status)
-            view["queue"] = self._queue_locked()
-            view["now"] = now
-            view["bench_root"] = str(self.bench_root)
-            view["mode"] = "pinned"
-            view["watching_id"] = watched.name if watched else None
-            self._merge_retry_jobs(view, battery.name)
+            view = self._scan_locked(
+                battery, now, mode="pinned", watching_id=watched.name if watched else None
+            )
             self._views[battery.name] = (now, view)
             return view
+
+    def _scan_locked(
+        self, battery: Path, now: float, *, mode: str, watching_id: str | None
+    ) -> dict[str, Any]:
+        """One battery's `/api/state` payload. The caller must hold `self._lock`."""
+        # Every battery on disk, pinned or not: the header's picker reaches runs the server was not
+        # started on.
+        view = scan.scan_battery(battery, now, discovered=self._batteries()).as_dict()
+        self._sync_runner_retries(view, battery.name)
+        view.update({
+            "pool": self._pool,
+            "pool_error": self._pool_error,
+            "fleet": dict(self._fleet_status),
+            "queue": self._queue_locked(),
+            "now": now,
+            "bench_root": str(self.bench_root),
+            "mode": mode,
+            "watching_id": watching_id,
+        })
+        self._merge_retry_jobs(view, battery.name)
+        return view
 
     def snapshot(self, force: bool = False) -> dict[str, Any]:
         with self._lock:
@@ -287,21 +287,10 @@ class WatchState:
                 self._announced_done = False
                 self._seeded = False
 
-            # Every battery on disk, pinned or not: the header's picker is how an operator reaches
-            # a run the server was not started on, so the list may not depend on how it was started.
-            view = scan.scan_battery(
-                battery, now, discovered=scan.find_batteries(self.bench_root)
-            ).as_dict()
-            self._sync_runner_retries(view, battery.name)
-            view["pool"] = self._pool
-            view["pool_error"] = self._pool_error
-            view["fleet"] = dict(self._fleet_status)
-            view["queue"] = self._queue_locked()
-            view["now"] = now
-            view["bench_root"] = str(self.bench_root)
-            view["mode"] = "pinned" if self.fixed_battery else "auto"
-            view["watching_id"] = battery.name
-            self._merge_retry_jobs(view, battery.name)
+            view = self._scan_locked(
+                battery, now, mode="pinned" if self.fixed_battery else "auto",
+                watching_id=battery.name,
+            )
             self._cached = view
             self._cached_at = now
 
@@ -439,14 +428,7 @@ class WatchState:
             self._pool_error = error
             self._pool_waiting = waiting
             if fleet is not None:
-                self._fleet_status = {
-                    name: fleet.get(name)
-                    for name in (
-                        "capacity_limit", "effective_capacity", "active_leases",
-                        "registered_sandboxes", "eligible_sandboxes",
-                        "quarantined_sandboxes",
-                    )
-                }
+                self._fleet_status = {name: fleet.get(name) for name in FLEET_FIELDS}
             self._invalidate_locked()
 
     def set_fleet_cap(self, limit: Any) -> dict[str, Any]:
@@ -457,15 +439,8 @@ class WatchState:
             return {"ok": False, "error": "limit must be null or a non-negative integer"}
         if not self.coordinator_url:
             return {"ok": False, "error": "watcher has no coordinator configured"}
-
-        from sari_bench.client import CoordinatorClient
-
-        async def update() -> dict[str, Any]:
-            async with CoordinatorClient(self.coordinator_url or "") as client:
-                return await client.set_capacity(limit)
-
         try:
-            status = asyncio.run(asyncio.wait_for(update(), timeout=10.0))
+            status = _coordinator_call(self.coordinator_url, lambda c: c.set_capacity(limit))
         except Exception as error:  # noqa: BLE001 - report the coordinator failure to the caller
             return {"ok": False, "error": repr(error)}
         with self._lock:
@@ -491,19 +466,12 @@ class WatchState:
             return {"ok": False, "error": "sandbox alias or ID is required"}
         if not self.coordinator_url:
             return {"ok": False, "error": "watcher has no coordinator configured"}
-
-        from sari_bench.client import CoordinatorClient
-
-        async def update() -> dict[str, Any]:
-            async with CoordinatorClient(self.coordinator_url or "") as client:
-                if clear:
-                    return await client.unquarantine(selector)
-                return await client.quarantine_sandbox(
-                    selector, reason=reason, source="watch_api"
-                )
-
         try:
-            status = asyncio.run(asyncio.wait_for(update(), timeout=10.0))
+            status = _coordinator_call(
+                self.coordinator_url,
+                lambda c: c.unquarantine(selector) if clear
+                else c.quarantine_sandbox(selector, reason=reason, source="watch_api"),
+            )
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "error": repr(error)}
         return {"ok": True, **status}
@@ -594,21 +562,13 @@ class WatchState:
     # -- actions ---------------------------------------------------------------------------
 
     def kill(self, key: str, *, battery_id: str | None = None) -> dict[str, Any]:
-        """Stops one attempt, and then gets out of the way.
+        """SIGTERMs the agent's process group; its runner records the attempt and frees the lease.
 
-        The watcher signals the agent's process group and does nothing else: the runner's own
-        `process.wait()` returns non-zero, it records the attempt, and its `finally` releases the
-        lease so the coordinator resets and re-pools the sandbox. No second path to maintain, and
-        the watcher never has to talk to the coordinator about it. The `killed_by` stamp is what
-        stops the row being scored as an agent crash.
-
-        When there is no runner left to get out of the way of - the pid in the manifest names no
-        living process - this closes the attempt out instead of failing on a signal to nobody.
+        `killed_by` keeps the row from scoring as a crash. A dead pid closes the attempt out instead.
         """
-        battery = self.battery_for(battery_id)
+        battery, run_dir = self.run_dir_for(key, battery_id)
         if battery is None:
             return {"ok": False, "error": "no battery"}
-        run_dir = _safe_run_dir(battery, key)
         if run_dir is None:
             return {"ok": False, "error": "unknown attempt"}
 
@@ -620,10 +580,7 @@ class WatchState:
         if not pid:
             return {"ok": False, "error": "no pid recorded"}
 
-        # The manifest names a process that no longer exists - exactly what the scanner calls an
-        # orphan. Signalling it is pointless, and refusing here is what used to strand the tile:
-        # kill had nothing to signal, a verdict is refused on anything unfinished, and only the
-        # runner ever writes the closing record. Adopt the attempt instead.
+        # An orphan: nothing to signal, so adopt the attempt instead of stranding the tile.
         if not scan.agent_is_alive(manifest, pid):
             return self._close_out_abandoned(battery, key, run_dir, manifest)
 
@@ -640,18 +597,10 @@ class WatchState:
     def _close_out_abandoned(
         self, battery: Path, key: str, run_dir: Path, manifest: dict[str, Any]
     ) -> dict[str, Any]:
-        """Writes the terminal record an abandoned attempt's runner never got to write.
+        """Writes the terminal record an abandoned (orphaned) attempt's runner never wrote.
 
-        Only the runner that spawned an agent closes its manifest out, so an attempt whose runner
-        is gone - crashed, SIGKILLed, its terminal closed - keeps `state: running` and a dead pid
-        forever. The scanner rightly reads that as `orphaned`, but nothing could move it on: there
-        was no process left to kill and an unfinished attempt cannot be judged, so the tile was a
-        dead end whose only exit was rerunning the try. The watcher adopts it here, recording the
-        one thing that is actually knowable - it stopped, and it produced no result of its own.
-
-        A runner that is merely slow to finalize gets the first word: this waits out
-        FINALIZE_GRACE_SECONDS for its write. Even if it lands later it still wins, because both
-        paths merge into the manifest and upsert the same attempts.jsonl key.
+        A slow runner gets FINALIZE_GRACE_SECONDS first, and still wins if it lands later: both paths
+        merge into the manifest and upsert the same attempts.jsonl key.
         """
         from dataclasses import asdict
 
@@ -659,12 +608,7 @@ class WatchState:
         from sari_bench.storage import upsert_attempt_row
 
         prompt_id = str(manifest.get("prompt_id") or run_dir.parent.name)
-        try:
-            # The dir name is the fallback the runner itself uses: `try07` -> 7, and `try07.requeue00`
-            # -> 7 as well, since a rotated-aside dir is still that logical try.
-            attempt = int(manifest.get("attempt") or run_dir.name[3:].split(".", 1)[0])
-        except (TypeError, ValueError):
-            attempt = 0
+        attempt = _try_number(manifest, run_dir) or 0
         if attempt < 1:
             # attempts.jsonl is keyed on (prompt_id, attempt); without one there is nothing to record.
             return {"ok": False, "error": "attempt has no valid try number"}
@@ -761,25 +705,17 @@ class WatchState:
                 "wall_seconds": result.wall_seconds}
 
     def _release_abandoned_lease(self, battery: Path, manifest: dict[str, Any]) -> None:
-        """Hands back the sandbox the dead runner's `finally` never released.
-
-        Best effort by design: the coordinator resets an orphaned lease when its sandbox re-registers
-        anyway, so a coordinator that is down or moved must not block closing the attempt out.
-        """
+        """Best-effort release of the dead runner's lease; the coordinator reaps it anyway."""
         lease_id = str(manifest.get("lease_id") or "")
         plan = scan._read_json(battery / scan.BATTERY_MANIFEST)
         coordinator = str(plan.get("coordinator") or self.coordinator_url or "")
         if not lease_id or not coordinator:
             return
-
-        from sari_bench.client import CoordinatorClient
-
-        async def release() -> bool:
-            async with CoordinatorClient(coordinator) as client:
-                return await client.release_lease_id(lease_id, outcome="watcher_close_out")
-
         try:
-            known = asyncio.run(asyncio.wait_for(release(), timeout=10.0))
+            known = _coordinator_call(
+                coordinator,
+                lambda c: c.release_lease_id(lease_id, outcome="watcher_close_out"),
+            )
         except Exception as error:  # noqa: BLE001 - the sandbox is reclaimable without us
             _log(f"could not release abandoned lease {lease_id}: {error!r}")
             return
@@ -809,9 +745,8 @@ class WatchState:
         else:
             manifest = scan._read_json(selected / scan.ATTEMPT_MANIFEST)
             prompt_id = str(manifest.get("prompt_id") or selected.parent.name)
-            try:
-                attempt = int(manifest.get("attempt") or selected.name[3:].split(".", 1)[0])
-            except (TypeError, ValueError):
+            attempt = _try_number(manifest, selected)
+            if attempt is None:
                 return {"ok": False, "error": "attempt has no valid try number"}
             if attempt < 1 or prompt_id != selected.parent.name:
                 return {"ok": False, "error": "invalid attempt metadata"}
@@ -1111,10 +1046,10 @@ class WatchState:
         if winner_key:
             winner_dir = _safe_run_dir(battery, winner_key)
             if winner_dir is not None:
-                manifest = scan._read_json(winner_dir / scan.ATTEMPT_MANIFEST)
-                for field in VERDICT_FIELDS:
-                    manifest.pop(field, None)
-                _write_json(winner_dir / scan.ATTEMPT_MANIFEST, manifest)
+                _clear_verdict_fields(
+                    winner_dir / scan.ATTEMPT_MANIFEST,
+                    scan._read_json(winner_dir / scan.ATTEMPT_MANIFEST),
+                )
         # Older batteries may have only the per-attempt verdict and no battery-level winner map.
         prompt_dir = battery / prompt_id
         if prompt_dir.is_dir():
@@ -1123,11 +1058,8 @@ class WatchState:
                     continue
                 manifest_path = run_dir / scan.ATTEMPT_MANIFEST
                 manifest = scan._read_json(manifest_path)
-                if manifest.get("verified_success") is not True:
-                    continue
-                for field in VERDICT_FIELDS:
-                    manifest.pop(field, None)
-                _write_json(manifest_path, manifest)
+                if manifest.get("verified_success") is True:
+                    _clear_verdict_fields(manifest_path, manifest)
 
     @staticmethod
     def _delete_logical_try(battery: Path, prompt_id: str, attempt: int) -> None:
@@ -1150,29 +1082,14 @@ class WatchState:
         by: str = "",
         battery_id: str | None = None,
     ) -> dict[str, Any]:
-        """Records a human's pass / fail / invalid / already_successful for one finished attempt.
+        """Records a human verdict on one finished attempt, stamped beside `success`, never over it.
 
-        The verdict is stamped BESIDE `success`, never over it: a measured pass with a verified fail
-        is exactly the discrepancy worth collecting, and overwriting `success` would erase it.
-
-        "invalid" writes no `verified_success` at all - the reviewer is saying the run never tested
-        anything, usually because the harness broke, so neither True nor False is an honest answer
-        and a reader with no notion of the third verdict must fall back to "unreviewed" rather than
-        to "failed". It also cancels no siblings: an excluded try leaves the prompt undecided, and
-        the remaining tries are exactly what still has to run.
-
-        "already_successful" is excluded on the same terms and writes no boolean either, but says
-        something different: the try was halted because another try of this prompt had already been
-        judged a success. It is not evidence about the agent in either direction, and it cancels
-        nothing - whatever cancelling was warranted was done by the pass that caused the halt.
-
-        The eligibility check is repeated here rather than trusted from the UI: the button is only
-        rendered on a finished card, but the route is reachable without the page.
+        Excluded verdicts (invalid, already_successful) write no `verified_success` and cancel no
+        siblings; only a pass does. Eligibility is re-checked here, not trusted from the UI.
         """
-        battery = self.battery_for(battery_id)
+        battery, run_dir = self.run_dir_for(key, battery_id)
         if battery is None:
             return {"ok": False, "error": "no battery"}
-        run_dir = _safe_run_dir(battery, key)
         if run_dir is None:
             return {"ok": False, "error": "unknown attempt"}
 
@@ -1197,9 +1114,7 @@ class WatchState:
                 "verified_note": note,
             }
             if verdict in scan.EXCLUDED_VERDICTS:
-                # A pass or fail being downgraded to an excluded verdict has to lose its old boolean
-                # outright, or every reader of the compatibility field would keep reporting the
-                # stale verdict.
+                # Drop any stale boolean from an earlier pass/fail.
                 stale = scan._read_json(manifest_path)
                 stale.pop("verified_success", None)
                 stale.update(fields)
@@ -1211,8 +1126,7 @@ class WatchState:
                 cancellations = self._cancel_successful_siblings(
                     battery, key, manifest, fields
                 )
-            # The cached snapshot predates the stamp, so the next poll would show the old badge for
-            # up to `min_interval`. Drop it and let the reviewer see their own click land.
+            # So the reviewer's next poll shows the new badge.
             self._invalidate_locked()
 
         disagrees = (verdict not in scan.EXCLUDED_VERDICTS
@@ -1274,44 +1188,11 @@ class WatchState:
                 and retry_key != winner_key
             ):
                 if job.get("state") == "waiting":
-                    from sari_bench.runner import Prompt, materialize_already_successful
-
                     source = job.get("source_manifest") or {}
-                    materialize_already_successful(
-                        output_dir=battery,
-                        prompt=Prompt(
-                            id=prompt_id,
-                            prompt=str(source.get("prompt") or logical.get("prompt") or ""),
-                            family=str(source.get("family") or logical.get("family") or ""),
-                            looking_for=str(
-                                source.get("looking_for") or logical.get("looking_for") or ""
-                            ),
-                        ),
-                        attempt=int(logical.get("attempt") or source.get("attempt") or 0),
-                        winner=cancellation,
-                        arm=str(source.get("arm") or battery_manifest.get("arm") or "graph"),
-                        context_policy=str(
-                            source.get("context_policy")
-                            or battery_manifest.get("context_policy")
-                            or "baseline"
-                        ),
-                        adaptive_leg_replanning=bool(
-                            source.get("adaptive_leg_replanning")
-                            if source.get("adaptive_leg_replanning") is not None
-                            else battery_manifest.get("adaptive_leg_replanning", False)
-                        ),
-                        api_max_attempts=int(
-                            source.get("api_max_attempts")
-                            or battery_manifest.get("api_max_attempts")
-                            or 10
-                        ),
-                        max_api_requeues=int(
-                            source.get("max_api_requeues")
-                            if source.get("max_api_requeues") is not None
-                            else battery_manifest.get("max_api_requeues") or 0
-                        ),
-                        ocr_url=str(source.get("ocr_url") or battery_manifest.get("ocr_url") or ""),
-                        requeues=int(source.get("requeues") or 0),
+                    _materialize_cancelled(
+                        battery, battery_manifest, prompt_id,
+                        int(logical.get("attempt") or source.get("attempt") or 0),
+                        source, cancellation, fallback=logical,
                     )
                 self._retry_jobs.pop(retry_key, None)
 
@@ -1332,43 +1213,8 @@ class WatchState:
                 # The battery runner has published this retry but has not replaced the failed
                 # execution yet. Materialize the cancellation now; its acquire-side winner poll
                 # cancels the coordinator request and reaches the same transaction idempotently.
-                from sari_bench.runner import Prompt, materialize_already_successful
-
-                materialize_already_successful(
-                    output_dir=battery,
-                    prompt=Prompt(
-                        id=prompt_id,
-                        prompt=str(sibling.get("prompt") or ""),
-                        family=str(sibling.get("family") or ""),
-                        looking_for=str(sibling.get("looking_for") or ""),
-                    ),
-                    attempt=sibling_attempt,
-                    winner=cancellation,
-                    arm=str(sibling.get("arm") or battery_manifest.get("arm") or "graph"),
-                    context_policy=str(
-                        sibling.get("context_policy")
-                        or battery_manifest.get("context_policy")
-                        or "baseline"
-                    ),
-                    adaptive_leg_replanning=bool(
-                        sibling.get("adaptive_leg_replanning")
-                        if sibling.get("adaptive_leg_replanning") is not None
-                        else battery_manifest.get("adaptive_leg_replanning", False)
-                    ),
-                    api_max_attempts=int(
-                        sibling.get("api_max_attempts")
-                        or battery_manifest.get("api_max_attempts")
-                        or 10
-                    ),
-                    max_api_requeues=int(
-                        sibling.get("max_api_requeues")
-                        if sibling.get("max_api_requeues") is not None
-                        else battery_manifest.get("max_api_requeues") or 0
-                    ),
-                    ocr_url=str(
-                        sibling.get("ocr_url") or battery_manifest.get("ocr_url") or ""
-                    ),
-                    requeues=int(sibling.get("requeues") or 0),
+                _materialize_cancelled(
+                    battery, battery_manifest, prompt_id, sibling_attempt, sibling, cancellation
                 )
                 known_cancellable += 1
                 continue
@@ -1408,10 +1254,9 @@ class WatchState:
     def clear_verdict(self, key: str, *, battery_id: str | None = None) -> dict[str, Any]:
         """Un-reviews an attempt, for a misclick. Leaves no trace, so the row reads as never looked at
         rather than as a verdict of False."""
-        battery = self.battery_for(battery_id)
+        battery, run_dir = self.run_dir_for(key, battery_id)
         if battery is None:
             return {"ok": False, "error": "no battery"}
-        run_dir = _safe_run_dir(battery, key)
         if run_dir is None:
             return {"ok": False, "error": "unknown attempt"}
 
@@ -1420,9 +1265,7 @@ class WatchState:
             manifest = scan._read_json(manifest_path)
             if not scan.verdict_of(manifest):
                 return {"ok": True, "cleared": False}
-            for field in VERDICT_FIELDS:
-                manifest.pop(field, None)
-            _write_json(manifest_path, manifest)
+            _clear_verdict_fields(manifest_path, manifest)
             self._invalidate_locked()
         _log(f"verdict cleared on {key}")
         return {"ok": True, "cleared": True}
@@ -1431,10 +1274,7 @@ class WatchState:
         """Returns the auto-rendered clip, queueing a missing older one as a fallback."""
         if self.replay is None:
             return replay_mod.UNAVAILABLE, None
-        battery = self.battery_for(battery_id)
-        if battery is None:
-            return replay_mod.UNAVAILABLE, None
-        run_dir = _safe_run_dir(battery, key)
+        _, run_dir = self.run_dir_for(key, battery_id)
         if run_dir is None:
             return replay_mod.UNAVAILABLE, None
         manifest = scan._read_json(run_dir / scan.ATTEMPT_MANIFEST)
@@ -1464,22 +1304,12 @@ class WatchState:
         full: bool = False,
         battery_id: str | None = None,
     ) -> dict[str, Any]:
-        """Reads agent.log as a full log, a tail, or the delta since a byte offset.
+        """Reads agent.log as a full log, a tail, or the delta since byte offset `since`.
 
-        The dashboard keeps one terminal per attempt open at all times, so re-sending the same tail
-        every two seconds would be both wasteful and impossible to append to without duplicating
-        lines. With `since` it gets exactly the bytes written after its cursor, which lets it append
-        and so keep the reader's scroll position untouched.
-
-        A trailing line the writer has not terminated yet comes back as `partial` rather than in
-        `lines`, and does not advance the cursor: the reader sees it immediately, and it arrives once
-        more - whole this time - when its newline lands.
+        An unterminated trailing line comes back as `partial` and does not advance the cursor.
         """
         empty = {"lines": [], "offset": 0, "size": 0, "partial": "", "reset": False}
-        battery = self.battery_for(battery_id)
-        if battery is None:
-            return empty
-        run_dir = _safe_run_dir(battery, key)
+        _, run_dir = self.run_dir_for(key, battery_id)
         if run_dir is None:
             return empty
         path = run_dir / "agent.log"
@@ -1489,8 +1319,7 @@ class WatchState:
             with path.open("rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
-                # A cursor past the end means the file was truncated or rotated under us; the only
-                # honest answer is to start over and tell the client to drop what it has.
+                # A cursor past the end means truncation/rotation: start over and tell the client.
                 reset = since is not None and since > size
                 bootstrap = since is None or reset
                 start = (
@@ -1526,13 +1355,24 @@ class WatchState:
         }
 
     def frame_path(self, key: str, *, battery_id: str | None = None) -> Path | None:
+        _, run_dir = self.run_dir_for(key, battery_id)
+        return None if run_dir is None else scan._latest_frame(run_dir)
+
+    def run_dir_for(self, key: str, battery_id: str | None) -> tuple[Path | None, Path | None]:
+        """(battery, run dir) for one request's attempt key; either may be None."""
         battery = self.battery_for(battery_id)
-        if battery is None:
-            return None
-        run_dir = _safe_run_dir(battery, key)
-        if run_dir is None:
-            return None
-        return scan._latest_frame(run_dir)
+        return battery, (_safe_run_dir(battery, key) if battery is not None else None)
+
+
+def _coordinator_call(url: str, call: Callable[[Any], Any]) -> Any:
+    """Runs one `CoordinatorClient` coroutine to completion, bounded by the coordinator timeout."""
+    from sari_bench.client import CoordinatorClient
+
+    async def run() -> Any:
+        async with CoordinatorClient(url) as client:
+            return await call(client)
+
+    return asyncio.run(asyncio.wait_for(run(), timeout=COORDINATOR_TIMEOUT_SECONDS))
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1546,13 +1386,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _last_sign_of_life(run_dir: Path) -> float:
-    """When an abandoned attempt was last doing something, as an epoch time.
-
-    Its runner never wrote an end time, and "now" is not one: an orphan noticed a week later did not
-    run for a week. The newest thing in its run dir - the last step record, the last frame, the kill
-    stamp on its manifest - is the closest honest answer, so the runtime this produces is a lower
-    bound on the truth rather than an invented upper one.
-    """
+    """Newest mtime anywhere in the run dir: a lower-bound end time for an abandoned attempt."""
     newest = 0.0
     for path in [run_dir, *run_dir.rglob("*")]:
         try:
@@ -1560,6 +1394,59 @@ def _last_sign_of_life(run_dir: Path) -> float:
         except OSError:
             continue
     return newest or time.time()
+
+
+def _try_number(manifest: dict[str, Any], run_dir: Path) -> int | None:
+    """The manifest's try number, else the dir's: `try07` and `try07.requeue00` are both 7."""
+    try:
+        return int(manifest.get("attempt") or run_dir.name[3:].split(".", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _materialize_cancelled(
+    battery: Path,
+    plan: dict[str, Any],
+    prompt_id: str,
+    attempt: int,
+    source: dict[str, Any],
+    winner: dict[str, Any],
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> None:
+    """Records one unstarted try as already_successful, configured from `source` then the plan."""
+    from sari_bench.runner import Prompt, materialize_already_successful
+
+    fallback = fallback or {}
+
+    def text(name: str) -> str:
+        return str(source.get(name) or fallback.get(name) or "")
+
+    def given(name: str, default: Any) -> Any:
+        return source.get(name) if source.get(name) is not None else default
+
+    materialize_already_successful(
+        output_dir=battery,
+        prompt=Prompt(id=prompt_id, prompt=text("prompt"), family=text("family"),
+                      looking_for=text("looking_for")),
+        attempt=attempt,
+        winner=winner,
+        arm=str(source.get("arm") or plan.get("arm") or "graph"),
+        context_policy=str(source.get("context_policy") or plan.get("context_policy") or "baseline"),
+        adaptive_leg_replanning=bool(
+            given("adaptive_leg_replanning", plan.get("adaptive_leg_replanning", False))
+        ),
+        api_max_attempts=int(source.get("api_max_attempts") or plan.get("api_max_attempts") or 10),
+        max_api_requeues=int(given("max_api_requeues", plan.get("max_api_requeues") or 0)),
+        ocr_url=str(source.get("ocr_url") or plan.get("ocr_url") or ""),
+        requeues=int(source.get("requeues") or 0),
+    )
+
+
+def _clear_verdict_fields(path: Path, manifest: dict[str, Any]) -> None:
+    for field in VERDICT_FIELDS:
+        manifest.pop(field, None)
+    _write_json(path, manifest)
 
 
 def _stamp(path: Path, fields: dict[str, Any]) -> None:
@@ -1584,10 +1471,7 @@ def _int_param(
 
 
 def _safe_run_dir(battery: Path, key: str) -> Path | None:
-    """Resolves an attempt key to a run dir, refusing anything that escapes the battery dir.
-
-    The key arrives from an HTTP request, so `../../` must not reach the filesystem.
-    """
+    """Resolves an HTTP-supplied attempt key to a run dir, refusing anything outside the battery."""
     candidate = (battery / key).resolve()
     try:
         candidate.relative_to(battery.resolve())
@@ -1668,41 +1552,70 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            # Browsers routinely abandon an in-flight video response when seeking or replacing the
-            # source. There is no response left to recover and socketserver would otherwise print a
-            # misleading request-handler traceback.
-            pass
+            pass  # browsers abandon video responses when seeking
 
     def _send(
-        self, code: int, body: bytes, content_type: str, extra: dict[str, str] | None = None
+        self,
+        code: int,
+        body: bytes,
+        content_type: str,
+        extra: dict[str, str] | None = None,
+        *,
+        cache: str = "no-store",
+        compress: bool = False,
     ) -> None:
+        headers = dict(extra or {})
+        if compress:
+            headers["Vary"] = "Accept-Encoding"
+            if len(body) >= GZIP_MIN_BYTES and "gzip" in self.headers.get("Accept-Encoding", ""):
+                body = gzip.compress(body, compresslevel=5)
+                headers["Content-Encoding"] = "gzip"
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        for name, value in (extra or {}).items():
+        self.send_header("Cache-Control", cache)
+        for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
         self._write_body(body)
 
     def _json(self, payload: Any, code: int = 200) -> None:
-        self._send(code, json.dumps(payload, default=str).encode("utf-8"), "application/json")
+        self._send(code, json.dumps(payload, default=str).encode("utf-8"), "application/json",
+                   compress=True)
+
+    def _result(self, result: dict[str, Any], ok_code: int = 200) -> None:
+        self._json(result, code=ok_code if result.get("ok") else 400)
+
+    def _send_validated(
+        self,
+        path: Path,
+        content_type: str,
+        *,
+        missing: bytes = b"not found",
+        cache: str = "no-store",
+        compress: bool = False,
+    ) -> None:
+        """Serves a small file under an ETag, answering a matching If-None-Match with an empty 304."""
+        try:
+            stat = path.stat()
+            etag = f'"{path.name}-{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+            if self.headers.get("If-None-Match") == etag:
+                self._send(304, b"", content_type, {"ETag": etag}, cache=cache)
+                return
+            body = path.read_bytes()
+        except OSError:
+            self._send(404, missing, "text/plain")
+            return
+        self._send(200, body, content_type, {"ETag": etag}, cache=cache, compress=compress)
 
     def _send_file(self, path: Path, content_type: str) -> None:
-        """Serves a file, honouring a single byte range.
-
-        `<video>` needs this. Without `Accept-Ranges` a browser treats the clip as unseekable and the
-        reviewer can only watch it start to finish - which defeats the point of attaching it to a
-        verdict. The clips are capped at a few megabytes, so the whole file is still read at once and
-        only the slice and the headers differ.
-        """
+        """Serves a file, honouring a single byte range, which `<video>` needs to seek."""
         try:
-            body = path.read_bytes()
+            total = path.stat().st_size
         except OSError as error:
             self._send(404, f"unreadable: {error!r}".encode("utf-8"), "text/plain")
             return
 
-        total = len(body)
         start, end = 0, total - 1
         partial = False
         header = self.headers.get("Range", "")
@@ -1726,16 +1639,22 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        chunk = body[start:end + 1] if partial else body
+        if not partial:
+            start, end = 0, total - 1
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(max(0, end + 1 - start))
+        except OSError as error:
+            self._send(404, f"unreadable: {error!r}".encode("utf-8"), "text/plain")
+            return
         self.send_response(206 if partial else 200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(chunk)))
         self.send_header("Accept-Ranges", "bytes")
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
-        # Not `no-store` like the JSON routes: a browser that may not keep the clip re-fetches on
-        # every seek, and some refuse to seek at all. A rendered clip only changes if it is rendered
-        # again, so a short window is safe and makes scrubbing usable.
+        # Cacheable briefly: browsers that cannot keep the clip refuse to seek or re-fetch per seek.
         self.send_header("Cache-Control", "private, max-age=60")
         self.end_headers()
         self._write_body(chunk)
@@ -1758,20 +1677,12 @@ class Handler(BaseHTTPRequestHandler):
         return parse_qs(query).get("battery", [""])[0]
 
     def _report_csv(self, battery_id: str = "", grain: str = "attempts") -> None:
-        """The same CSVs `python -m sari_bench report` writes, served as a download.
-
-        `grain` picks which one: "attempts" (default) or "roles", the long-format per-reasoner token
-        spend. `report.collect` is the one implementation of this flattening and it does no output
-        I/O, so the buttons and the CLI cannot drift. It re-scans every run dir, which costs a second
-        or two on a large battery - fine for a click, which is why this is not on the 2s poll path.
-        """
+        """The `python -m sari_bench report` CSV for `grain` "attempts" (default) or "roles"."""
         battery = self.state.battery_for(battery_id)
         if battery is None:
             self._send(404, b"no battery found", "text/plain")
             return
 
-        # Imported here rather than at module scope: the watcher starts without paying for it, and
-        # report.py only pulls in scan, which this module already has.
         import csv
         import io
 
@@ -1799,8 +1710,9 @@ class Handler(BaseHTTPRequestHandler):
         battery_id = self._battery_param(parsed.query)
 
         if path in {"/", "/index.html"}:
-            page = STATIC_DIR / "dashboard.html"
-            self._send(200, page.read_bytes(), "text/html; charset=utf-8")
+            # Revalidated rather than stored, so an edited page is picked up on the next load.
+            self._send_validated(STATIC_DIR / "dashboard.html", "text/html; charset=utf-8",
+                                 cache="no-cache", compress=True)
             return
 
         if path == "/api/state":
@@ -1820,26 +1732,15 @@ class Handler(BaseHTTPRequestHandler):
             key, _, action = rest.rpartition("/")
             if action == "frame.png":
                 frame = self.state.frame_path(key, battery_id=battery_id)
-                if frame is None or not frame.exists():
+                if frame is None:
                     self._send(404, b"no frame yet", "text/plain")
                     return
-                try:
-                    stat = frame.stat()
-                except OSError:
-                    self._send(404, b"no frame yet", "text/plain")
-                    return
-                content_type = (
-                    "image/jpeg"
-                    if frame.suffix.lower() in {".jpg", ".jpeg"}
-                    else "image/png"
+                # Polled at 4 FPS; the ETag turns an unchanged frame into an empty 304.
+                self._send_validated(
+                    frame,
+                    "image/jpeg" if frame.suffix.lower() in {".jpg", ".jpeg"} else "image/png",
+                    missing=b"no frame yet",
                 )
-                # The live dashboard asks four times per second. A conditional response keeps that
-                # cadence cheap whenever capture is late or a recent agent step suppressed it.
-                etag = f'"{frame.name}-{stat.st_mtime_ns:x}-{stat.st_size:x}"'
-                if self.headers.get("If-None-Match") == etag:
-                    self._send(304, b"", content_type, {"ETag": etag})
-                    return
-                self._send(200, frame.read_bytes(), content_type, {"ETag": etag})
                 return
             if action == "log":
                 query = parse_qs(parsed.query)
@@ -1864,13 +1765,13 @@ class Handler(BaseHTTPRequestHandler):
                                code=409)
                 return
             if action == "replay.vtt":
-                battery = self.state.battery_for(battery_id)
-                run_dir = _safe_run_dir(battery, key) if battery is not None else None
+                _, run_dir = self.state.run_dir_for(key, battery_id)
                 subtitles = run_dir / "replay.vtt" if run_dir is not None else None
                 if subtitles is None or not subtitles.is_file():
                     self._send(404, b"no subtitles", "text/plain")
                 else:
-                    self._send(200, subtitles.read_bytes(), "text/vtt; charset=utf-8")
+                    self._send_validated(subtitles, "text/vtt; charset=utf-8",
+                                         missing=b"no subtitles")
                 return
 
         self._send(404, b"not found", "text/plain")
@@ -1884,7 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
             result = self.state.rename_battery(
                 str(body.get("battery") or battery_id), str(body.get("name") or "")
             )
-            self._json(result, code=200 if result.get("ok") else 400)
+            self._result(result)
             return
         if path == "/api/fleet/cap":
             body = self._body()
@@ -1892,7 +1793,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "body needs 'limit'"}, code=400)
                 return
             result = self.state.set_fleet_cap(body.get("limit"))
-            self._json(result, code=200 if result.get("ok") else 400)
+            self._result(result)
             return
         if path in {"/api/fleet/quarantine", "/api/fleet/unquarantine"}:
             body = self._body()
@@ -1901,7 +1802,7 @@ class Handler(BaseHTTPRequestHandler):
                 clear=path.endswith("/unquarantine"),
                 reason=str(body.get("reason") or "web_ui"),
             )
-            self._json(result, code=200 if result.get("ok") else 400)
+            self._result(result)
             return
         if path.startswith("/api/attempt/"):
             rest = path[len("/api/attempt/"):]
@@ -1909,7 +1810,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.state.clear_verdict(
                     rest[:-len("/verdict/clear")], battery_id=battery_id
                 )
-                self._json(result, code=200 if result.get("ok") else 400)
+                self._result(result)
                 return
             if rest.endswith("/verdict"):
                 body = self._body()
@@ -1930,15 +1831,15 @@ class Handler(BaseHTTPRequestHandler):
                     by=str(body.get("by") or ""),
                     battery_id=battery_id,
                 )
-                self._json(result, code=200 if result.get("ok") else 400)
+                self._result(result)
                 return
             if rest.endswith("/kill"):
                 result = self.state.kill(rest[:-len("/kill")], battery_id=battery_id)
-                self._json(result, code=200 if result.get("ok") else 400)
+                self._result(result)
                 return
             if rest.endswith("/retry"):
                 result = self.state.retry(rest[:-len("/retry")], battery_id=battery_id)
-                self._json(result, code=202 if result.get("ok") else 400)
+                self._result(result, ok_code=202)
                 return
         self._send(404, b"not found", "text/plain")
 

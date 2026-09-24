@@ -1062,6 +1062,14 @@ function termStick(term) {
   });
 }
 
+// Forget the cursor as well, so the next pump bootstraps from scratch.
+function termReset(term) {
+  termClear(term);
+  term.cursor = null;
+  term.size = null;
+  term.done = false;
+}
+
 function termClear(term) {
   term.el.textContent = "";
   term.partial = document.createTextNode("");
@@ -1244,10 +1252,7 @@ function patchCard(entry, a) {
     refs.img.removeAttribute("src");
     refs.img.hidden = true;
     refs.noFrame.hidden = false;
-    termClear(entry.term);
-    entry.term.cursor = null;
-    entry.term.size = null;
-    entry.term.done = false;
+    termReset(entry.term);
   }
 
   const cls = classOf(a);
@@ -1307,6 +1312,18 @@ function patchCard(entry, a) {
 // key: no request at all while the frame is unchanged, and when it does change the new PNG is fetched
 // and decoded off-screen before it is swapped in. The <img> element itself is never replaced, so
 // there is no moment where the browser has nothing to paint - which is what used to flash black.
+// One frame as a blob URL: null on a 304 (unchanged under `etag`) or any failure.
+async function fetchFrame(key, etag) {
+  try {
+    const headers = etag ? { "If-None-Match": etag } : {};
+    const res = await fetch(api(key, "frame.png"), { headers, cache: "no-store" });
+    if (!res.ok) return null;
+    return { url: URL.createObjectURL(await res.blob()), etag: res.headers.get("ETag") };
+  } catch {
+    return null;
+  }
+}
+
 async function updateFrame(entry, a, force = false) {
   if (!a.frame) {
     entry.refs.img.hidden = true;
@@ -1320,21 +1337,12 @@ async function updateFrame(entry, a, force = false) {
   const want = a.frame;
   const wantRunId = entry.runId;
 
-  let url, nextEtag;
-  try {
-    const headers = entry.frameEtag ? { "If-None-Match": entry.frameEtag } : {};
-    const res = await fetch(api(entry.key, "frame.png"), { headers, cache: "no-store" });
-    if (res.status === 304) {
-      entry.frameBusy = false;
-      return;
-    }
-    if (!res.ok) throw new Error(res.status);
-    nextEtag = res.headers.get("ETag");
-    url = URL.createObjectURL(await res.blob());
-  } catch {
+  const fetched = await fetchFrame(entry.key, entry.frameEtag);
+  if (!fetched) {
     entry.frameBusy = false;
     return;
   }
+  const { url, etag: nextEtag } = fetched;
   // A slow fetch may land after this logical try was replaced, or after the card was removed.
   if (entry.runId !== wantRunId || !entry.root.isConnected) {
     URL.revokeObjectURL(url);
@@ -1732,7 +1740,7 @@ function renderOverview(state) {
 
   const pct = prompts.length ? Math.round((solved / prompts.length) * 100) : 0;
   const rel = reliabilityN ? Math.round((reliabilitySum / reliabilityN) * 100) : 0;
-  const live = (state.discovered || []).some(d => d.id === state.battery_id && d.live);
+  const live = batteryLive();
   const elapsed = batteryElapsed(state, live);
 
   // The battery's own numbers. Each row is a label, a value, and the explanation that used to be
@@ -1862,12 +1870,9 @@ async function frameURL(a) {
   if (!a || !a.frame) return null;
   const cached = tipCache.get(a.frame);
   if (cached) return cached;
-  let url;
-  try {
-    const res = await fetch(api(a.key, "frame.png"));
-    if (!res.ok) return null;
-    url = URL.createObjectURL(await res.blob());
-  } catch { return null; }
+  const fetched = await fetchFrame(a.key, null);
+  if (!fetched) return null;
+  const url = fetched.url;
   tipCache.set(a.frame, url);
   while (tipCache.size > TIP_CACHE_MAX) {
     const oldest = tipCache.keys().next().value;
@@ -2788,8 +2793,7 @@ function renderFleet() {
   setText(document.getElementById("fleet-when"),
     data.error ? "coordinator unreachable" : fleetData ? "live" : "");
 
-  const cap = data.capacity_limit === null || data.capacity_limit === undefined
-    ? "all" : String(data.capacity_limit);
+  const cap = capText(data);
   const quarantined = num(data.quarantined_sandboxes);
   const waiting = num(data.waiting);
   setText(document.getElementById("fleet-stats"), [
@@ -2867,10 +2871,7 @@ function openModal(key) {
   const note = document.getElementById("modal-note");
   note.style.display = "none";
   note.textContent = "";
-  termClear(modalTerm);
-  modalTerm.cursor = null;
-  modalTerm.size = null;
-  modalTerm.done = false;
+  termReset(modalTerm);
   document.getElementById("modal").classList.add("open");
   syncModal();
   termPump(modalTerm, key, MODAL_LOG_LINES, null, true);
@@ -2917,18 +2918,12 @@ async function updateModalStill(a, force = false) {
   modalShot.busy = true;
   const key = a.key;
 
-  let url, etag;
-  try {
-    const headers = modalShot.etag ? { "If-None-Match": modalShot.etag } : {};
-    const res = await fetch(api(key, "frame.png"), { headers, cache: "no-store" });
-    if (res.status === 304) { modalShot.busy = false; return; }
-    if (!res.ok) throw new Error(res.status);
-    etag = res.headers.get("ETag");
-    url = URL.createObjectURL(await res.blob());
-  } catch {
+  const fetched = await fetchFrame(key, modalShot.etag);
+  if (!fetched) {
     modalShot.busy = false;
     return;
   }
+  const { url, etag } = fetched;
   // The overlay may have been closed, moved to another attempt, or given a clip mid-fetch.
   if (modalKey !== key || modalReplayRequested || video.getAttribute("src")) {
     URL.revokeObjectURL(url);

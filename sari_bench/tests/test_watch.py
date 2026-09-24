@@ -481,7 +481,7 @@ def test_scan_attempt_accepts_a_symlinked_battery_root(tmp_path):
 def test_pending_retry_scan_contract_and_legacy_default() -> None:
     with tempfile.TemporaryDirectory() as temp:
         battery = Path(temp) / "b"
-        legacy = make_attempt(
+        make_attempt(
             battery, "legacy", 1, steps=healthy_steps(2), state="requeued", outcome="requeued"
         )
         pending = make_attempt(
@@ -2189,3 +2189,70 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_quiescent_finished_attempt_view_is_reused_until_its_dir_changes() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        run_dir = make_attempt(battery, "p", 1, steps=healthy_steps(3), state="finished",
+                               outcome="completed", success=True)
+        old = time.time() - scan.QUIET_SECONDS - 10
+        for path in [run_dir, *run_dir.rglob("*")]:
+            os.utime(path, (old, old))
+
+        first = scan.scan_attempt(run_dir, battery, time.time())
+        reads: list[Path] = []
+        original = scan.read_step_records
+        scan.read_step_records = lambda path: reads.append(path) or original(path)  # type: ignore[assignment]
+        try:
+            later = scan.scan_attempt(run_dir, battery, time.time() + 100)
+            assert not reads, "a quiescent finished attempt was re-parsed"
+            assert later.step == first.step and later.frame == first.frame
+            assert later.seconds_since_step == round(first.seconds_since_step + 100, 1)
+
+            _stamp(run_dir, {"verified_verdict": "fail"})
+            changed = scan.scan_attempt(run_dir, battery, time.time())
+            assert reads and changed.verified_verdict == "fail"
+        finally:
+            scan.read_step_records = original  # type: ignore[assignment]
+    print("ok  finished attempt views are cached by run-dir signature")
+
+
+def test_dashboard_revalidates_and_json_gzips() -> None:
+    import gzip
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from threading import Thread
+
+    from sari_bench.watch.server import Handler
+
+    with tempfile.TemporaryDirectory() as temp:
+        battery = Path(temp) / "b"
+        make_attempt(battery, "p", 1, steps=healthy_steps(2), pid=os.getpid())
+        Handler.state = WatchState(bench_root=Path(temp), fixed_battery=battery,
+                                   discord=Discord(enabled=False), min_interval=0.0)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            page = urllib.request.urlopen(f"{base}/", timeout=5)
+            etag = page.headers["ETag"]
+            assert page.headers["Cache-Control"] == "no-cache" and etag
+            try:
+                urllib.request.urlopen(urllib.request.Request(
+                    f"{base}/", headers={"If-None-Match": etag}), timeout=5)
+            except urllib.error.HTTPError as unchanged:
+                assert unchanged.code == 304
+            else:
+                raise AssertionError("an unchanged dashboard was transferred again")
+
+            zipped = urllib.request.urlopen(urllib.request.Request(
+                f"{base}/api/state", headers={"Accept-Encoding": "gzip"}), timeout=5)
+            assert zipped.headers["Content-Encoding"] == "gzip"
+            assert json.loads(gzip.decompress(zipped.read()))["battery_id"] == "b"
+
+        finally:
+            server.shutdown()
+            server.server_close()
+    print("ok  the page revalidates and JSON is gzipped on request")
