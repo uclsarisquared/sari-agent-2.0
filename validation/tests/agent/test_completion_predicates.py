@@ -1126,3 +1126,12 @@ def _run():
 
 if __name__ == "__main__":
     sys.exit(0 if _run() else 1)
+
+
+def test_compare_named_choice_is_first_mention_on_distinct_tokens():
+    targets = ["Indomie Goreng", "Indomie Soto"]
+    assert sc._named_choice(targets, "Soto is cheaper than Goreng") == "Indomie Soto"
+    assert sc._named_choice(targets, "The Indomie is fine") is None
+    sub = {"type": "compare", "targets": targets}
+    _ok, reason = completion_predicate(sub, _state(), final_text="Soto beats Goreng")
+    assert "'Indomie Soto'" in reason

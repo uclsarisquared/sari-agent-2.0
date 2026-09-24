@@ -120,6 +120,15 @@ def _salvage_actions_times(blob: str):
     return None
 
 
+def _valid_times(parsed):
+    """Reject non-integer durations so they count as a parse error, not a dispatch crash."""
+    try:
+        [int(t) for t in parsed.get("times") or []]
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def parse_actor_response(text: str, pattern) -> dict:
     """Try Python literals, JSON, then actions/times salvage; return None on failure."""
     m = re.search(pattern, text or "")
@@ -131,7 +140,7 @@ def parse_actor_response(text: str, pattern) -> dict:
             d = parse(blob)
         except Exception:  # noqa: BLE001 - any parse failure just falls through to the next tier
             continue
-        if isinstance(d, dict) and "actions" in d:
+        if isinstance(d, dict) and "actions" in d and _valid_times(d):
             return d
     salvaged = _salvage_actions_times(blob)
     if salvaged:

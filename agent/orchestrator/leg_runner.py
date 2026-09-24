@@ -17,6 +17,7 @@ from orchestrator.leg_completion import (
     deterministic_guard_details,
 )
 from orchestrator.leg_runtime import (
+    DERIVED_STATE_KEYS,
     GripTracker,
     InspectionEvidence,
     build_augmented_task,
@@ -453,9 +454,13 @@ def run_leg(agent, leg, sm, caps, log_path=None, context="", future_legs=None,
                 if not cleanup.get("restored"):
                     agent._hand_pose = None
                 if result is not None and cleanup.get("restored"):
+                    # Refresh only simulator fields; keep the leg's derived evidence.
                     refreshed = _fresh_agent_state()
                     prior = result.get("final_state") or {}
-                    prior.update(refreshed)
+                    prior.update({
+                        key: value for key, value in refreshed.items()
+                        if key not in DERIVED_STATE_KEYS
+                    })
                     result["final_state"] = prior
             except Exception as cleanup_error:  # noqa: BLE001 - never mask the leg result/error
                 # Reset pose tracking if restoration fails, without masking the leg outcome.

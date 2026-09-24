@@ -255,3 +255,49 @@ def test_orchestrate_preserves_run_error_and_always_closes(monkeypatch, tmp_path
     assert closed == [True]
     assert isinstance(state.error, RuntimeError)
     assert state.success is False
+
+
+def _adaptive_state(tmp_path, monkeypatch, legs, replanner=lambda *_args: "not json"):
+    state = _state(tmp_path, retries=0)
+    state.config = replace(state.config, adaptive_leg_replanning=True)
+    monkeypatch.setattr(plan_controller_module, "plan_legs", lambda _sm, _c, l: (l, 0))
+    controller = PlanController(legs, object(), object(), replanner)
+    state.plan_controller = controller
+    state.legs = controller.pending
+    state.response_memory["experimental"] = {}
+    return state, controller
+
+
+def test_adaptive_finalize_journals_full_plan_after_success(monkeypatch, tmp_path):
+    state, controller = _adaptive_state(tmp_path, monkeypatch, _two_legs())
+    controller.complete(controller.pending[0])
+    controller.complete(controller.pending[1])
+    controller.pending.clear()
+    state.legs = controller.pending
+    monkeypatch.setattr(orchestration, "synthesize_response", lambda *_a: ("done", "model"))
+
+    orchestration._finalize_response(state)
+
+    planned = state.response_memory["planned_subtasks"]
+    assert [leg["text"] for leg in planned] == ["Pick up the chips", "Check out"]
+    assert state.response_memory["final"]["incomplete_subtasks"] == []
+
+
+def test_adaptive_continue_past_refusal_cap_carries_findings(monkeypatch, tmp_path):
+    state, _controller = _adaptive_state(tmp_path, monkeypatch, _two_legs())
+    carried = []
+    monkeypatch.setattr(
+        orchestration, "_carry_findings_forward",
+        lambda _s, leg, *_a: carried.append(leg["text"]),
+    )
+
+    def run(_state, leg, _index, **_kwargs):
+        forced = leg["type"] == "pickup"
+        return _metrics(success=not forced,
+                        reason="halt_forced" if forced else "halt_granted"), 1
+
+    monkeypatch.setattr(orchestration, "_run_leg_with_retries", run)
+    orchestration._execute_revisable_plan(state)
+
+    assert carried == ["Pick up the chips"]
+    assert state.unverified_legs == [1]

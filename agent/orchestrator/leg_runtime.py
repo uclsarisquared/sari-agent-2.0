@@ -12,6 +12,22 @@ HANDS = ("left", "right")
 MODEL_STATE_DROP = {"visited_checkpoints"}
 LEG_INSPECTION_PROMPT = load_prompt("orchestrator/leg_inspection")
 
+# Code-derived channels; everything else in the state is read from the simulator.
+_DERIVED_DEFAULTS = {
+    "last_grab_failed": False,
+    "last_action_blocked": False,
+    "last_center": None,
+    "last_checkout": None,
+    "last_inspection": None,
+    "last_halt_refused": None,
+    "nearest_checkpoint": None,
+    "position_recovery": None,
+    "goal_check": None,
+    "gripped_name": None,
+    "mode": "perception",
+}
+DERIVED_STATE_KEYS = frozenset(_DERIVED_DEFAULTS)
+
 
 def fresh_agent_state() -> dict:
     """Read simulator state and initialize derived per-leg channels."""
@@ -29,18 +45,8 @@ def fresh_agent_state() -> dict:
         "leftGrippedState": False,
         "rightHoveredObject": "None",
         "rightGrippedState": False,
-        "last_grab_failed": False,
-        "last_action_blocked": False,
-        "last_center": None,
-        "last_checkout": None,
-        "last_inspection": None,
-        "last_halt_refused": None,
-        "nearest_checkpoint": None,
-        "position_recovery": None,
         "out_of_bounds_recovery_count": None,
-        "goal_check": None,
-        "gripped_name": None,
-        "mode": "perception",
+        **_DERIVED_DEFAULTS,
     }
     state.update(agent_pos)
     state.update(hands_pos)

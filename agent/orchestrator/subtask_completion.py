@@ -554,6 +554,19 @@ def predicate_goto(sub: dict, state: dict) -> tuple:
     return False, f"goto not complete: nearest checkpoint is {near_cp}, target is {sorted(targets)}"
 
 
+def _named_choice(targets, final_text):
+    """The target mentioned first in the answer, matched on tokens not shared by every target."""
+    blob = str(final_text or "").lower()
+    token_sets = [set(_tokens(cand)) for cand in targets]
+    shared = set.intersection(*token_sets) if len(token_sets) > 1 else set()
+    best = None
+    for cand, tokens in zip(targets, token_sets):
+        positions = [blob.find(tok) for tok in (tokens - shared or tokens) if tok in blob]
+        if positions and (best is None or min(positions) < best[0]):
+            best = (min(positions), cand)
+    return best[1] if best else None
+
+
 def predicate_compare(sub: dict, state: dict, final_text: str = "",
                       guard_backend="deterministic", compare_guard=None) -> tuple:
     """Grant iff (a) the agent's final output names a choice from `targets`, AND (b) it actually went
@@ -576,8 +589,7 @@ def predicate_compare(sub: dict, state: dict, final_text: str = "",
         if guard_backend == "vlm":
             return False, "compare not complete: no candidate targets are available for the VLM guard"
         return True, "compare granted [unverified]: no candidate targets to check the choice against"
-    blob = str(final_text or "").lower()
-    named = next((cand for cand in targets if any(tok in blob for tok in _tokens(cand))), None)
+    named = _named_choice(targets, final_text)
     if named is None:
         return False, ("compare not complete: final output must name your choice from "
                        f"{targets} with what you observed")

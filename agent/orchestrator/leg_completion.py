@@ -90,6 +90,7 @@ class CompletionController:
         self.last_guard_skus = None
         self.compare_frames = {}
         self.compare_guard = None
+        self.current_step = None
         self.targeted_pickup = (
             backend == "vlm"
             and leg.get("type") == "pickup"
@@ -148,6 +149,7 @@ class CompletionController:
 
     def prepare(self, state, image_b64, step, inspection_evidence, last_actor_text):
         """Bind guards to the current frame and evaluate pre-action pickup completion."""
+        self.current_step = step
         guards = StepGuards()
         if self.leg.get("type") == "inspect" and self.backend != "none":
             evidence_frames = inspection_evidence.guard_frames()
@@ -212,9 +214,10 @@ class CompletionController:
             return
         ordered_frames = [self.compare_frames[index] for index in range(len(targets))]
 
+        # The guard outlives this step, so log the step it is evaluated on.
         def log_compare(criterion, auxiliary_context, verdict, reused):
             self._log_vlm_verdict(
-                step, "compare", verdict, reused,
+                self.current_step, "compare", verdict, reused,
                 criterion=criterion,
                 targets=targets,
                 candidate_frames=[
@@ -283,6 +286,7 @@ class CompletionController:
 
     def handle_stop(self, response, state, last_actor_text, guards, step, grip_tracker):
         """Return granted, corrected, refused, or forced for an explicit STOP request."""
+        self.current_step = step
         reported_answer = reported_completion_answer(response)
         if self.leg.get("type") == "inspect":
             final_text = reported_answer
@@ -398,6 +402,7 @@ class CompletionController:
 
     def observe_after_action(self, state, last_actor_text, guards, step):
         """Evaluate completion after state reconciliation and update the model nudge."""
+        self.current_step = step
         if self.backend == "none":
             self._clear_progress(state)
             return CompletionObservation(
@@ -458,8 +463,7 @@ class CompletionController:
     ):
         self.metrics["success"] = True
         self.metrics["end_reason"] = "completed_no_stop"
-        if backend is None:
-            self.metrics["completion_evidence"] = reason
+        self.metrics["completion_evidence"] = reason
         prefix = "VLM completion" if backend else "completion"
         print(
             f"[LEG {self.leg_idx} DONE] {prefix} backstop: goal measurably held for "

@@ -493,6 +493,14 @@ def _record_revision_segment(state, leg, segment_index, attempt, metrics, tokens
     token_meter.dump()
 
 
+def _plan_leg_number(controller, leg, fallback):
+    """1-based position of a leg's goal in the initial plan; inserted legs use `fallback`."""
+    for index, initial in enumerate(controller.initial_legs, 1):
+        if leg.get("goal_id") is not None and initial.get("goal_id") == leg.get("goal_id"):
+            return index
+    return fallback
+
+
 def _execute_revisable_plan(state):
     """Run a controller-owned suffix while preserving state across accepted revisions."""
     controller = state.plan_controller
@@ -565,19 +573,24 @@ def _execute_revisable_plan(state):
             )
             fatal_failure = True
             break
-        state.unverified_legs.append(segment_index)
+        state.unverified_legs.append(_plan_leg_number(controller, leg, segment_index))
         controller.remove_current(leg)
         _save_experimental_plan(state)
+        if controller.pending:
+            _carry_findings_forward(state, leg, segment_index - 1, attempt, metrics)
 
     state.success = not fatal_failure and not controller.outstanding_goal_ids
 
 
 def _finalize_response(state):
     """Finalize the journal and synthesize the user-facing response."""
+    adaptive = state.config.adaptive_leg_replanning and state.plan_controller is not None
+    # Adaptive `state.legs` is the pending suffix (empty on success); journal the full plan.
     finalize_response_memory(
-        state.response_memory, success=state.success, planned_subtasks=state.legs
+        state.response_memory, success=state.success,
+        planned_subtasks=state.plan_controller.initial_legs if adaptive else state.legs,
     )
-    if state.config.adaptive_leg_replanning and state.plan_controller is not None:
+    if adaptive:
         controller = state.plan_controller
         completed = set(controller.completed_goal_ids)
         initial = controller.initial_legs

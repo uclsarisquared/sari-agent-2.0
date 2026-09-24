@@ -183,3 +183,12 @@ def test_action_step_uses_session_state_and_event_assembler(monkeypatch, tmp_pat
     assert step_row["step"] == 1
     assert step_row["actions"] == []
     assert step_row["status"] == "looking"
+
+
+def test_non_integer_durations_are_a_parse_error():
+    from orchestrator.action_dispatch import parse_actor_response
+
+    assert parse_actor_response("{'actions': ['move_forward'], 'times': [None]}", r"(?s)(.*)") is None
+    assert parse_actor_response(
+        "{'actions': ['move_forward'], 'times': ['2']}", r"(?s)(.*)"
+    )["times"] == ["2"]

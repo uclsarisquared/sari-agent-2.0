@@ -84,3 +84,38 @@ def test_refused_stop_keeps_the_claimed_answer_separately(monkeypatch):
     assert metrics["refused_reported_answer"] == "claimed answer"
     assert state["last_halt_refused"] == "rejected"
 
+
+
+def test_compare_guard_logs_the_step_it_is_evaluated_on(monkeypatch):
+    rows = []
+    captured = {}
+
+    def fake_make_compare_guard(*_args, on_verdict=None):
+        captured["on_verdict"] = on_verdict
+        return lambda *_a: None
+
+    monkeypatch.setattr(leg_completion, "make_compare_guard", fake_make_compare_guard)
+    vlm = SimpleNamespace(client=None, config=SimpleNamespace(model_id="m"))
+    leg = {"type": "compare", "targets": ["a", "b"], "candidate_sets": [[1], [2]]}
+    controller = leg_completion.CompletionController(
+        SimpleNamespace(vlm_agent=vlm), leg, "vlm", _metrics(), rows.append, 1
+    )
+    for step, near in ((1, 1), (2, 2), (5, 2)):
+        controller.prepare({"nearest_checkpoint": near}, "img", step, InspectionEvidence(), "")
+
+    captured["on_verdict"]("cheaper", {}, {"match": True}, False)
+
+    assert rows[-1]["guard"] == "compare" and rows[-1]["step"] == 5
+
+
+def test_vlm_backstop_records_completion_evidence():
+    metrics = _metrics()
+    controller = leg_completion.CompletionController(
+        SimpleNamespace(), {"type": "pickup", "target": "chips"}, "vlm", metrics,
+        lambda _row: None, 1,
+    )
+
+    controller._complete_without_stop(4, "held chips", backend="vlm", guard_verdicts={})
+
+    assert metrics["end_reason"] == "completed_no_stop"
+    assert metrics["completion_evidence"] == "held chips"

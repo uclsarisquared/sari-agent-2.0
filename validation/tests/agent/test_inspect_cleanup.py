@@ -167,3 +167,25 @@ def test_inspection_evidence_frames_never_reach_a_log_row_or_the_prompt():
     assert "visited_checkpoints" not in view
     # The frame-free ledger IS shown: it tells the actor which held item it has already read.
     assert view["inspection_evidence"] == [{"hand": "left", "sku": "COKE", "step": 4}]
+
+
+def test_cleanup_refresh_keeps_derived_leg_evidence(monkeypatch):
+    # A real fresh read carries derived defaults; they must not wipe the leg's evidence.
+    monkeypatch.setattr(SA, "_fresh_agent_state", lambda: {
+        "leftRotation": (0, 0, 0), "leftGrippedState": True,
+        "last_inspection": None, "nearest_checkpoint": None, "last_halt_refused": None,
+        "mode": "perception",
+    })
+    result = {"end_reason": "halt_granted", "final_state": {
+        "leftRotation": (0, 90, 0), "last_inspection": {"label_visible": True},
+        "nearest_checkpoint": 7, "last_halt_refused": "why", "mode": "manipulation",
+    }}
+    monkeypatch.setattr(SA, "_run_leg_impl", lambda *args, **kwargs: result)
+
+    final = SA.run_leg(FakeAgent(), {"type": "inspect"}, None, (1, 1))["final_state"]
+
+    assert final["leftRotation"] == (0, 0, 0)
+    assert final["last_inspection"] == {"label_visible": True}
+    assert final["nearest_checkpoint"] == 7
+    assert final["last_halt_refused"] == "why"
+    assert final["mode"] == "manipulation"
