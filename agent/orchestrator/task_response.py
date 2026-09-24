@@ -173,38 +173,28 @@ def finalize_response_memory(
         for entry in attempts
         if entry.get("success")
     }
-    planned = memory.get("planned_subtasks") or []
-    completed = [
-        subtask.get("text") or subtask.get("type") or f"subtask {index}"
-        for index, subtask in enumerate(planned, 1)
-        if index in successful_numbers
-    ]
-    incomplete = [
-        subtask.get("text") or subtask.get("type") or f"subtask {index}"
-        for index, subtask in enumerate(planned, 1)
-        if index not in successful_numbers
-    ]
+    completed, incomplete = [], []
+    for index, subtask in enumerate(memory.get("planned_subtasks") or [], 1):
+        label = subtask.get("text") or subtask.get("type") or f"subtask {index}"
+        (completed if index in successful_numbers else incomplete).append(label)
 
     terminal = attempts[-1].get("final_state") if attempts else {}
     terminal = terminal if isinstance(terminal, dict) else {}
-    latest_checkout = next(
-        (
-            entry.get("final_state", {}).get("checkout")
-            for entry in reversed(attempts)
-            if isinstance(entry.get("final_state"), dict)
-            and entry["final_state"].get("checkout") is not None
-        ),
-        None,
-    )
-    latest_inspection = next(
-        (
-            entry.get("final_state", {}).get("inspection")
-            for entry in reversed(attempts)
-            if isinstance(entry.get("final_state"), dict)
-            and entry["final_state"].get("inspection") is not None
-        ),
-        None,
-    )
+
+    def latest(key):
+        """Most recent non-null final-state value across attempts."""
+        return next(
+            (
+                entry["final_state"][key]
+                for entry in reversed(attempts)
+                if isinstance(entry.get("final_state"), dict)
+                and entry["final_state"].get(key) is not None
+            ),
+            None,
+        )
+
+    latest_checkout = latest("checkout")
+    latest_inspection = latest("inspection")
     failed = (
         next((entry for entry in reversed(attempts) if not entry.get("success")), None)
         if not success

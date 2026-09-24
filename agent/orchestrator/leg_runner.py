@@ -430,7 +430,7 @@ def run_leg(agent, leg, sm, caps, log_path=None, context="", future_legs=None,
             revision_handler=None):
     """Run one typed leg and restore inspection hand poses on every exit path."""
     # Normalize only for cleanup routing; the implementation retains its compatibility input.
-    typed_leg = leg if isinstance(leg, dict) else {"type": "unknown", "text": str(leg)}
+    typed_leg = normalize_leg(leg)
     result = None
 
     # Keep inspection cleanup outside the execution loop so every exit path reaches it.

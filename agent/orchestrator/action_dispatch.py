@@ -11,7 +11,10 @@ from toolset.actions import (
     NAVIGATION_ACTIONS_REF,
     PERCEPTION_ACTIONS_REF,
 )
-from orchestrator.held_item_inspection import _run_held_item_inspection_macro
+from orchestrator.held_item_inspection import (
+    _INSPECT_MACRO_ACTIONS,
+    _run_held_item_inspection_macro,
+)
 
 
 def _crouched_grab(action_ref, time_units, target_info, debug_dir, plan):
@@ -69,6 +72,8 @@ def _last_reach_line(plan, gripped=None):
     if v == "recenter":
         return f"RE-CENTER - {plan['reason']}"
     return f"{v.upper()} - {plan.get('reason', '')}"
+
+
 # Macros need the agent's live NavSession and share the manipulation-mode gate.
 # Bare names select a hand from grip state; suffixed names pin the side.
 _MACRO_ACTIONS = {"checkout_held_item": "auto",
@@ -77,11 +82,6 @@ _MACRO_ACTIONS = {"checkout_held_item": "auto",
 _GRAB_ACTIONS = {"extend_arm_until_grabbed",
                  "extend_arm_until_grabbed_left",
                  "extend_arm_until_grabbed_right"}
-_INSPECT_MACRO_ACTIONS = {
-    "inspect_held_item": "auto",
-    "inspect_held_item_left": "left",
-    "inspect_held_item_right": "right",
-}
 _INSPECT_HELD_ACTIONS = set(_INSPECT_MACRO_ACTIONS)
 _INSPECT_VISUAL_ACTIONS = {
     "pan_left", "pan_right", "tilt_up", "tilt_down", "center_object_on_screen",
@@ -90,6 +90,8 @@ _INSPECT_VISUAL_ACTIONS = {
 # Exhausting this budget directs the actor to report absence and STOP.
 _INSPECT_APPROACH_ACTIONS = {"move_forward", "move_backward", "move_left", "move_right"}
 _INSPECT_MOVE_BUDGET_STEPS = 20   # 20 x 0.1 m = 2.0 m of repositioning per unheld inspect leg
+
+
 def _grab_ready(state):
     """Allow grab promotion only after measured centering or reach success."""
     lc = state.get("last_center") or ""
@@ -99,13 +101,16 @@ def _grab_ready(state):
 
 # Apostrophes in free-text fields can break the actor's Python-literal response.
 # Recover the flat actions/times lists when the full dict cannot be parsed.
-_ACTOR_LIST_RE = lambda key: re.compile(r"['\"]%s['\"]\s*:\s*\[([^\[\]]*)\]" % key, re.DOTALL)
+_ACTOR_LIST_RE = {
+    key: re.compile(r"['\"]%s['\"]\s*:\s*\[([^\[\]]*)\]" % key, re.DOTALL)
+    for key in ("actions", "times")
+}
 _ACTOR_ITEM_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
 def _salvage_actions_times(blob: str):
     """Recover flat actions/times lists from malformed quoting, or None on mismatch."""
-    am, tm = _ACTOR_LIST_RE("actions").search(blob), _ACTOR_LIST_RE("times").search(blob)
+    am, tm = _ACTOR_LIST_RE["actions"].search(blob), _ACTOR_LIST_RE["times"].search(blob)
     if not (am and tm):
         return None
     actions = [a.strip() for a in _ACTOR_ITEM_RE.findall(am.group(1)) if a.strip()]
@@ -223,13 +228,12 @@ def dispatch_action(action: str, time_units: int, notes: dict, inline_arg: str =
         print(f"[WARN] Unknown action skipped: {action}")
         return {}
 
-    main_goal = notes.get('main_goal', '')
-    sub_goals = notes.get('sub_goal', '')
-    key_info  = notes.get('key_info', '')
-    checklist = notes.get('checklist', '')
+    target_info = (f"main_goal={notes.get('main_goal', '')}\n"
+                   f"sub_goals={notes.get('sub_goal', '')}\n"
+                   f"key_info={notes.get('key_info', '')}\n"
+                   f"checklist={notes.get('checklist', '')}")
 
     if action == "center_object_on_screen":
-        target_info = f"main_goal={main_goal}\nsub_goals={sub_goals}\nkey_info={key_info}\nchecklist={checklist}"
         # debug_dir (when a runner passes one) makes center_object_on_screen drop its per-look
         # candidate/locked/aim frames there - see the runners' per-step screenshot logging.
         return action_ref(target_info, debug_dir=debug_dir) or {}
@@ -262,8 +266,6 @@ def dispatch_action(action: str, time_units: int, notes: dict, inline_arg: str =
             # AUTO-CROUCH: resolved inside this call (crouch -> re-center -> re-measure -> grab ->
             # ALWAYS stand). See _crouched_grab - posture never leaks to the router/VLM.
             print(f"[REACH] crouch: {plan['reason']} - auto-crouching")
-            target_info = (f"main_goal={main_goal}\nsub_goals={sub_goals}\n"
-                           f"key_info={key_info}\nchecklist={checklist}")
             result = _crouched_grab(action_ref, time_units, target_info, debug_dir, plan)
             print(f"[REACH] {result.get('last_reach')}")
             return result

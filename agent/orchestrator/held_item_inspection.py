@@ -73,6 +73,45 @@ def _inspection_macro_summary(result: dict) -> dict:
     return {k: v for k, v in result.items() if k not in _INSPECTION_RESULT_DROP}
 
 
+def _restore_hands(agent):
+    """Return both hands to REST via the agent's tracker, else a raw ResetHands."""
+    restore = getattr(agent, "restore_hands_after_inspection", None)
+    restore = restore or getattr(agent, "_restore_hands_after_inspection", None)
+    if callable(restore):
+        return restore()
+    from sim.env import ResetHands
+    reset_state = ResetHands()
+    return {
+        "restored": True,
+        "hands": {
+            side: {
+                "translation": reset_state.get(f"{side}Translation"),
+                "rotation": reset_state.get(f"{side}Rotation"),
+                "gripped": reset_state.get(f"{side}GrippedState"),
+            }
+            for side in ("left", "right")
+        },
+    }
+
+
+def _rotate_hand(hand, delta):
+    """Apply a relative rotation to one hand only."""
+    zero = (0, 0, 0)
+    if hand == "left":
+        return TransformHands(zero, delta, zero, zero)
+    return TransformHands(zero, zero, zero, delta)
+
+
+def _closer_pose(steps):
+    """INSPECTION_POSE moved `steps` closer increments toward the camera."""
+    from manip.manipulation import INSPECTION_POSE
+    return (
+        INSPECTION_POSE[0],
+        INSPECTION_POSE[1],
+        INSPECTION_POSE[2] - (_INSPECTION_CLOSER_STEP_M * steps),
+    )
+
+
 def _run_held_item_inspection_macro(
         agent, query, state, log_event=None, frames_dir=None, hand="auto"):
     """Deterministically sweep a held item until a fresh VLM context finds the requested label.
@@ -134,24 +173,7 @@ def _run_held_item_inspection_macro(
     def finish_failure(result):
         """Restore REST immediately when no evidence frame needs to remain presented."""
         try:
-            restore = getattr(agent, "restore_hands_after_inspection", None)
-            restore = restore or getattr(agent, "_restore_hands_after_inspection", None)
-            if callable(restore):
-                cleanup = restore()
-            else:
-                from sim.env import ResetHands
-                reset_state = ResetHands()
-                cleanup = {
-                    "restored": True,
-                    "hands": {
-                        side: {
-                            "translation": reset_state.get(f"{side}Translation"),
-                            "rotation": reset_state.get(f"{side}Rotation"),
-                            "gripped": reset_state.get(f"{side}GrippedState"),
-                        }
-                        for side in ("left", "right")
-                    },
-                }
+            cleanup = _restore_hands(agent)
         except Exception as exc:  # noqa: BLE001 - report cleanup failure without hiding sweep result
             cleanup = {
                 "restored": False,
@@ -187,24 +209,7 @@ def _run_held_item_inspection_macro(
     # Reset BOTH hands before presenting the selected item; this prevents translation/rotation left
     # behind by a prior manipulation from becoming the inspection sweep's starting orientation.
     try:
-        restore = getattr(agent, "restore_hands_after_inspection", None)
-        restore = restore or getattr(agent, "_restore_hands_after_inspection", None)
-        if callable(restore):
-            pre_reset = restore()
-        else:
-            from sim.env import ResetHands
-            reset_state = ResetHands()
-            pre_reset = {
-                "restored": True,
-                "hands": {
-                    side: {
-                        "translation": reset_state.get(f"{side}Translation"),
-                        "rotation": reset_state.get(f"{side}Rotation"),
-                        "gripped": reset_state.get(f"{side}GrippedState"),
-                    }
-                    for side in ("left", "right")
-                },
-            }
+        pre_reset = _restore_hands(agent)
     except Exception as exc:  # noqa: BLE001 - report a clean blocked macro result
         pre_reset = {
             "restored": False,
@@ -249,6 +254,28 @@ def _run_held_item_inspection_macro(
 
     steps = []
     vlm_calls = 0
+
+    def visible_result(phase, pass_index, check_index, reason, frame_b64, **extra):
+        """Build and log a successful label-visible macro result."""
+        result = {
+            "blocked": False,
+            "executed": True,
+            "hand": hand,
+            "label_visible": True,
+            "label_legible": True,
+            **extra,
+            "best_effort_read": False,
+            "sweep_exhausted": False,
+            "visible_phase": phase,
+            "visible_pass": pass_index,
+            "checks": check_index,
+            "vlm_calls": vlm_calls,
+            "reason": reason,
+            "frame_b64": frame_b64,
+            "steps": steps,
+        }
+        emit({"event": "inspection_macro_end", **_inspection_macro_summary(result)})
+        return result
 
     def check_visible(check_index, pass_index, phase, turn_index, rotation_delta=None,
                       image_bytes=None, ocr_text=None):
@@ -362,7 +389,7 @@ def _run_held_item_inspection_macro(
         return verdict
 
     def lock_side_and_approach(pass_index, check_index, phase, presence_verdict,
-                               locked_image_bytes):
+                               locked_image_bytes, locked_b64):
         """Keep the detected label-facing orientation and spend remaining stages moving closer."""
         nonlocal vlm_calls
         emit({
@@ -372,13 +399,11 @@ def _run_held_item_inspection_macro(
             "phase": phase,
             "reason": presence_verdict.get("reason"),
         })
-        from manip.manipulation import INSPECTION_POSE, set_hand_pose
+        from manip.manipulation import set_hand_pose
         initial_ocr = ocr_locked_frame(locked_image_bytes, pass_index, phase)
         best_ocr_lines = list(initial_ocr["lines"])
         latest_ocr_lines = list(initial_ocr["lines"])
-        # The most recent locked frame, kept current as the hand moves closer: whichever frame this
-        # branch finally returns on is the evidence frame the completion guard replays.
-        locked_b64 = base64.b64encode(locked_image_bytes).decode("utf-8")
+        # `locked_b64` tracks the latest locked frame; the returned one is the guard's evidence.
 
         # Re-run the strict gate on this exact locked frame with PaddleOCR as untrusted auxiliary
         # text. This can confirm legibility without moving, but cannot relax the front-facing test.
@@ -401,34 +426,12 @@ def _run_held_item_inspection_macro(
                 **ocr_verdict,
             })
             if ocr_verdict.get("match") and ocr_verdict.get("conclusive"):
-                result = {
-                    "blocked": False,
-                    "executed": True,
-                    "hand": hand,
-                    "label_visible": True,
-                    "label_legible": True,
-                    "label_locked": True,
-                    "best_effort_read": False,
-                    "sweep_exhausted": False,
-                    "visible_phase": phase,
-                    "visible_pass": pass_index,
-                    "checks": check_index,
-                    "vlm_calls": vlm_calls,
-                    "ocr_lines": latest_ocr_lines,
-                    "reason": ocr_verdict.get("reason"),
-                    "frame_b64": locked_b64,
-                    "steps": steps,
-                }
-                emit({"event": "inspection_macro_end", **_inspection_macro_summary(result)})
-                return result
+                return visible_result(
+                    phase, pass_index, check_index, ocr_verdict.get("reason"), locked_b64,
+                    label_locked=True, ocr_lines=latest_ocr_lines)
 
         for closer_stage in range(pass_index + 1, _INSPECTION_MAX_PASSES + 1):
-            closer_pose = (
-                INSPECTION_POSE[0],
-                INSPECTION_POSE[1],
-                INSPECTION_POSE[2]
-                - (_INSPECTION_CLOSER_STEP_M * (closer_stage - 1)),
-            )
+            closer_pose = _closer_pose(closer_stage - 1)
             arrived, translation, residual = set_hand_pose(
                 closer_pose, hand=hand, max_iters=5)
             emit({
@@ -473,26 +476,9 @@ def _run_held_item_inspection_macro(
                 check_index, closer_stage, "locked_closer", closer_stage,
                 image_bytes=closer_image, ocr_text=latest_ocr_lines)
             if legible.get("match") and legible.get("conclusive"):
-                result = {
-                    "blocked": False,
-                    "executed": True,
-                    "hand": hand,
-                    "label_visible": True,
-                    "label_legible": True,
-                    "label_locked": True,
-                    "best_effort_read": False,
-                    "sweep_exhausted": False,
-                    "visible_phase": phase,
-                    "visible_pass": closer_stage,
-                    "checks": check_index,
-                    "vlm_calls": vlm_calls,
-                    "ocr_lines": latest_ocr_lines or best_ocr_lines,
-                    "reason": legible.get("reason"),
-                    "frame_b64": locked_b64,
-                    "steps": steps,
-                }
-                emit({"event": "inspection_macro_end", **_inspection_macro_summary(result)})
-                return result
+                return visible_result(
+                    phase, closer_stage, check_index, legible.get("reason"), locked_b64,
+                    label_locked=True, ocr_lines=latest_ocr_lines or best_ocr_lines)
 
         # The target label is still facing the camera at the closest allowed position. Preserve that
         # frame and explicitly hand it to the actor for a best-effort transcription.
@@ -522,42 +508,22 @@ def _run_held_item_inspection_macro(
         return result
 
     check_index = 0
-    zero = (0, 0, 0)
     for pass_index in range(1, _INSPECTION_MAX_PASSES + 1):
         check_index += 1
         verdict, image_b64, image_bytes = check_visible(
             check_index, pass_index, "initial", 0)
         if verdict.get("match") and verdict.get("conclusive"):
-            result = {
-                "blocked": False,
-                "executed": True,
-                "hand": hand,
-                "label_visible": True,
-                "label_legible": True,
-                "best_effort_read": False,
-                "sweep_exhausted": False,
-                "visible_phase": "initial",
-                "visible_pass": pass_index,
-                "checks": check_index,
-                "vlm_calls": vlm_calls,
-                "reason": verdict.get("reason"),
-                "frame_b64": image_b64,
-                "steps": steps,
-            }
-            emit({"event": "inspection_macro_end", **_inspection_macro_summary(result)})
-            return result
+            return visible_result(
+                "initial", pass_index, check_index, verdict.get("reason"), image_b64)
         presence = check_label_presence(
             image_b64, check_index, pass_index, "initial", 0)
         if presence.get("match") and presence.get("conclusive"):
             return lock_side_and_approach(
-                pass_index, check_index, "initial", presence, image_bytes)
+                pass_index, check_index, "initial", presence, image_bytes, image_b64)
 
         for phase, turn_index, rotation_delta in _RESTRICTED_INSPECTION_TURNS:
             commanded_rotation_delta = _inspection_rotation_delta(hand, rotation_delta)
-            if hand == "left":
-                turn_state = TransformHands(zero, commanded_rotation_delta, zero, zero)
-            else:
-                turn_state = TransformHands(zero, zero, zero, commanded_rotation_delta)
+            turn_state = _rotate_hand(hand, commanded_rotation_delta)
             emit({
                 "event": "inspection_rotation",
                 "hand": hand,
@@ -572,47 +538,22 @@ def _run_held_item_inspection_macro(
             verdict, image_b64, image_bytes = check_visible(
                 check_index, pass_index, phase, turn_index, commanded_rotation_delta)
             if verdict.get("match") and verdict.get("conclusive"):
-                result = {
-                    "blocked": False,
-                    "executed": True,
-                    "hand": hand,
-                    "label_visible": True,
-                    "label_legible": True,
-                    "best_effort_read": False,
-                    "sweep_exhausted": False,
-                    "visible_phase": phase,
-                    "visible_pass": pass_index,
-                    "checks": check_index,
-                    "vlm_calls": vlm_calls,
-                    "reason": verdict.get("reason"),
-                    "frame_b64": image_b64,
-                    "steps": steps,
-                }
-                emit({"event": "inspection_macro_end", **_inspection_macro_summary(result)})
-                return result
+                return visible_result(
+                    phase, pass_index, check_index, verdict.get("reason"), image_b64)
             presence = check_label_presence(
                 image_b64, check_index, pass_index, phase, turn_index)
             if presence.get("match") and presence.get("conclusive"):
                 return lock_side_and_approach(
-                    pass_index, check_index, phase, presence, image_bytes)
+                    pass_index, check_index, phase, presence, image_bytes, image_b64)
 
         if pass_index < _INSPECTION_MAX_PASSES:
             # Restore this pass's relative start orientation without ResetHands (which would visibly
             # flash through REST), then bring the held item 5 cm closer for the next full sweep.
             pass_reset_delta = _inspection_rotation_delta(
                 hand, _INSPECTION_PASS_RESET_DELTA)
-            if hand == "left":
-                reset_state = TransformHands(
-                    zero, pass_reset_delta, zero, zero)
-            else:
-                reset_state = TransformHands(
-                    zero, zero, zero, pass_reset_delta)
-            from manip.manipulation import INSPECTION_POSE, set_hand_pose
-            closer_pose = (
-                INSPECTION_POSE[0],
-                INSPECTION_POSE[1],
-                INSPECTION_POSE[2] - (_INSPECTION_CLOSER_STEP_M * pass_index),
-            )
+            reset_state = _rotate_hand(hand, pass_reset_delta)
+            from manip.manipulation import set_hand_pose
+            closer_pose = _closer_pose(pass_index)
             arrived, translation, residual = set_hand_pose(
                 closer_pose, hand=hand, max_iters=5)
             emit({

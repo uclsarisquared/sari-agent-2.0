@@ -1,6 +1,7 @@
 """Model configuration and orchestrator-level LLM calls."""
 
 import json
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -86,8 +87,6 @@ def decompose_task(client: OpenAI, task: str) -> list:
     run_leg then handles with the OLD keyword guards. The A/B that validated this prompt lives in
     validation/evals/decomposition.py (11/11 clean on the four-family battery, 2026-07-23)."""
     def validate(raw):
-        import re
-
         match = re.search(r"\[[\s\S]*\]", raw or "")
         try:
             items = json.loads(match.group(0)) if match else None

@@ -9,13 +9,14 @@ def return_to_start(agent, output_dir=None):
     same substrate and start pose.
     """
     from nav.store_map import StoreMap, NavSession
+    from orchestrator.subtask_planning import SPAWN_XZ
 
     if not hasattr(return_to_start, "_nav"):
         store_map = StoreMap(output_dir=output_dir) if output_dir else StoreMap()
         return_to_start._nav = (
             store_map,
             NavSession(store_map, stow_hands=False),
-            store_map.nearest_checkpoint((-3.0, -5.0)),
+            store_map.nearest_checkpoint(SPAWN_XZ),
         )
 
     store_map, nav, start_cp = return_to_start._nav

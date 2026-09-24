@@ -664,7 +664,6 @@ def _build_summary(state, response, response_source):
     }
     summary.update(planned_subtask_metrics(plan_for_metrics))
     if enabled:
-        controller = state.plan_controller
         rejected = sum(1 for event in controller.events if not event.get("accepted"))
         summary["experimental"] = {
             "adaptive_leg_replanning": True,

@@ -47,9 +47,12 @@ def invoke_actor(agent, request, step):
     return response, calls
 
 
+_INLINE_ACTION_RE = re.compile(r'^(\w+)\([\'"]?(.*?)[\'"]?\)$')
+
+
 def _parse_inline_action(action):
     raw_action = action.strip()
-    match = re.match(r'^(\w+)\([\'"]?(.*?)[\'"]?\)$', raw_action)
+    match = _INLINE_ACTION_RE.match(raw_action)
     if not match:
         return raw_action, None
     return match.group(1), match.group(2)

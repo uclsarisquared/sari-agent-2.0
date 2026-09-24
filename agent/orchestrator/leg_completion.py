@@ -139,6 +139,13 @@ class CompletionController:
             fields["guard"] = guard
         self._emit("completion_guard", step=step, **fields)
 
+    def _log_vlm_verdict(self, step, guard, verdict, reused, **context):
+        """Count a fresh VLM guard call and log its verdict."""
+        if not reused:
+            self.metrics["llm_calls"] += 1
+        verdict = {**(verdict if isinstance(verdict, dict) else {}), "reused": reused}
+        self._guard_event(step, "vlm", verdict, guard=guard, **context)
+
     def prepare(self, state, image_b64, step, inspection_evidence, last_actor_text):
         """Bind guards to the current frame and evaluate pre-action pickup completion."""
         guards = StepGuards()
@@ -146,17 +153,8 @@ class CompletionController:
             evidence_frames = inspection_evidence.guard_frames()
 
             def log_inspect(query, auxiliary_context, verdict, reused):
-                if not reused:
-                    self.metrics["llm_calls"] += 1
-                verdict = {
-                    **(verdict if isinstance(verdict, dict) else {}),
-                    "reused": reused,
-                }
-                self._guard_event(
-                    step,
-                    "vlm",
-                    verdict,
-                    guard="inspect",
+                self._log_vlm_verdict(
+                    step, "inspect", verdict, reused,
                     query=query,
                     auxiliary_context=auxiliary_context,
                     evidence_frames=[frame["label"] for frame in evidence_frames],
@@ -171,19 +169,9 @@ class CompletionController:
 
         if self.targeted_unknown:
             def log_unknown(task, auxiliary_context, verdict, reused):
-                if not reused:
-                    self.metrics["llm_calls"] += 1
-                verdict = {
-                    **(verdict if isinstance(verdict, dict) else {}),
-                    "reused": reused,
-                }
-                self._guard_event(
-                    step,
-                    "vlm",
-                    verdict,
-                    guard="unknown",
-                    query=task,
-                    auxiliary_context=auxiliary_context,
+                self._log_vlm_verdict(
+                    step, "unknown", verdict, reused,
+                    query=task, auxiliary_context=auxiliary_context,
                 )
 
             guards.unknown = make_unknown_guard(
@@ -225,17 +213,8 @@ class CompletionController:
         ordered_frames = [self.compare_frames[index] for index in range(len(targets))]
 
         def log_compare(criterion, auxiliary_context, verdict, reused):
-            if not reused:
-                self.metrics["llm_calls"] += 1
-            verdict = {
-                **(verdict if isinstance(verdict, dict) else {}),
-                "reused": reused,
-            }
-            self._guard_event(
-                step,
-                "vlm",
-                verdict,
-                guard="compare",
+            self._log_vlm_verdict(
+                step, "compare", verdict, reused,
                 criterion=criterion,
                 targets=targets,
                 candidate_frames=[

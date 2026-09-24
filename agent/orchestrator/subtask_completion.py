@@ -303,6 +303,13 @@ def blob_matches_target(blob, target) -> bool:
     return False
 
 
+def _held_blob(state: dict) -> str:
+    """Space-joined hovered/gripped names for both hands."""
+    fields = [state.get("leftHoveredObject") or "", state.get("rightHoveredObject") or "",
+              state.get("gripped_name") or ""]
+    return " ".join(str(f) for f in fields)
+
+
 def name_matches(state: dict, keywords) -> bool:
     """True iff any keyword appears in the agent's hovered/gripped object blob. Re-homed here from
     pickup_navigation (its single caller now imports it) so the pickup predicate and the 6.4 eval share ONE
@@ -315,9 +322,7 @@ def name_matches(state: dict, keywords) -> bool:
     durable record run_leg keeps while a hand is gripping; it is '' for callers (pickup_navigation) that
     don't set it, so this stays backward-safe. Dual-hand: run_leg space-joins BOTH hands' recorded
     names into it (per-hand detail in `gripped_names`), so a match on EITHER held item counts."""
-    fields = [state.get("leftHoveredObject") or "", state.get("rightHoveredObject") or "",
-              state.get("gripped_name") or ""]
-    blob = " ".join(str(f) for f in fields).lower()
+    blob = _held_blob(state).lower()
     return any(str(k).lower() in blob for k in keywords)
 
 
@@ -326,9 +331,7 @@ def name_overlap(state: dict, target: str) -> bool:
     token overlap OR category membership (blob_matches_target). An empty/degenerate target (no
     content tokens) returns True - we can't ground it, so we don't block on it (the grip itself is
     still required by the pickup predicate)."""
-    fields = [state.get("leftHoveredObject") or "", state.get("rightHoveredObject") or "",
-              state.get("gripped_name") or ""]
-    return blob_matches_target(" ".join(str(f) for f in fields), target)
+    return blob_matches_target(_held_blob(state), target)
 
 
 def pickup_has_target(sub: dict) -> bool:
@@ -389,6 +392,15 @@ def mismatched_hands(sub: dict, state: dict, start_grips=(),
 
 
 # Completion predicates - each: (subtask_dict, state[, final_text]) -> (granted: bool, reason: str)
+
+def _conclusive(verdict) -> bool:
+    """Whether an injected guard verdict is a well-formed conclusive answer."""
+    return (isinstance(verdict, dict)
+            and type(verdict.get("match")) is bool
+            and verdict.get("conclusive") is True
+            and isinstance(verdict.get("reason"), str)
+            and bool(verdict["reason"].strip()))
+
 
 def _gripping(state: dict) -> bool:
     """Return whether either simulator hand is currently gripping an item."""
@@ -602,11 +614,7 @@ def predicate_compare(sub: dict, state: dict, final_text: str = "",
     except Exception as exc:  # noqa: BLE001 - guards must fail closed
         return False, (f"compare not complete: VLM compare guard failed "
                        f"({type(exc).__name__}: {exc})")
-    if (not isinstance(verdict, dict)
-            or type(verdict.get("match")) is not bool
-            or verdict.get("conclusive") is not True
-            or not isinstance(verdict.get("reason"), str)
-            or not verdict["reason"].strip()):
+    if not _conclusive(verdict):
         return False, "compare not complete: VLM compare guard returned no conclusive verdict"
     if not verdict["match"]:
         return False, f"compare not complete: VLM rejected the choice ({verdict['reason'].strip()})"
@@ -664,11 +672,7 @@ def predicate_unknown(sub: dict, state: dict, final_text: str = "",
     except Exception as exc:  # noqa: BLE001 - guards must fail closed
         return False, (f"STOP blocked (untyped): VLM unknown-task guard failed "
                        f"({type(exc).__name__}: {exc})")
-    if (not isinstance(verdict, dict)
-            or type(verdict.get("match")) is not bool
-            or verdict.get("conclusive") is not True
-            or not isinstance(verdict.get("reason"), str)
-            or not verdict["reason"].strip()):
+    if not _conclusive(verdict):
         return False, "STOP blocked (untyped): VLM unknown-task guard returned no conclusive verdict"
     if not verdict["match"]:
         return False, (f"STOP blocked (untyped): VLM rejected task completion "
@@ -757,11 +761,7 @@ def predicate_inspect(sub: dict, state: dict, final_text: str = "",
     except Exception as exc:  # noqa: BLE001 - guards must fail closed
         return False, (f"inspection not complete: VLM inspection guard failed "
                        f"({type(exc).__name__}: {exc})")
-    if (not isinstance(verdict, dict)
-            or type(verdict.get("match")) is not bool
-            or verdict.get("conclusive") is not True
-            or not isinstance(verdict.get("reason"), str)
-            or not verdict["reason"].strip()):
+    if not _conclusive(verdict):
         return False, "inspection not complete: VLM inspection guard returned no conclusive verdict"
     if verdict["match"]:
         return True, f"inspection complete: VLM verified the reported answer ({verdict['reason'].strip()})"
