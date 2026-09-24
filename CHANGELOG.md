@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.8.4 (2026-09-24)
+
+### Bug Fixes
+
+- **orchestrator**: Preserve leg evidence and fix compare/adaptive bookkeeping
+  ([`e465920`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e465920128542c0be9a5a7081e304382938a4645))
+
+- **vision**: Harden checkout alignment, perception timeouts and sim sends
+  ([`5303f05`](https://github.com/uclsarisquared/sari-agent-2.0/commit/5303f05f08a28103985d3bf9cac3696eb5891ef9))
+
+
 ## v1.8.3 (2026-09-24)
 
 ### Bug Fixes
