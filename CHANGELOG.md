@@ -2,6 +2,39 @@
 
 <!-- version list -->
 
+## v1.8.2 (2026-09-24)
+
+### Chores
+
+- Sync uv.lock version
+  ([`185b857`](https://github.com/uclsarisquared/sari-agent-2.0/commit/185b857ea1fe19b61283292ebc8f5b58bb175d62))
+
+### Performance Improvements
+
+- **mapping**: Vectorize scan projection, planner and coverage hot loops
+  ([`2655d05`](https://github.com/uclsarisquared/sari-agent-2.0/commit/2655d050939be6c05b837a3013bf2d38ab8763ea))
+
+- **watch**: Cache attempt views, add ETag and gzip to dashboard
+  ([`e61e6c1`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e61e6c1b17c058d4cc8a720ab1c27d18103c082c))
+
+### Refactoring
+
+- **agent-core**: Dedupe LLM/runtime helpers and encode frames once
+  ([`b819514`](https://github.com/uclsarisquared/sari-agent-2.0/commit/b819514195cd2960c8f098ac25408e6c8143ae62))
+
+- **analysis**: Share ablation script and analysis helpers
+  ([`7b90c25`](https://github.com/uclsarisquared/sari-agent-2.0/commit/7b90c2514d9e8a45200df17a74b47eb4e3175e1b))
+
+- **bench**: Share storage helpers and cache winner polling
+  ([`c39a509`](https://github.com/uclsarisquared/sari-agent-2.0/commit/c39a5097efefa4b2b7685c5d7ccd5575a6c3a247))
+
+- **orchestrator**: Collapse duplicated guard and inspection code
+  ([`97b16a3`](https://github.com/uclsarisquared/sari-agent-2.0/commit/97b16a3dca51c5ad303411c875823291d754b7fd))
+
+- **vision**: Drop dead perception/manipulation code and share sim helpers
+  ([`f462b1e`](https://github.com/uclsarisquared/sari-agent-2.0/commit/f462b1e8c0fbf74632705587fb4af64f754d7c7b))
+
+
 ## v1.8.1 (2026-09-05)
 
 ### Bug Fixes
