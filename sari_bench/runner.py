@@ -21,6 +21,7 @@ import os
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -45,6 +46,7 @@ from sari_bench.storage import (
     canonical_attempt_rows,
     edit_json_locked,
     file_lock,
+    patch_json,
     purge_attempt_rows,
     read_json_object,
     upsert_attempt_row,
@@ -125,11 +127,8 @@ def _patch_json(path: Path, fields: dict[str, Any]) -> None:
     """Merges `fields` into an existing JSON object. Best-effort: manifest bookkeeping must never
     take down an attempt that is otherwise fine."""
     try:
-        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        if not isinstance(current, dict):
-            current = {}
-        current.update(fields)
-        write_json_atomic(path, current)
+        # Locked: the watcher stamps the same manifest from another process.
+        patch_json(path, fields)
     except (OSError, ValueError) as error:  # noqa: BLE001
         _log(f"could not patch {path}: {error!r}")
 
@@ -836,6 +835,8 @@ class BenchmarkRunner:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
+        if os.name == "nt":
+            return _windows_pid_alive(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -864,9 +865,33 @@ class BenchmarkRunner:
     def _runs_attempt(self, command: list[str] | None, run_dir: Path) -> bool:
         return bool(command) and str(run_dir) in command and self.agent_entry in command
 
-    def _matching_run_pids(self, run_dir: Path) -> list[int]:
+    @staticmethod
+    def _ps_commands(pid: int | None = None) -> dict[int, list[str]]:
+        """pid -> whitespace-split argv from `ps`, for hosts without procfs (macOS)."""
+        selector = ["-p", str(pid)] if pid is not None else ["-ax"]
         try:
-            entries = list(Path("/proc").iterdir())
+            output = subprocess.run(
+                ["ps", "-ww", *selector, "-o", "pid=,args="],
+                capture_output=True, text=True, timeout=10, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        commands: dict[int, list[str]] = {}
+        for line in output.splitlines():
+            head, _, args = line.strip().partition(" ")
+            if head.isdigit():
+                commands[int(head)] = args.split()
+        return commands
+
+    def _matching_run_pids(self, run_dir: Path) -> list[int]:
+        proc = Path("/proc")
+        if not proc.is_dir():
+            return [
+                pid for pid, command in self._ps_commands().items()
+                if self._runs_attempt(command, run_dir)
+            ]
+        try:
+            entries = list(proc.iterdir())
         except OSError:
             return []
         return [
@@ -881,7 +906,12 @@ class BenchmarkRunner:
         run_dir: Path,
         manifest: dict[str, Any],
     ) -> bool:
-        if not self._runs_attempt(self._proc_cmdline(Path("/proc") / str(pid)), run_dir):
+        proc = Path("/proc")
+        command = (
+            self._proc_cmdline(proc / str(pid)) if proc.is_dir()
+            else self._ps_commands(pid).get(pid)
+        )
+        if not self._runs_attempt(command, run_dir):
             return False
         recorded_start = str(manifest.get("process_start_ticks") or "")
         return not recorded_start or recorded_start == self._process_start_ticks(pid)
@@ -896,15 +926,13 @@ class BenchmarkRunner:
 
     @staticmethod
     async def _kill_process_group(pid: int) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        _signal_group(pid, signal.SIGTERM)
         deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         while BenchmarkRunner._pid_alive(pid) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
         if not BenchmarkRunner._pid_alive(pid):
             return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        _signal_group(pid, _SIGKILL)
         deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         while BenchmarkRunner._pid_alive(pid) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
@@ -1432,11 +1460,16 @@ class BenchmarkRunner:
                         outcome="harness_error",
                         requeues=requeues,
                         error=repr(error),
+                        run_dir=self._run_dir_if_started(prompt_id, attempt),
                     )
                 )
                 _log(f"[w{index}] {prompt_id} try {attempt}: harness error {error!r}")
             finally:
                 self._queue.task_done()
+
+    def _run_dir_if_started(self, prompt_id: str, attempt: int) -> str:
+        run_dir = self.output_dir / prompt_id / f"try{attempt:02d}"
+        return str(run_dir) if (run_dir / ATTEMPT_MANIFEST).exists() else ""
 
     async def _run_attempt(
         self,
@@ -1540,6 +1573,18 @@ class BenchmarkRunner:
                     outcome="sandbox_lost",
                     error=str(lost),
                 )
+            except Exception as error:
+                # Close a live manifest so the watcher doesn't show it running forever; the worker
+                # records the harness_error row.
+                manifest_path = run_dir / ATTEMPT_MANIFEST
+                if _manifest_field(manifest_path, "state") in {"starting", "running"}:
+                    _patch_json(manifest_path, {
+                        "state": "finished",
+                        "outcome": "harness_error",
+                        "error": repr(error),
+                        "ended_at": datetime.now().isoformat(timespec="seconds"),
+                    })
+                raise
             finally:
                 # Always release: the sandbox has to be reset and re-pooled even when the agent
                 # crashed, timed out, or was cancelled.
@@ -2150,8 +2195,7 @@ class BenchmarkRunner:
         if process.returncode is not None:
             return
 
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        _signal_group(process.pid, signal.SIGTERM)
 
         try:
             await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_SECONDS)
@@ -2159,8 +2203,7 @@ class BenchmarkRunner:
         except asyncio.TimeoutError:
             pass
 
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        _signal_group(process.pid, _SIGKILL)
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_SECONDS)
 
@@ -2394,6 +2437,33 @@ class BenchmarkRunner:
             f"in {summary['wall_seconds']}s, tokens in/out {total_in}/{total_out} -> {summary_path}"
         )
         return summary
+
+
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)  # Windows has no SIGKILL
+
+
+def _signal_group(pid: int, sig: int) -> None:
+    """Signal the agent's process group; Windows has no groups, so signal (terminate) the pid."""
+    with contextlib.suppress(ProcessLookupError):
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(pid), sig)
+        else:
+            os.kill(pid, sig)
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """os.kill(pid, 0) terminates on Windows, so query the process handle instead."""
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _reply_text(reply: Any) -> str:

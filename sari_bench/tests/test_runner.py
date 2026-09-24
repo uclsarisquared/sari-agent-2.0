@@ -1897,3 +1897,56 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
+
+def test_orphan_discovery_falls_back_to_ps_without_procfs(monkeypatch, tmp_path):
+    import sari_bench.runner as runner_module
+
+    real_path = Path
+    missing = tmp_path / "no-proc"
+    monkeypatch.setattr(
+        runner_module, "Path", lambda path: missing if path == "/proc" else real_path(path)
+    )
+    monkeypatch.setattr(
+        BenchmarkRunner,
+        "_ps_commands",
+        staticmethod(lambda pid=None: {
+            123: ["python", "agent.py", "--run-dir", "target"],
+            456: ["python", "agent.py", "--run-dir", "target-other"],
+        } if pid is None else {pid: ["python", "agent.py", "--run-dir", "target"]}),
+    )
+    runner = object.__new__(BenchmarkRunner)
+    runner.agent_entry = "agent.py"
+
+    assert runner._matching_run_pids(Path("target")) == [123]
+    assert runner._pid_matches_manifest(123, Path("target"), {})
+    assert not runner._pid_matches_manifest(123, Path("elsewhere"), {})
+
+
+async def test_harness_error_closes_the_live_manifest() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51001)
+
+    class Exploding(BenchmarkRunner):
+        async def _spawn_agent(self, client, lease, prompt, attempt, run_dir, **_kwargs):
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "attempt.json").write_text(json.dumps({"state": "running"}))
+            raise RuntimeError("harness bug")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        try:
+            await sandbox.connect(url)
+            base = _runner(url, [Prompt(id="p", prompt="x")], workspace)
+            runner = Exploding.__new__(Exploding)
+            runner.__dict__.update(base.__dict__)
+            summary = await asyncio.wait_for(runner.run(), timeout=30)
+            row = summary["attempts"][0]
+            assert row["outcome"] == "harness_error"
+            assert row["run_dir"].endswith("try01")
+            manifest = json.loads((workspace / "runs" / "p" / "try01" / "attempt.json").read_text())
+            assert manifest["state"] == "finished"
+            assert manifest["outcome"] == "harness_error"
+        finally:
+            await sandbox.close()
+            await coordinator.stop()

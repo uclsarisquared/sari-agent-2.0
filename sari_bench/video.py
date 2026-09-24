@@ -489,7 +489,7 @@ def _render_continuous_for_upload(
             "-threads", str(ENCODER_THREADS), "-an", "-b:v", str(bitrate),
             "-maxrate", str(bitrate), "-bufsize", str(bitrate * 2),
             "-movflags", "+faststart", str(part_path),
-        ])
+        ], timeout=RENDER_TIMEOUT_SECONDS)
         if not is_complete_mp4(part_path):
             raise OSError(f"ffmpeg produced an incomplete mp4 at {part_path}")
         os.replace(part_path, out_path)
@@ -508,7 +508,8 @@ def _part_path(out_path: Path) -> Path:
 
 
 def _run(command: list[str], *, timeout: float | None = None) -> None:
-    subprocess.run(command, check=True, timeout=timeout,
+    # No stdin: ffmpeg reads the tty for commands and stops (SIGTTIN) when backgrounded.
+    subprocess.run(command, check=True, timeout=timeout, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

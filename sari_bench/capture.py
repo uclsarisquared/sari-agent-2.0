@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from sari_bench.storage import write_bytes_atomic
 
@@ -417,13 +417,12 @@ class AttemptRecorder:
         if process is None:
             self.part_path.unlink(missing_ok=True)
             return
-        if process.stdin is not None:
-            # Every frame was explicitly flushed by the writer. Closing the descriptor directly
-            # delivers EOF without letting BufferedWriter.close() block the event loop on a sick
-            # encoder's pipe.
-            with contextlib.suppress(OSError):
-                os.close(process.stdin.fileno())
-            process.stdin = None
+        stdin, process.stdin = process.stdin, None
+        if stdin is not None:
+            # Close through the owning object (a raw os.close let its GC close a reused fd again),
+            # off-loop so a sick encoder's pipe cannot block; terminate() below unblocks it.
+            closing = asyncio.ensure_future(asyncio.to_thread(_close_quietly, stdin))
+            await asyncio.wait({closing}, timeout=ENCODER_GRACE_SECONDS)
         deadline = time.monotonic() + ENCODER_GRACE_SECONDS
         while process.poll() is None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
@@ -443,6 +442,11 @@ class AttemptRecorder:
         else:
             self.stats.encoder_failures += 1
             self.part_path.unlink(missing_ok=True)
+
+
+def _close_quietly(handle: Any) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        handle.close()
 
 
 async def record_previews(run_dir: Path, commands_uri: str, interval: float, *,

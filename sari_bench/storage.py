@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows: fall back to msvcrt byte-range locks
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 ATTEMPTS_LOCK = ".attempts.lock"
 BATTERY_LOCK = ".battery.lock"
@@ -42,16 +48,17 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def write_bytes_atomic(path: Path, data: bytes) -> None:
-    """Durably publish bytes via a unique fsynced temp file and rename."""
+def write_bytes_atomic(path: Path, data: bytes, *, fsync: bool = True) -> None:
+    """Publish bytes via a unique temp file and rename (fsynced unless `fsync=False`)."""
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{path.stem}.", suffix=f"{path.suffix}.tmp", dir=path.parent
     )
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+            if fsync:
+                handle.flush()
+                os.fsync(handle.fileno())
         os.replace(temp_name, path)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
@@ -79,14 +86,36 @@ def resolve_scope_root(parser: Any, args: Any) -> Path:
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Publish a JSON object with rename, so polling readers never see a partial write."""
+    """Publish a JSON object with rename, so polling readers never see a partial write.
+
+    The temp name is unique, so concurrent writers from different processes cannot clobber it.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp")
-    temp.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
-    os.replace(temp, path)
+    data = json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+    write_bytes_atomic(path, data, fsync=False)
+
+
+def _lock_handle(handle: Any, blocking: bool) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        return
+    while True:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as error:
+            if not blocking:
+                raise BlockingIOError(str(error)) from error
+            time.sleep(0.05)
+
+
+def _unlock_handle(handle: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @contextlib.contextmanager
@@ -94,12 +123,11 @@ def file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Hold an advisory process lock for the duration of the context."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
-        operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
-        fcntl.flock(handle.fileno(), operation)
+        _lock_handle(handle, blocking)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_handle(handle)
 
 
 @contextlib.contextmanager
@@ -111,6 +139,25 @@ def edit_json_locked(path: Path, lock_name: str = BATTERY_LOCK) -> Iterator[dict
             raise ValueError(f"{path} is not a JSON object")
         yield payload
         write_json_atomic(path, payload)
+
+
+def json_lock_name(path: Path) -> str:
+    """The per-file sibling lock guarding read-modify-writes of `path`."""
+    return f".{path.name}.lock"
+
+
+def patch_json(
+    path: Path,
+    fields: dict[str, Any] | None = None,
+    *,
+    drop: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Locked merge of `fields` (after removing `drop`) into one JSON object; returns it."""
+    with edit_json_locked(path, json_lock_name(path)) as payload:
+        for key in drop:
+            payload.pop(key, None)
+        payload.update(fields or {})
+        return dict(payload)
 
 
 def read_jsonl_rows(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:

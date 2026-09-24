@@ -184,7 +184,7 @@ def _reencode_replay(replay: Path) -> tuple[bool, str]:
                     "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
              "-r", "4", "-c:v", "libx264", "-crf", "28", "-preset", "veryfast", "-pix_fmt", "yuv420p",
              "-movflags", "+faststart", str(temporary)],
-            check=True, capture_output=True, text=True, timeout=900,
+            check=True, capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL,
         )
         replacement = _video_stream(temporary)
         if not video.valid_replay(temporary) or replacement is None:

@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from sari_bench import capture, storage, video
 from sari_bench.protocol import DEFAULT_COORDINATOR_PORT, STATE_READY
-from sari_bench.storage import edit_json_locked
+from sari_bench.storage import edit_json_locked, patch_json
 from sari_bench.watch import health, notify, replay as replay_mod, scan
 from sari_watchconfig import WatchConfigError, load_watch_config
 
@@ -1049,10 +1049,7 @@ class WatchState:
         if winner_key:
             winner_dir = _safe_run_dir(battery, winner_key)
             if winner_dir is not None:
-                _clear_verdict_fields(
-                    winner_dir / scan.ATTEMPT_MANIFEST,
-                    scan._read_json(winner_dir / scan.ATTEMPT_MANIFEST),
-                )
+                _clear_verdict_fields(winner_dir / scan.ATTEMPT_MANIFEST)
         # Older batteries may have only the per-attempt verdict and no battery-level winner map.
         prompt_dir = battery / prompt_id
         if prompt_dir.is_dir():
@@ -1062,7 +1059,7 @@ class WatchState:
                 manifest_path = run_dir / scan.ATTEMPT_MANIFEST
                 manifest = scan._read_json(manifest_path)
                 if manifest.get("verified_success") is True:
-                    _clear_verdict_fields(manifest_path, manifest)
+                    _clear_verdict_fields(manifest_path)
 
     @staticmethod
     def _delete_logical_try(battery: Path, prompt_id: str, attempt: int) -> None:
@@ -1118,10 +1115,7 @@ class WatchState:
             }
             if verdict in scan.EXCLUDED_VERDICTS:
                 # Drop any stale boolean from an earlier pass/fail.
-                stale = scan._read_json(manifest_path)
-                stale.pop("verified_success", None)
-                stale.update(fields)
-                _write_json(manifest_path, stale)
+                _stamp(manifest_path, fields, drop=("verified_success",))
             else:
                 _stamp(manifest_path, {**fields, "verified_success": verdict == "pass"})
             cancellations = {"stopped": 0, "skipped": 0}
@@ -1268,7 +1262,7 @@ class WatchState:
             manifest = scan._read_json(manifest_path)
             if not scan.verdict_of(manifest):
                 return {"ok": True, "cleared": False}
-            _clear_verdict_fields(manifest_path, manifest)
+            _clear_verdict_fields(manifest_path)
             self._invalidate_locked()
         _log(f"verdict cleared on {key}")
         return {"ok": True, "cleared": True}
@@ -1379,16 +1373,6 @@ def _coordinator_call(url: str, call: Callable[[Any], Any]) -> Any:
     return asyncio.run(asyncio.wait_for(run(), timeout=COORDINATOR_TIMEOUT_SECONDS))
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Atomic replace, so a poller mid-read never sees a half-written manifest."""
-    try:
-        temp = path.with_name(f".{path.name}.tmp")
-        temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temp, path)
-    except OSError as error:  # noqa: BLE001
-        _log(f"could not write {path}: {error!r}")
-
-
 def _last_sign_of_life(run_dir: Path) -> float:
     """Newest mtime anywhere in the run dir: a lower-bound end time for an abandoned attempt."""
     newest = 0.0
@@ -1447,16 +1431,16 @@ def _materialize_cancelled(
     )
 
 
-def _clear_verdict_fields(path: Path, manifest: dict[str, Any]) -> None:
-    for field in VERDICT_FIELDS:
-        manifest.pop(field, None)
-    _write_json(path, manifest)
+def _clear_verdict_fields(path: Path) -> None:
+    _stamp(path, {}, drop=VERDICT_FIELDS)
 
 
-def _stamp(path: Path, fields: dict[str, Any]) -> None:
-    payload = scan._read_json(path)
-    payload.update(fields)
-    _write_json(path, payload)
+def _stamp(path: Path, fields: dict[str, Any], *, drop: tuple[str, ...] = ()) -> None:
+    """Locked merge into a manifest the runner may be patching concurrently."""
+    try:
+        patch_json(path, fields, drop=drop)
+    except (OSError, ValueError) as error:  # noqa: BLE001
+        _log(f"could not write {path}: {error!r}")
 
 
 def _int_param(

@@ -559,3 +559,69 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
+
+async def test_lease_ttl_expiry_notifies_its_holder() -> None:
+    coordinator, url = await _start_coordinator(lease_ttl=0.2)
+    sandbox = FakeSandbox("sandbox-a", 51923)
+    try:
+        await sandbox.connect(url)
+        async with CoordinatorClient(url) as client:
+            lease = await asyncio.wait_for(client.acquire(), timeout=2)
+            lost = await asyncio.wait_for(client.wait_for_sandbox_lost(lease), timeout=6)
+            assert lost.reason == "lease_ttl"
+    finally:
+        await sandbox.close()
+        await coordinator.stop()
+
+
+async def test_coordinator_disconnect_counts_as_a_lost_lease() -> None:
+    coordinator, url = await _start_coordinator()
+    sandbox = FakeSandbox("sandbox-a", 51923)
+    client = CoordinatorClient(url)
+    try:
+        await sandbox.connect(url)
+        await client.connect()
+        lease = await asyncio.wait_for(client.acquire(), timeout=2)
+        waiter = asyncio.create_task(client.wait_for_sandbox_lost(lease))
+        # Hang up server-side, as a coordinator restart would; no sandbox_lost is ever sent.
+        await coordinator._leases[lease.lease_id].holder.close()
+        lost = await asyncio.wait_for(waiter, timeout=5)
+        assert lost.reason == "coordinator_disconnected"
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
+        await sandbox.close()
+        await coordinator.stop()
+
+
+async def test_claimed_sandbox_dying_before_reply_fails_the_acquire() -> None:
+    coordinator, url = await _start_coordinator()
+    try:
+        async with CoordinatorClient(url) as client:
+            acquire = asyncio.create_task(client.acquire(timeout=5))
+            await asyncio.sleep(0.2)
+            sandbox = FakeSandbox("sandbox-a", 51923)
+            original_fulfil = coordinator._fulfil_waiters
+
+            def fulfil_then_drop() -> None:
+                original_fulfil()
+                # Evict synchronously after the claim, before the parked handler resumes.
+                if coordinator._leases:
+                    asyncio.get_running_loop().create_task(
+                        coordinator._drop_sandbox("sandbox-a", reason="gone", close_socket=False)
+                    )
+
+            coordinator._fulfil_waiters = fulfil_then_drop  # type: ignore[method-assign]
+            await sandbox.connect(url)
+            started = asyncio.get_running_loop().time()
+            try:
+                await acquire
+            except RuntimeError as error:
+                assert "sandbox_lost" in str(error)
+            else:
+                raise AssertionError("acquire succeeded for a dropped sandbox")
+            assert asyncio.get_running_loop().time() - started < 3
+            await sandbox.close()
+    finally:
+        await coordinator.stop()

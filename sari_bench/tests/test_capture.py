@@ -375,3 +375,39 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
+
+async def test_encoder_stdin_is_closed_through_its_owner() -> None:
+    """A raw os.close left the BufferedWriter to close the (possibly reused) fd again on GC."""
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = capture.AttemptRecorder(Path(tmp), "ws://unused", 0.25)
+        recorder.process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=subprocess.PIPE,
+        )
+        stdin = recorder.process.stdin
+        await recorder._finalize_encoder()
+        assert stdin is not None and stdin.closed
+        assert recorder.process.stdin is None
+        assert recorder.process.returncode == 0
+
+
+def test_upload_transcode_is_bounded_and_detached_from_stdin(monkeypatch, tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        Path(command[-1]).write_bytes(b"")
+
+    monkeypatch.setattr(video.subprocess, "run", fake_run)
+    monkeypatch.setattr(video.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(video, "ffprobe_duration", lambda _path: 10.0)
+    monkeypatch.setattr(video, "is_complete_mp4", lambda _path: True)
+    source = tmp_path / video.REPLAY_NAME
+    source.write_bytes(b"")
+    out = video._render_continuous_for_upload(
+        tmp_path, source, tmp_path / video.UPLOAD_NAME, max_bytes=1_000_000, fps=4.0, width=640,
+    )
+    assert out == tmp_path / video.UPLOAD_NAME
+    assert calls and calls[0]["stdin"] is subprocess.DEVNULL
+    assert calls[0]["timeout"] == video.RENDER_TIMEOUT_SECONDS

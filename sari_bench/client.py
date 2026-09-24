@@ -263,11 +263,29 @@ class CoordinatorClient:
         }
 
     async def wait_for_sandbox_lost(self, lease: Lease) -> SandboxLost:
-        """Resolves only if *this* lease's sandbox dies. Race it against the attempt."""
-        while True:
-            message = await self._lost.get()
-            if message.get("lease_id") == lease.lease_id:
-                return SandboxLost(
-                    str(message.get("sandbox_id") or lease.sandbox_id),
-                    str(message.get("reason") or "unknown"),
+        """Resolves if *this* lease's sandbox dies or the coordinator connection drops.
+
+        A dropped connection loses the lease: a restarted coordinator resets the sandbox.
+        """
+        closed_task = asyncio.create_task(self._closed.wait())
+        lost_task: asyncio.Task[dict[str, Any]] | None = None
+        try:
+            while True:
+                lost_task = asyncio.create_task(self._lost.get())
+                done, _pending = await asyncio.wait(
+                    {lost_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
                 )
+                # Prefer a lost notice that raced the close.
+                if lost_task not in done:
+                    return SandboxLost(lease.sandbox_id, "coordinator_disconnected")
+                message = lost_task.result()
+                if message.get("lease_id") == lease.lease_id:
+                    return SandboxLost(
+                        str(message.get("sandbox_id") or lease.sandbox_id),
+                        str(message.get("reason") or "unknown"),
+                    )
+        finally:
+            pending = [task for task in (closed_task, lost_task) if task and not task.done()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)

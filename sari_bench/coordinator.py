@@ -476,15 +476,18 @@ class Coordinator:
         # subprocess that will never talk to anything again.
         lease = self._leases.pop(sandbox.lease_id, None)
         if lease is not None:
-            await _send(
-                lease.holder,
-                encode(
-                    "bench.sandbox_lost",
-                    lease_id=lease.lease_id,
-                    sandbox_id=sandbox_id,
-                    reason=reason,
-                ),
-            )
+            await self._notify_lost(lease, reason)
+
+    async def _notify_lost(self, lease: Lease, reason: str) -> None:
+        await _send(
+            lease.holder,
+            encode(
+                "bench.sandbox_lost",
+                lease_id=lease.lease_id,
+                sandbox_id=lease.sandbox_id,
+                reason=reason,
+            ),
+        )
 
     # bench side
 
@@ -558,8 +561,9 @@ class Coordinator:
                         await closed_task
             sandbox = self._sandboxes.get(lease.sandbox_id)
             if sandbox is None:
-                # The sandbox died between being handed to us and us resuming; _drop_sandbox has
-                # already told this worker, so there is nothing left to reply.
+                # Died between claim and resume. The worker is still awaiting bench.lease (a
+                # sandbox_lost for an unknown lease won't wake it), so fail the acquire now.
+                await _send(websocket, encode("bench.error", reason="sandbox_lost"))
                 return
 
         await _send(
@@ -899,6 +903,8 @@ class Coordinator:
             if now - lease.created_at > self.lease_ttl:
                 self._leases.pop(lease.lease_id, None)
                 self.log(f"Lease {lease.lease_id} exceeded its TTL; reclaiming its sandbox")
+                # Stop the holder's agent before the sandbox is reset and re-leased under it.
+                await self._notify_lost(lease, "lease_ttl")
                 await self._queue_reset(lease.sandbox_id, lease.lease_id, "lease_ttl")
 
         self._fulfil_waiters()
