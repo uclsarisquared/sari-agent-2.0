@@ -35,6 +35,7 @@ import json
 import math
 import os
 import sys
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -461,8 +462,6 @@ def route_hints(neighbors_by_id, origin_id, is_interesting, max_hops=8):
     is roughly one checkpoint spacing anyway. Never routes back through the origin, so the hint
     describes what is genuinely THROUGH that neighbour rather than what is behind you.
     """
-    from collections import deque
-
     hints = {}
     for via in neighbors_by_id.get(origin_id, ()):
         seen = {origin_id, via}
@@ -481,6 +480,11 @@ def route_hints(neighbors_by_id, origin_id, is_interesting, max_hops=8):
                     queue.append((nxt, hops + 1))
         hints[via] = found
     return hints
+
+
+def kind_counts(checkpoints):
+    """{kind: count} over Checkpoint objects, in first-seen order."""
+    return dict(Counter(c.kind for c in checkpoints))
 
 
 def save_topology(topology, output_dir, tag):
@@ -525,9 +529,7 @@ def build_parser():
 
 if __name__ == "__main__":
     args = build_parser().parse_args()
-    log_odds = np.load(args.grid_npy)
-    loaded_grid = OccupancyGrid(size_m=log_odds.shape[0] * args.resolution, resolution=args.resolution)
-    loaded_grid.log_odds = log_odds
+    loaded_grid = OccupancyGrid.from_log_odds(np.load(args.grid_npy), args.resolution)
 
     result = extract_topology(
         loaded_grid, connectivity=args.connectivity, min_branch_length_m=args.min_branch_length_m,
@@ -535,7 +537,4 @@ if __name__ == "__main__":
         min_checkpoint_clearance_m=args.min_checkpoint_clearance_m,
     )
     out_path = save_topology(result, args.output_dir, args.tag)
-    kinds_count = {}
-    for c in result.checkpoints:
-        kinds_count[c.kind] = kinds_count.get(c.kind, 0) + 1
-    print(f"[topology] {len(result.checkpoints)} checkpoints {kinds_count}, {len(result.edges)} edges -> {out_path}")
+    print(f"[topology] {len(result.checkpoints)} checkpoints {kind_counts(result.checkpoints)}, {len(result.edges)} edges -> {out_path}")

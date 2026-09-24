@@ -21,7 +21,6 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from occupancy_grid import OccupancyGrid, _bresenham_line  # noqa: E402
 from frontier_planner import (  # noqa: E402
     cluster_frontiers,
-    score_cluster,
     astar,
     simplify_path,
     _line_of_sight,

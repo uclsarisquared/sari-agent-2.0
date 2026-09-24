@@ -43,17 +43,15 @@ import math
 import os
 import sys
 
-import numpy as np
-
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/capture
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
 if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from sim.env import TransformAgent, SetHandsActive, SetCrouch, RequestScreenshot  # noqa: E402
+from sim.env import SetHandsActive, SetCrouch, RequestScreenshot  # noqa: E402
 
-from occupancy_grid import OccupancyGrid  # noqa: E402
+from occupancy_grid import load_grid  # noqa: E402,F401  (re-exported for nav.store_map)
 from lidar_client import RequestLidarScan  # noqa: E402
 from mapping import (  # noqa: E402
     normalize_deg, angle_to_deg, swept_clearance_ahead,
@@ -63,13 +61,6 @@ from frontier_planner import astar, simplify_path, _inflate_occupied  # noqa: E4
 # Reuse explore.py's local steering rather than duplicating it: same nudge + wedge-escape
 # semantics the mapping loop is already validated against.
 from explore import find_clear_heading, find_escape_heading, step_agent  # noqa: E402
-
-
-def load_grid(output_dir, tag, resolution):
-    log_odds = np.load(os.path.join(output_dir, f"grid_{tag}.npy"))
-    grid = OccupancyGrid(size_m=log_odds.shape[0] * resolution, resolution=resolution)
-    grid.log_odds = log_odds
-    return grid
 
 
 def perpendicular_yaw(checkpoint):
@@ -119,7 +110,6 @@ def goto(args, grid, inflated, target_world_xz, pos, rot):
         )
         step_len = min(args.step_size, dist, max(0.0, clearance - args.safety_margin))
 
-        nudged_heading = None
         if step_len < args.min_step:
             nudged = find_clear_heading(
                 scan, delta_yaw, args.min_step, args.safety_margin,
@@ -132,7 +122,6 @@ def goto(args, grid, inflated, target_world_xz, pos, rot):
             if nudged is not None:
                 delta_yaw, clearance, _dbg, _off = nudged
                 step_len = min(args.step_size, dist, max(0.0, clearance - args.safety_margin))
-                nudged_heading = delta_yaw
 
         pos, rot, _ = step_agent((0, 0, 0), (0, delta_yaw, 0), args.uri)
 

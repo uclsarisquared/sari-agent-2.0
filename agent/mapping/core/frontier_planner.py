@@ -23,7 +23,7 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from occupancy_grid import _bresenham_line  # noqa: E402
+from occupancy_grid import _bresenham_line, disc_offsets  # noqa: E402
 
 
 CONNECTIVITY_4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -121,11 +121,8 @@ def _inflate_occupied(grid, body_radius):
         return occupied
     padded = np.pad(occupied, r_cells, mode="constant", constant_values=False)
     inflated = np.zeros_like(occupied)
-    for dx in range(-r_cells, r_cells + 1):
-        for dz in range(-r_cells, r_cells + 1):
-            if dx * dx + dz * dz > r_cells * r_cells:
-                continue
-            inflated |= padded[r_cells + dx: r_cells + dx + grid.n, r_cells + dz: r_cells + dz + grid.n]
+    for dx, dz in disc_offsets(r_cells):
+        inflated |= padded[r_cells + dx: r_cells + dx + grid.n, r_cells + dz: r_cells + dz + grid.n]
     return inflated
 
 
@@ -290,7 +287,43 @@ class NavCommand:
     replanned: bool = False
 
 
-class FrontierPlanner:
+class FrontierPickingMixin:
+    """Frontier detection, DONE handling and the no-movement circuit breaker, shared by
+    FrontierPlanner and the VLM planners so every arm stops on the same criteria. Needs
+    grid, connectivity, min_cluster_size, max_replans_without_moving and the
+    _no_progress_pick_* counters."""
+
+    def _dbg(self, msg):
+        if getattr(self, "debug", False):
+            print(f"[planner] {msg}", flush=True)
+
+    def _breaker_tripped(self, cur_cell):
+        """Count consecutive picks from the same cell; True once max_replans_without_moving
+        is hit (A* may keep 'reaching' a goal that live clearance keeps blocking)."""
+        if cur_cell == self._no_progress_pick_cell:
+            self._no_progress_pick_count += 1
+        else:
+            self._no_progress_pick_cell = cur_cell
+            self._no_progress_pick_count = 0
+        return self._no_progress_pick_count >= self.max_replans_without_moving
+
+    def _detect_clusters(self):
+        """Frontier clusters on the current grid ([] when none survive)."""
+        t0 = time.perf_counter()
+        frontier_cells = self.grid.frontiers()
+        clusters = cluster_frontiers(frontier_cells, connectivity=self.connectivity,
+                                     min_cluster_size=self.min_cluster_size) if len(frontier_cells) else []
+        self._dbg(f"{len(frontier_cells)} frontier cells -> {len(clusters)} clusters "
+                  f"({time.perf_counter() - t0:.3f}s)")
+        return clusters
+
+    def _done(self, why):
+        self._dbg(f"_pick_and_plan: {why} -> done")
+        self.state = PlannerState.DONE
+        return NavCommand(kind="done")
+
+
+class FrontierPlanner(FrontierPickingMixin):
     """Stateful orchestrator: clusters frontiers, commits to a goal, plans an
     A* path to it, and hands explore.py one waypoint at a time. Call update()
     once per step after integrating the latest scan; call notify_blocked()
@@ -304,12 +337,7 @@ class FrontierPlanner:
                  window_slack=1.5, min_window_cells=100, astar_max_window_cells=300,
                  max_replans_without_moving=10, body_radius=0.3, debug=False):
         self.grid = grid
-        # Prints timing/progress through _pick_and_plan()/_plan_to_cluster() - the A*
-        # window-growth retry loop over many candidate clusters is pure-Python and can run
-        # for a long time with zero console output in between, which is indistinguishable
-        # from a true hang unless you can see it's still working. Off by default (noisy);
-        # explore.py's --debug-planner flag turns this on.
-        self.debug = debug
+        self.debug = debug  # timing/progress prints so a long A* replan isn't mistaken for a hang
         self.min_cluster_size = min_cluster_size
         self.connectivity = connectivity
         self.goal_arrival_radius = goal_arrival_radius
@@ -340,10 +368,6 @@ class FrontierPlanner:
         self._last_cur_cell = None
         self._no_progress_pick_cell = None   # last cell _pick_and_plan was called from
         self._no_progress_pick_count = 0     # consecutive _pick_and_plan calls from that cell
-
-    def _dbg(self, msg):
-        if self.debug:
-            print(f"[planner] {msg}", flush=True)
 
     def _decay_blocklist(self):
         expired = [cell for cell, remaining in self._blocklist.items() if remaining <= 1]
@@ -395,7 +419,7 @@ class FrontierPlanner:
                 self._dbg(f"  _plan_to_cluster: reaching cluster via observation vantage {goal_cell}")
                 return path_world, goal_cell
 
-        self._dbg(f"  _plan_to_cluster: no candidate or vantage reachable, giving up on this cluster")
+        self._dbg("  _plan_to_cluster: no candidate or vantage reachable, giving up on this cluster")
         return None, None
 
     def _try_reach(self, cur_cell, goal_cell, window, occupied_mask):
@@ -436,76 +460,50 @@ class FrontierPlanner:
         free = self.grid.log_odds < self.grid.FREE_THRESHOLD
         raw_occupied = self.grid.log_odds > self.grid.OCCUPIED_THRESHOLD
         fx, fz = cluster.centroid_cell
-        r = int(round(max_view_m / self.grid.res))
-        min_move_cells_sq = (self.waypoint_arrival_radius / self.grid.res) ** 2
-        cands = []
-        for dx in range(-r, r + 1):
-            for dz in range(-r, r + 1):
-                d2 = dx * dx + dz * dz
-                if d2 == 0 or d2 > r * r:
-                    continue
-                vx, vz = fx + dx, fz + dz
-                if not self.grid.in_bounds(vx, vz):
-                    continue
-                if occupied_mask[vx, vz] or not free[vx, vz]:
-                    continue  # must be known-free and body-safe to stand at
-                cost = (vx - cur_cell[0]) ** 2 + (vz - cur_cell[1]) ** 2
-                if cost <= min_move_cells_sq:
-                    continue  # a vantage the agent already occupies is not progress (see above)
-                if _line_of_sight(self.grid, (vx, vz), (fx, fz), occupied_mask=raw_occupied):
-                    cands.append((cost, (vx, vz)))
-        cands.sort(key=lambda t: t[0])
-        return [cell for _cost, cell in cands[:max_candidates]]
+        offs = disc_offsets(int(round(max_view_m / self.grid.res)))
+        offs = offs[(offs[:, 0] != 0) | (offs[:, 1] != 0)]
+        vx, vz = fx + offs[:, 0], fz + offs[:, 1]
+        ok = (vx >= 0) & (vx < self.grid.n) & (vz >= 0) & (vz < self.grid.n)
+        vx, vz = vx[ok], vz[ok]
+        ok = ~occupied_mask[vx, vz] & free[vx, vz]  # known-free and body-safe to stand at
+        vx, vz = vx[ok], vz[ok]
+        cost = (vx - cur_cell[0]) ** 2 + (vz - cur_cell[1]) ** 2
+        ok = cost > (self.waypoint_arrival_radius / self.grid.res) ** 2  # must be real movement
+        vx, vz, cost = vx[ok], vz[ok], cost[ok]
+        out = []
+        for i in np.argsort(cost, kind="stable"):  # nearest first; LOS only until the cap is hit
+            cell = (int(vx[i]), int(vz[i]))
+            if _line_of_sight(self.grid, cell, (fx, fz), occupied_mask=raw_occupied):
+                out.append(cell)
+                if len(out) >= max_candidates:
+                    break
+        return out
 
     def _pick_and_plan(self, cur_cell):
-        pick_t0 = time.perf_counter()
         self._dbg(f"_pick_and_plan start cur_cell={cur_cell} "
                   f"no_progress_count={self._no_progress_pick_count}")
-
-        # Stop repeated replanning from the same cell: A* may consider a path reachable
-        # while live clearance checks keep blocking it.
-        if cur_cell == self._no_progress_pick_cell:
-            self._no_progress_pick_count += 1
-        else:
-            self._no_progress_pick_cell = cur_cell
-            self._no_progress_pick_count = 0
-        if self._no_progress_pick_count >= self.max_replans_without_moving:
-            self._dbg("_pick_and_plan: circuit breaker tripped -> done")
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-
-        t0 = time.perf_counter()
-        frontier_cells = self.grid.frontiers()
-        self._dbg(f"grid.frontiers(): {len(frontier_cells)} cells ({time.perf_counter() - t0:.3f}s)")
-        if len(frontier_cells) == 0:
-            self._dbg("_pick_and_plan: no frontier cells -> done")
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-
-        t0 = time.perf_counter()
-        clusters = cluster_frontiers(frontier_cells, connectivity=self.connectivity,
-                                      min_cluster_size=self.min_cluster_size)
-        self._dbg(f"cluster_frontiers(): {len(clusters)} clusters ({time.perf_counter() - t0:.3f}s)")
+        if self._breaker_tripped(cur_cell):
+            return self._done("circuit breaker tripped")
+        clusters = self._detect_clusters()
         if not clusters:
-            self._dbg("_pick_and_plan: no clusters survived min_cluster_size -> done")
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-
+            return self._done("no frontier clusters")
         clusters.sort(key=lambda c: score_cluster(c, cur_cell, self._blocklist))
+        return self._plan_first_reachable(cur_cell, clusters)
 
-        # Prefer clusters off cooldown, then retry blocklisted ones. Cooldown means
-        # deprioritized, not explored; it must not cause premature completion.
+    def _plan_first_reachable(self, cur_cell, clusters):
+        """Commit to the first reachable cluster in `clusters` order. Off-cooldown clusters go
+        first, then blocklisted ones: cooldown deprioritizes, it must not end exploration."""
+        pick_t0 = time.perf_counter()
         for consider_blocklisted in (False, True):
-            self._dbg(f"pass consider_blocklisted={consider_blocklisted}: {len(clusters)} clusters to try")
             for i, cluster in enumerate(clusters):
                 if not consider_blocklisted and cluster.centroid_cell in self._blocklist:
                     continue
-                self._dbg(f" cluster {i + 1}/{len(clusters)} size={cluster.size} "
-                          f"centroid={cluster.centroid_cell} blocklisted={cluster.centroid_cell in self._blocklist}")
                 cluster_t0 = time.perf_counter()
-                path_world, reached_cell = self._plan_to_cluster(cur_cell, cluster)
-                self._dbg(f" cluster {i + 1}/{len(clusters)} done in {time.perf_counter() - cluster_t0:.3f}s "
-                          f"-> {'reachable' if path_world is not None else 'unreachable'}")
+                path_world, _reached = self._plan_to_cluster(cur_cell, cluster)
+                self._dbg(f" cluster {i + 1}/{len(clusters)} size={cluster.size} "
+                          f"centroid={cluster.centroid_cell} blocklisted={cluster.centroid_cell in self._blocklist} "
+                          f"{time.perf_counter() - cluster_t0:.3f}s -> "
+                          f"{'reachable' if path_world is not None else 'unreachable'}")
                 if path_world is not None:
                     self.goal_cluster = cluster
                     self.path_world = path_world
@@ -515,21 +513,15 @@ class FrontierPlanner:
                     self._best_dist_to_goal = math.inf
                     self._steps_since_progress = 0
                     self._stuck_counter = 0
-                    goal_world = self.grid.to_world(*cluster.centroid_cell)
-                    self._dbg(f"_pick_and_plan committed to cluster {i + 1} in "
-                              f"{time.perf_counter() - pick_t0:.3f}s total")
+                    self._dbg(f"_pick_and_plan committed in {time.perf_counter() - pick_t0:.3f}s")
                     return NavCommand(kind="goto_waypoint", target_world_xz=self.path_world[self.waypoint_idx],
-                                       goal_world_xz=goal_world, replanned=True)
+                                      goal_world_xz=self.grid.to_world(*cluster.centroid_cell),
+                                      replanned=True)
                 if not consider_blocklisted:
-                    # Unreachable even at the max window - blocklist so we don't retry every
-                    # call. Only set on the first pass, so the fallback pass doesn't reset the
-                    # timer on a cluster we're now retrying anyway.
+                    # Unreachable at the max window: blocklist on the first pass only, so the
+                    # fallback pass doesn't reset the timer on a cluster it is retrying anyway.
                     self._blocklist[cluster.centroid_cell] = self.goal_blocklist_steps
-
-        self._dbg(f"_pick_and_plan: every cluster unreachable in both passes -> done "
-                  f"({time.perf_counter() - pick_t0:.3f}s total)")
-        self.state = PlannerState.DONE
-        return NavCommand(kind="done")
+        return self._done(f"every cluster unreachable ({time.perf_counter() - pick_t0:.3f}s)")
 
     def _goal_region_dissolved(self):
         """Cheap proxy for "is the committed goal cluster's region still
@@ -537,13 +529,8 @@ class FrontierPlanner:
         centroid instead of re-running full clustering every FOLLOWING step
         (cluster_frontiers()/astar() are the expensive parts, reserved for
         actual replans; grid.frontiers() itself is a cheap vectorized numpy op)."""
-        frontier_set = {(int(c[0]), int(c[1])) for c in self.grid.frontiers()}
         gx, gz = self.goal_cluster.centroid_cell
-        for dx in range(-2, 3):
-            for dz in range(-2, 3):
-                if (gx + dx, gz + dz) in frontier_set:
-                    return False
-        return True
+        return not self.grid.frontier_mask()[max(0, gx - 2):gx + 3, max(0, gz - 2):gz + 3].any()
 
     def update(self, cur_world_xz, cur_cell):
         self._decay_blocklist()

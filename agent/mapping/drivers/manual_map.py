@@ -25,8 +25,6 @@ import sys
 import threading
 import time
 
-import numpy as np
-
 try:
     from pynput import keyboard
 except ImportError:
@@ -44,9 +42,10 @@ from sim.env import (  # noqa: E402
     _PAN_LEFT_, _PAN_RIGHT_, _TILT_UP_, _TILT_DOWN_,
 )
 
-from occupancy_grid import OccupancyGrid
-from lidar_client import RequestLidarScan
-from mapping import scan_to_world_points
+from occupancy_grid import OccupancyGrid  # noqa: E402
+from lidar_client import RequestLidarScan  # noqa: E402
+from mapping import scan_to_world_points  # noqa: E402
+from explore import save_snapshot  # noqa: E402
 
 HOLD_ACTIONS = {
     "w": _MOVE_FWD_,
@@ -94,40 +93,6 @@ def on_release(key):
     if s in HOLD_ACTIONS:
         with held_lock:
             held_keys.discard(s)
-
-
-def save_snapshot(grid, output_dir, tag):
-    os.makedirs(output_dir, exist_ok=True)
-    np.save(os.path.join(output_dir, f"grid_{tag}.npy"), grid.log_odds)
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-
-    display = np.full(grid.log_odds.shape, 0.5)
-    display[grid.log_odds < grid.FREE_THRESHOLD] = 1.0
-    display[grid.log_odds > grid.OCCUPIED_THRESHOLD] = 0.0
-
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(display.T, origin="lower", cmap="gray", vmin=0, vmax=1)
-
-    # Crop to the explored region (plus a 1m margin) instead of the full grid extent - most
-    # of a 60m grid is still "unknown" gray on any run that hasn't mapped the whole store, so
-    # a full-extent plot renders the actual store as a small blob in the middle. Matches the
-    # crop build_shelf_graph.py uses, so the occupancy PNG and the graph PNG frame the same area.
-    known_cells = np.argwhere(display.T != 0.5)
-    if len(known_cells) > 0:
-        margin = int(round(1.0 / grid.res))  # 1m padding
-        y0, x0 = known_cells.min(axis=0) - margin
-        y1, x1 = known_cells.max(axis=0) + margin
-        ax.set_xlim(max(0, x0), min(grid.log_odds.shape[0], x1))
-        ax.set_ylim(max(0, y0), min(grid.log_odds.shape[1], y1))
-
-    ax.set_title(f"Occupancy grid ({tag})")
-    fig.savefig(os.path.join(output_dir, f"grid_{tag}.png"), dpi=150)
-    plt.close(fig)
 
 
 def worker(args, grid, state):

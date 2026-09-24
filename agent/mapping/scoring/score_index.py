@@ -78,6 +78,7 @@ def main():
     with open(STORE_JSON, encoding="utf-8") as f:
         store = json.load(f)
 
+    catalog_sq = {sku: sku_squash(sku) for sku in catalog}  # squashed once, reused below
     index_names = sorted({r["name"] for r in products})
     index_sq = [(n, squash(n)) for n in index_names]
     rows_by_name = defaultdict(list)
@@ -88,7 +89,7 @@ def main():
     per_cat = defaultdict(lambda: [0, 0])
     matched = {}
     for sku in catalog:
-        sq = sku_squash(sku)
+        sq = catalog_sq[sku]
         hit = next((n for n, nsq in index_sq if name_matches_sku(nsq, sq)), None)
         matched[sku] = hit
         cat = cat_of.get(sku, "?")
@@ -97,7 +98,7 @@ def main():
             per_cat[cat][0] += 1
 
     total_hit = sum(1 for v in matched.values() if v)
-    print(f"== 0.2a catalog-wide name coverage (DETERMINISTIC LOWER BOUND) ==")
+    print("== 0.2a catalog-wide name coverage (DETERMINISTIC LOWER BOUND) ==")
     print(f"   {total_hit}/{len(catalog)} catalog SKUs have a name-matched index row "
           f"({100*total_hit/len(catalog):.0f}%)")
     for cat in sorted(per_cat, key=lambda c: per_cat[c][0]/max(per_cat[c][1],1)):
@@ -122,8 +123,8 @@ def main():
                 if x0 - X_SLACK <= x <= x1 + X_SLACK:
                     facing[sid].append(cp_id)
 
-    print(f"\n== 0.2a fridge-region truth (shelves 6/7/8 only - the ONLY slot-level truth) ==")
-    print(f"   facing checkpoints: " +
+    print("\n== 0.2a fridge-region truth (shelves 6/7/8 only - the ONLY slot-level truth) ==")
+    print("   facing checkpoints: " +
           ", ".join(f"shelf{sid}->{sorted(cps)}" for sid, cps in sorted(facing.items())))
     n_any = n_right = 0
     misses = []
@@ -149,7 +150,7 @@ def main():
 
     # ---- 3. inverse: index rows with no catalog referent (hallucination floor) ----
     ghosts = [n for n, nsq in index_sq
-              if not any(name_matches_sku(nsq, sku_squash(s)) for s in catalog)]
+              if not any(name_matches_sku(nsq, s_sq) for s_sq in catalog_sq.values())]
     print(f"\n== index names with NO catalog match (misread or invented): "
           f"{len(ghosts)}/{len(index_names)} ==")
     for g in ghosts:

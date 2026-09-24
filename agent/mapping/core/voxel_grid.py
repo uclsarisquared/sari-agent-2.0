@@ -28,7 +28,7 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from occupancy_grid import OccupancyGrid  # noqa: E402
+from occupancy_grid import OccupancyGrid, add_disc  # noqa: E402
 from mapping import iter_banded_hits, SENSOR_HEIGHT_OFFSET_M  # noqa: E402
 
 
@@ -171,29 +171,12 @@ class VoxelGrid:
         return n_hits
 
     def mark_blocked_region(self, world_xz, height_above_root, radius_m):
-        """Record a swept-clearance-detected obstacle (explore.py's stuck branch) as
-        occupied evidence in the voxel grid, at the offending hit's observed height, over a
-        body-radius disc - the 3D replacement for OccupancyGrid.mark_occupied_region.
-
-        This mark comes from swept_clearance_ahead reading real LiDAR (often a thin edge the
-        height-filtered integrate missed), so it's a legitimate observation, not a nav hack -
-        writing it into the voxel grid rather than the collapsed 2D grid (which the next
-        collapse() would wipe) keeps one source of truth and lets it erode/reinforce like any
-        other evidence. A single bin suffices: the occupied-priority collapse ORs across the
-        whole column, so one occupied bin makes the 2D cell read occupied. Takes effect on the
-        next collapse() - which, since collapse() runs at the top of each explore step before
-        the planner reads the grid, is the same timing the old immediate 2D mark had."""
+        """Record a swept-clearance-detected obstacle as occupied evidence over a body-radius
+        disc at the hit's height bin. Written to the voxels (not the 2D grid, which collapse()
+        overwrites); one bin suffices since collapse ORs occupancy over the column."""
         cx, cz = self.grid.cell(*world_xz)
-        cy = self._height_bin(height_above_root)
-        r_cells = int(round(radius_m / self.res))
-        occ_inc = OccupancyGrid.OCCUPIED_INCREMENT
-        for dx in range(-r_cells, r_cells + 1):
-            for dz in range(-r_cells, r_cells + 1):
-                if dx * dx + dz * dz > r_cells * r_cells:
-                    continue
-                nx, nz = cx + dx, cz + dz
-                if 0 <= nx < self.n and 0 <= nz < self.n:
-                    self.voxels[nx, nz, cy] += occ_inc
+        add_disc(self.voxels, cx, cz, int(round(radius_m / self.res)),
+                 OccupancyGrid.OCCUPIED_INCREMENT, self._height_bin(height_above_root))
 
     def collapse(self):
         """Project the voxel grid down to the 2D self.grid.log_odds in place, by

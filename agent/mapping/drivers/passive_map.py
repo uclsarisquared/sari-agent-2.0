@@ -44,7 +44,6 @@ import os
 import sys
 import time
 
-import numpy as np
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/drivers
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -53,80 +52,23 @@ if _MAPPING_DIR not in sys.path:
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from sim.env import TransformAgent, SetHandsActive  # noqa: E402
 
-from voxel_grid import VoxelGrid
-from pointcloud_map import PointCloudMap
-from lidar_client import RequestLidarScan
-from mapping import scan_to_world_points_3d, SENSOR_HEIGHT_OFFSET_M, SELF_EXCLUSION_RANGE_M
-from topology import (
-    extract_topology, save_topology,
+from pointcloud_map import PointCloudMap  # noqa: E402
+from lidar_client import RequestLidarScan  # noqa: E402
+from mapping import scan_to_world_points_3d, SENSOR_HEIGHT_OFFSET_M, SELF_EXCLUSION_RANGE_M  # noqa: E402
+from topology import (  # noqa: E402
     DEFAULT_MIN_BRANCH_LENGTH_M, DEFAULT_DOORWAY_MAX_WIDTH_M, DEFAULT_DOORWAY_WIDTH_RATIO,
 )
-
-
-def save_snapshot(grid, output_dir, tag):
-    os.makedirs(output_dir, exist_ok=True)
-    np.save(os.path.join(output_dir, f"grid_{tag}.npy"), grid.log_odds)
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-
-    display = np.full(grid.log_odds.shape, 0.5)
-    display[grid.log_odds < grid.FREE_THRESHOLD] = 1.0
-    display[grid.log_odds > grid.OCCUPIED_THRESHOLD] = 0.0
-
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(display.T, origin="lower", cmap="gray", vmin=0, vmax=1)
-
-    # Crop to the explored region (plus a 1m margin) instead of the full grid extent - most
-    # of a 60m grid is still "unknown" gray on any run that hasn't mapped the whole store, so
-    # a full-extent plot renders the actual store as a small blob in the middle. Matches the
-    # crop build_shelf_graph.py uses, so the occupancy PNG and the graph PNG frame the same area.
-    known_cells = np.argwhere(display.T != 0.5)
-    if len(known_cells) > 0:
-        margin = int(round(1.0 / grid.res))  # 1m padding
-        y0, x0 = known_cells.min(axis=0) - margin
-        y1, x1 = known_cells.max(axis=0) + margin
-        ax.set_xlim(max(0, x0), min(grid.log_odds.shape[0], x1))
-        ax.set_ylim(max(0, y0), min(grid.log_odds.shape[1], y1))
-
-    ax.set_title(f"Occupancy grid ({tag})")
-    fig.savefig(os.path.join(output_dir, f"grid_{tag}.png"), dpi=150)
-    plt.close(fig)
-
-
-def _clear_output_dir(output_dir):
-    """Delete every file already in output_dir before a new run starts (same as explore.py's
-    own _clear_output_dir), so the folder only ever holds this run's grid_*/points_*/topology_*
-    outputs instead of a previous run's leftovers (e.g. a higher scan count, or a stale
-    grid_final.*). Only removes files directly inside output_dir (not subdirectories); a no-op
-    if output_dir doesn't exist yet."""
-    if not os.path.isdir(output_dir):
-        return
-    removed = 0
-    for name in os.listdir(output_dir):
-        path = os.path.join(output_dir, name)
-        if os.path.isfile(path):
-            os.remove(path)
-            removed += 1
-    if removed:
-        print(f"[passive_map] cleared {removed} file(s) from a previous run in {output_dir}")
+# Same snapshot/clear/voxel/topology helpers as explore.py, so the outputs are a drop-in.
+from explore import _clear_output_dir, extract_final_topology, make_voxel, save_snapshot  # noqa: E402
 
 
 def run(args):
     if args.clear_output:
-        _clear_output_dir(args.output_dir)
+        _clear_output_dir(args.output_dir, label="passive_map")
     # Same pipeline as explore.py: scans update a 3D VoxelGrid, collapsed each scan to
     # voxel.grid (the 2D OccupancyGrid consumers read). The occupied-priority collapse is what
     # keeps shelf faces solid instead of the gappy read a flat 2D integrate produces.
-    voxel = VoxelGrid(
-        size_m=args.size, resolution=args.resolution,
-        min_obstacle_height=args.min_obstacle_height,
-        max_obstacle_height=args.max_obstacle_height,
-        sensor_height_offset=args.sensor_height_offset,
-    )
+    voxel = make_voxel(args)
     grid = voxel.grid
     cloud = PointCloudMap()
 
@@ -193,23 +135,8 @@ def run(args):
         cloud.save(args.output_dir, "final")
         print(f"\n[passive_map] saved final grid + point cloud to {args.output_dir}")
         if args.extract_topology:
-            # Same base topology explore.py extracts (aisle ends / junctions / doorway pinch
-            # points), so a passive map is a drop-in input for build_shelf_graph.py.
-            # min_checkpoint_clearance_m=body_radius drops checkpoints the agent's body can't
-            # fit at, matching explore.
-            topology = extract_topology(
-                grid, connectivity=args.connectivity,
-                min_branch_length_m=args.topology_min_branch_length_m,
-                doorway_max_width_m=args.topology_doorway_max_width_m,
-                doorway_width_ratio=args.topology_doorway_width_ratio,
-                min_checkpoint_clearance_m=args.body_radius,
-            )
-            topology_path = save_topology(topology, args.output_dir, "final")
-            kind_counts = {}
-            for c in topology.checkpoints:
-                kind_counts[c.kind] = kind_counts.get(c.kind, 0) + 1
-            print(f"[passive_map] saved topology ({len(topology.checkpoints)} checkpoints "
-                  f"{kind_counts}, {len(topology.edges)} edges) to {topology_path}")
+            # Same base topology explore.py extracts: a drop-in input for build_shelf_graph.py.
+            extract_final_topology(args, grid, label="passive_map")
         if args.stow_hands:
             SetHandsActive(True, uri=args.uri)
 

@@ -40,6 +40,7 @@ import re
 import sys
 import time
 from datetime import datetime
+from functools import lru_cache
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/scoring
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -70,14 +71,18 @@ def cps_matching(sm, *substrings):
             if any(s in squash(r["name"]) for s in subs)}
 
 
+@lru_cache(maxsize=1)
+def _catalog():
+    with open(CATALOG, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def cps_with_allergen(sm, allergen):
     """Checkpoints holding an index row whose name matches a catalog SKU carrying `allergen`.
     This is the ONLY defensible expectation set for the ingredient stratum: it joins the
     catalog's ground-truth allergen string to the index by name, so it credits the resolver for
     any genuinely correct answer and never for a guess the store cannot support."""
-    with open(CATALOG, encoding="utf-8") as f:
-        catalog = json.load(f)
-    skus = [k for k, v in catalog.items()
+    skus = [k for k, v in _catalog().items()
             if v.get("allergens") and allergen.lower() in v["allergens"].lower()]
     sq = [sku_squash(s) for s in skus]
     out = set()

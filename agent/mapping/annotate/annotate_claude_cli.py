@@ -50,10 +50,7 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from annotator_sys_inst import (  # noqa: E402
-    SYS_INST_CLASSIFY, CLASSIFY_SCHEMA,
-    build_annotation_instructions, schema_for, effective_kind,
-)
+from annotator_sys_inst import resolve_request  # noqa: E402
 
 DEFAULT_MODEL = "sonnet"
 DEFAULT_EFFORT = "medium"
@@ -158,14 +155,6 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=DEFAULT_
     return result, envelope
 
 
-def _build_request(args):
-    """Resolve which prompt + schema + label this invocation uses (classify vs annotate, by kind)."""
-    if args.classify:
-        return SYS_INST_CLASSIFY, CLASSIFY_SCHEMA, "classify"
-    kind = "non_shelf" if args.kind == "non_shelf" else effective_kind(args.kind)
-    return build_annotation_instructions(kind), schema_for(kind), f"annotate:{kind}"
-
-
 def main():
     p = argparse.ArgumentParser(description="Annotate one capture via `claude -p` (rides the claude.ai / Max-plan login).")
     p.add_argument("image", help="STANDING view (a PNG from the capture walk)")
@@ -178,7 +167,7 @@ def main():
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     args = p.parse_args()
 
-    system, schema, label = _build_request(args)
+    system, schema, label = resolve_request(args.classify, args.kind)
     print(f"[claude-cli] {label}  model={args.model} effort={args.effort}  {os.path.basename(args.image)}")
     try:
         views = [(lbl, pth) for lbl, pth in (("DOWN", args.down), ("UP", args.up)) if pth]

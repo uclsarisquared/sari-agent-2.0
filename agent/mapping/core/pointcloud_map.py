@@ -28,12 +28,7 @@ class PointCloudMap:
         np.save(path, self.to_array())
 
     def save_ply(self, path):
-        """Re-serializes the ENTIRE accumulated cloud every call (self._points is never
-        pruned), one Python-level f.write() per point - unlike save_npy's vectorized
-        np.save, this doesn't scale, and gets slower each call as the run goes on since it
-        rewrites points already written out unchanged by an earlier call. Fine for a
-        one-off final export; expensive as a periodic per-step save - see save()'s
-        include_ply."""
+        """ASCII PLY of the whole accumulated cloud - slow and growing; use for the final export."""
         pts = self.to_array()
         with open(path, "w") as f:
             f.write("ply\n")
@@ -47,11 +42,7 @@ class PointCloudMap:
                 f.write(f"{x} {y} {z}\n")
 
     def save(self, output_dir, tag, include_ply=True):
-        """include_ply=False skips the .ply write - save_ply() re-serializes the WHOLE
-        accumulated cloud with a per-point Python write() loop (see its docstring), which
-        gets slower every call as the cloud grows across a run. Callers doing frequent
-        periodic saves (e.g. every --save-every steps) should pass False and reserve the
-        .ply export for the final save."""
+        """Save points_<tag>.npy (+ .ply unless include_ply=False, for periodic saves)."""
         os.makedirs(output_dir, exist_ok=True)
         self.save_npy(os.path.join(output_dir, f"points_{tag}.npy"))
         if include_ply:

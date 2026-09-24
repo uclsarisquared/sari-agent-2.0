@@ -313,13 +313,13 @@ def main():
     print(f"   names -> single SKU        : {len(snapped)}")
     print(f"   names -> variant family    : {len(family)}  (variant_uncertain)")
     print(f"   names -> null (ghosts)     : {len(ghosts)}")
-    print(f"\n-- fuzzy snaps (the reconciler's actual work - AUDIT THESE) --")
+    print("\n-- fuzzy snaps (the reconciler's actual work - AUDIT THESE) --")
     for n, r in sorted(names.items()):
         m = r["match"]
         if m["method"] in ("fuzzy", "fuzzy_family"):
             tgt = r["sku"] or f"family{r['sku_candidates']}"
             print(f"   {m['score']:.2f}  {n:<42} -> {tgt}")
-    print(f"\n-- remaining ghosts (no defensible catalog referent) --")
+    print("\n-- remaining ghosts (no defensible catalog referent) --")
     for n, r in sorted(ghosts.items()):
         print(f"   {r['match']['score']:.2f}  {n:<42} (nearest {r['match'].get('nearest')})")
     print(f"\n   -> {out}")

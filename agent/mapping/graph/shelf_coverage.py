@@ -11,6 +11,9 @@ chains into Phase 1's graph) composes from repeated calls to this.
 import math
 import os
 import sys
+from collections import deque
+
+import numpy as np
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/graph
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -399,18 +402,19 @@ def _unobserved_clusters(occupied, free, observed_cells, res, *, min_cells, obse
     counter as its own cluster because the wall cells beside it are read by shelf checkpoints and
     drop out before clustering ever happens.
     """
-    from collections import deque
-
     h, w = occupied.shape
     r2 = (observed_radius_m / res) ** 2
     unobserved = occupied.copy()
-    for x, z in zip(*(a.tolist() for a in occupied.nonzero())):
-        for sx, sz in observed_cells:
-            if (sx - x) ** 2 + (sz - z) ** 2 <= r2:
-                unobserved[x, z] = False
-                break
+    occ = np.argwhere(occupied)
+    if len(occ) and len(observed_cells):
+        obs = np.asarray(observed_cells, dtype=np.int64)
+        for i in range(0, len(occ), 4096):  # chunked (occupied x observed) distance test
+            chunk = occ[i:i + 4096]
+            d2 = ((chunk[:, None, :] - obs[None, :, :]) ** 2).sum(axis=2)
+            hit = chunk[(d2 <= r2).any(axis=1)]
+            unobserved[hit[:, 0], hit[:, 1]] = False
 
-    seen = unobserved.copy() & False
+    seen = np.zeros_like(unobserved)
     out = []
     for x0, z0 in zip(*(a.tolist() for a in unobserved.nonzero())):
         if seen[x0, z0]:
@@ -516,6 +520,7 @@ def find_landmark_checkpoints(grid, graph, *,
         # structure and keep the standable candidate that ends up closest to the ideal reading
         # distance. Line-of-sight is checked against the same inflated mask A* uses, so a landmark
         # node is reachable by construction - the counter is not much use if the executor won't go.
+        cells_arr = np.asarray(cells)
         cx = sum(c[0] for c in cells) / len(cells)
         cz = sum(c[1] for c in cells) / len(cells)
         reach = int(math.ceil(max_approach_m / grid.res))
@@ -526,7 +531,8 @@ def find_landmark_checkpoints(grid, graph, *,
                     continue
                 if too_tight[x, z]:
                     continue
-                target = min(cells, key=lambda t: math.hypot(t[0] - x, t[1] - z))
+                # nearest structure cell (first on ties, like min())
+                target = cells[int(np.argmin((cells_arr[:, 0] - x) ** 2 + (cells_arr[:, 1] - z) ** 2))]
                 d_m = math.hypot(target[0] - x, target[1] - z) * grid.res
                 # Accept a RANGE and score toward the ideal, rather than demanding an exact
                 # distance. find_shelf_checkpoint can insist on max_reading_distance_m because it
@@ -556,8 +562,7 @@ def find_landmark_checkpoints(grid, graph, *,
         # the camera at whichever corner happens to be closest, so a compact structure lands in the
         # corner of frame. The centroid is inside the structure and therefore occupied, which is
         # fine - shelf_cell is only ever used as a bearing target.
-        centre = (int(round(sum(c[0] for c in cells) / len(cells))),
-                  int(round(sum(c[1] for c in cells) / len(cells))))
+        centre = (int(round(cx)), int(round(cz)))
 
         interaction_xz = dock_interaction_xz(
             grid, occupied, cells, cell, centre, body_radius=body_radius,

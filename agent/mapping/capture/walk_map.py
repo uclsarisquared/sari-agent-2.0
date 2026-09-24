@@ -230,9 +230,10 @@ def main():
 
     if note:
         print(f"[walk_map] note: {note}")
-    for problem in check_alignment(topology, annotations):
+    problems = check_alignment(topology, annotations)
+    for problem in problems:
         print(f"[walk_map] *** STALE ANNOTATIONS: {problem}")
-    if check_alignment(topology, annotations):
+    if problems:
         print("[walk_map] *** Summaries below may describe a DIFFERENT shelf than the one you are\n"
               "[walk_map] *** standing at. Re-run capture_walk + annotate_pass against "
               f"topology_{args.topology_tag} to fix.\n")

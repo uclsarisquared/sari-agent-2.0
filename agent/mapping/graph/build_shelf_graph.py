@@ -20,10 +20,10 @@ Run from anywhere:
     python mapping/graph/build_shelf_graph.py mapping/output --tag final
 """
 import argparse
+import json
 import os
 import sys
-
-import numpy as np
+from collections import Counter
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/graph
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
@@ -31,9 +31,9 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from occupancy_grid import OccupancyGrid  # noqa: E402
+from occupancy_grid import draw_grid, load_grid  # noqa: E402
 from topology import (  # noqa: E402
-    extract_topology, save_topology,
+    extract_topology, kind_counts, save_topology,
     DEFAULT_MIN_BRANCH_LENGTH_M, DEFAULT_DOORWAY_MAX_WIDTH_M, DEFAULT_DOORWAY_WIDTH_RATIO,
 )
 from shelf_coverage import (  # noqa: E402
@@ -47,13 +47,6 @@ _KIND_COLORS = {"junction": "red", "end": "dodgerblue", "doorway": "limegreen",
 _SHELF_SIDE_COLORS = {"left": "orange", "right": "magenta"}
 
 
-def _load_grid(output_dir, tag, resolution):
-    log_odds = np.load(os.path.join(output_dir, f"grid_{tag}.npy"))
-    grid = OccupancyGrid(size_m=log_odds.shape[0] * resolution, resolution=resolution)
-    grid.log_odds = log_odds
-    return grid
-
-
 def _warn_if_topology_mismatch(output_dir, tag, graph):
     """Best-effort sanity check: if explore.py already saved topology_<tag>.json for this
     same grid, the freshly re-extracted graph should match it exactly. A mismatch doesn't
@@ -63,14 +56,10 @@ def _warn_if_topology_mismatch(output_dir, tag, graph):
     path = os.path.join(output_dir, f"topology_{tag}.json")
     if not os.path.exists(path):
         return
-    import json
     with open(path) as f:
         saved = json.load(f)
-    saved_kinds, fresh_kinds = {}, {}
-    for c in saved["checkpoints"]:
-        saved_kinds[c["kind"]] = saved_kinds.get(c["kind"], 0) + 1
-    for c in graph.checkpoints:
-        fresh_kinds[c.kind] = fresh_kinds.get(c.kind, 0) + 1
+    saved_kinds = dict(Counter(c["kind"] for c in saved["checkpoints"]))
+    fresh_kinds = kind_counts(graph.checkpoints)
     if len(saved["checkpoints"]) != len(graph.checkpoints) or len(saved["edges"]) != len(graph.edges) \
             or saved_kinds != fresh_kinds:
         print(f"[build_shelf_graph] WARNING: freshly re-extracted topology does not match "
@@ -92,23 +81,8 @@ def _plot(grid, graph, output_dir, out_tag):
         print("[build_shelf_graph] matplotlib not available, skipping PNG")
         return None
 
-    display = np.full(grid.log_odds.shape, 0.5)
-    display[grid.log_odds < grid.FREE_THRESHOLD] = 1.0
-    display[grid.log_odds > grid.OCCUPIED_THRESHOLD] = 0.0
-
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(display.T, origin="lower", cmap="gray", vmin=0, vmax=1)
-
-    # Crop to the explored region (plus a margin) instead of the full grid extent - most
-    # of a 60m grid is still "unknown" gray on any run that hasn't mapped the whole store,
-    # and a plot that's 90% empty makes the actual checkpoint graph unreadable.
-    known_cells = np.argwhere(display.T != 0.5)
-    if len(known_cells) > 0:
-        margin = int(round(1.0 / grid.res))  # 1m padding
-        y0, x0 = known_cells.min(axis=0) - margin
-        y1, x1 = known_cells.max(axis=0) + margin
-        ax.set_xlim(max(0, x0), min(grid.log_odds.shape[0], x1))
-        ax.set_ylim(max(0, y0), min(grid.log_odds.shape[1], y1))
+    draw_grid(ax, grid)  # cropped to the explored region, same framing as grid_*.png
 
     by_id = {c.id: c for c in graph.checkpoints}
     for e in graph.edges:
@@ -169,7 +143,7 @@ def main():
     args = build_parser().parse_args()
     out_tag = args.out_tag or f"{args.tag}_shelf"
 
-    grid = _load_grid(args.output_dir, args.tag, args.resolution)
+    grid = load_grid(args.output_dir, args.tag, args.resolution)
     graph = extract_topology(
         grid, connectivity=args.connectivity, min_branch_length_m=args.min_branch_length_m,
         doorway_max_width_m=args.doorway_max_width_m, doorway_width_ratio=args.doorway_width_ratio,

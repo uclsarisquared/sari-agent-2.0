@@ -41,10 +41,9 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
 import capture_walk  # noqa: E402
 from annotate_pass import (  # noqa: E402
-    AnnotateError, DEFAULT_JOBS, add_annotator_args, annotate_checkpoint,
-    resolve_annotate_fn, write_derived_outputs,
+    AnnotateError, DEFAULT_JOBS, add_annotator_args, annotate_checkpoint, annotation_detail,
+    load_resumed, output_paths, resolve_annotate_fn, save_annotations, write_derived_outputs,
 )
-from annotator_sys_inst import SHELF_KIND  # noqa: E402
 
 
 def build_parser():
@@ -59,18 +58,14 @@ def build_parser():
 
 def run(args):
     annotate_fn = resolve_annotate_fn(args)
-    with open(os.path.join(args.output_dir, f"topology_{args.topology_tag}.json"),
-              encoding="utf-8") as f:
+    topo_path = os.path.join(args.output_dir, f"topology_{args.topology_tag}.json")
+    with open(topo_path, encoding="utf-8") as f:
         topology = json.load(f)
 
-    ann_path = os.path.join(args.output_dir, f"annotations_{args.out_tag}.json")
-    prod_path = os.path.join(args.output_dir, f"products_{args.out_tag}.json")
-    map_path = os.path.join(args.output_dir, f"semantic_map_{args.out_tag}.txt")
+    ann_path, prod_path, map_path = output_paths(args.output_dir, args.out_tag)
 
-    annotations = {}
-    if args.resume and os.path.exists(ann_path):
-        with open(ann_path, encoding="utf-8") as f:
-            annotations = json.load(f)
+    annotations = load_resumed(ann_path, args.resume)
+    if annotations:
         print(f"[fused] resuming - {len(annotations)} checkpoint(s) already annotated "
               f"(skipped by the walk too)")
 
@@ -93,12 +88,8 @@ def run(args):
             stats["failed"] += 1
             return
         annotations[str(cp["id"])] = rec
-        with open(ann_path, "w", encoding="utf-8") as f:
-            json.dump(annotations, f, indent=2, ensure_ascii=False)
-        ann = rec["annotation"]
-        detail = (f"{ann.get('shelf_type')} {len(ann.get('items', []))} item(s)"
-                  if rec["effective_kind"] == SHELF_KIND else "non-shelf")
-        print(f"[fused] id={cp['id']:3d} annotated -> {rec['effective_kind']:9s} {detail} "
+        save_annotations(annotations, ann_path)
+        print(f"[fused] id={cp['id']:3d} annotated -> {rec['effective_kind']:9s} {annotation_detail(rec)} "
               f"(${rec['cost_equiv_usd'] or 0:.3f})")
         stats["done"] += 1
 
@@ -128,7 +119,7 @@ def run(args):
 
         products = write_derived_outputs(
             annotations, topology, ann_path, prod_path, map_path,
-            topo_path=os.path.join(args.output_dir, f"topology_{args.topology_tag}.json"),
+            topo_path=topo_path,
             output_dir=args.output_dir)
         total_cost = sum(r.get("cost_equiv_usd") or 0 for r in annotations.values())
         print(f"[fused] done: {stats['done']} annotated, {stats['failed']} failed; "

@@ -64,15 +64,15 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from sim.env import SetHandsActive  # noqa: E402
-
 # Imported, not reimplemented - this is what makes the two arms comparable. See the docstring.
 from explore import (  # noqa: E402
     _clear_output_dir,
-    _explore_loop,
     build_parser,
+    extract_final_topology,
+    frontier_planner_kwargs,
+    make_voxel,
+    run_with_hands_stowed,
     save_snapshot,
-    step_agent,
 )
 from frontier_planner import FrontierPlanner  # noqa: E402
 from nav_metrics import (  # noqa: E402
@@ -83,9 +83,7 @@ from nav_metrics import (  # noqa: E402
     write_run_report,
 )
 from pointcloud_map import PointCloudMap  # noqa: E402
-from topology import extract_topology, save_topology  # noqa: E402
 from vlm_planner import DEFAULT_MODEL, VLMAdvisedPlanner, VLMFrontierPlanner, VLMGoalPlanner  # noqa: E402
-from voxel_grid import VoxelGrid  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = os.path.join(_MAPPING_DIR, "output_vlm")
 FROZEN_OUTPUT_DIR = os.path.join(_MAPPING_DIR, "output")
@@ -187,19 +185,7 @@ def build_vlm_parser():
 def build_planner(args, grid):
     """The entire independent variable of the experiment lives in this function."""
     if args.planner == "astar":
-        return FrontierPlanner(
-            grid,
-            min_cluster_size=args.min_cluster_size, connectivity=args.connectivity,
-            goal_arrival_radius=args.goal_arrival_radius,
-            waypoint_arrival_radius=args.waypoint_arrival_radius,
-            replan_stuck_steps=args.replan_stuck_steps,
-            replan_no_progress_steps=args.replan_no_progress_steps,
-            min_progress_m=args.min_progress_m, goal_blocklist_steps=args.goal_blocklist_steps,
-            window_slack=args.window_slack, min_window_cells=args.min_window_cells,
-            astar_max_window_cells=args.astar_max_window_cells,
-            max_replans_without_moving=args.max_replans_without_moving,
-            body_radius=args.body_radius, debug=args.debug_planner,
-        )
+        return FrontierPlanner(grid, **frontier_planner_kwargs(args))
 
     capture_dir = os.path.join(args.output_dir, "vlm_inputs") if args.save_vlm_inputs else None
     common = dict(
@@ -210,19 +196,7 @@ def build_planner(args, grid):
         capture_dir=capture_dir, debug=args.debug_vlm,
     )
     if args.planner == "vlm-goal":
-        return VLMGoalPlanner(
-            grid, **common,
-            min_cluster_size=args.min_cluster_size, connectivity=args.connectivity,
-            goal_arrival_radius=args.goal_arrival_radius,
-            waypoint_arrival_radius=args.waypoint_arrival_radius,
-            replan_stuck_steps=args.replan_stuck_steps,
-            replan_no_progress_steps=args.replan_no_progress_steps,
-            min_progress_m=args.min_progress_m, goal_blocklist_steps=args.goal_blocklist_steps,
-            window_slack=args.window_slack, min_window_cells=args.min_window_cells,
-            astar_max_window_cells=args.astar_max_window_cells,
-            max_replans_without_moving=args.max_replans_without_moving,
-            body_radius=args.body_radius, debug=args.debug_planner,
-        )
+        return VLMGoalPlanner(grid, **common, **frontier_planner_kwargs(args))
     cls = VLMAdvisedPlanner if args.planner == "vlm-advised" else VLMFrontierPlanner
     return cls(
         grid, **common,
@@ -251,12 +225,7 @@ def run(args):
     if args.clear_output:
         _clear_output_dir(args.output_dir)
 
-    voxel = VoxelGrid(
-        size_m=args.size, resolution=args.resolution,
-        min_obstacle_height=args.min_obstacle_height,
-        max_obstacle_height=args.max_obstacle_height,
-        sensor_height_offset=args.sensor_height_offset,
-    )
+    voxel = make_voxel(args)
     grid = voxel.grid
     cloud = PointCloudMap()
 
@@ -264,16 +233,8 @@ def run(args):
     print(f"[explore-vlm] planner={args.planner} mode={args.vlm_mode} model={args.model} "
           f"ascii_map_res={args.ascii_map_res} -> {args.output_dir}")
 
-    pos, rot, _ = step_agent((0, 0, 0), (0, 0, 0), args.uri)
-
-    if args.stow_hands:
-        SetHandsActive(False, uri=args.uri)
-    try:
-        # explore.py's loop, unmodified, with only `planner` differing between arms.
-        _explore_loop(args, voxel, grid, cloud, pos, rot, planner)
-    finally:
-        if args.stow_hands:
-            SetHandsActive(True, uri=args.uri)
+    # explore.py's loop, unmodified, with only `planner` differing between arms.
+    run_with_hands_stowed(args, voxel, grid, cloud, planner)
 
     save_snapshot(grid, args.output_dir, "final", interactive_backend=args.show_map,
                   show_now=args.show_map)
@@ -307,16 +268,7 @@ def run(args):
         print(f"[explore-vlm] wrote {len(planner.planner.decisions)} VLM decisions to {decisions}")
 
     if args.extract_topology:
-        topology = extract_topology(
-            grid, connectivity=args.connectivity,
-            min_branch_length_m=args.topology_min_branch_length_m,
-            doorway_max_width_m=args.topology_doorway_max_width_m,
-            doorway_width_ratio=args.topology_doorway_width_ratio,
-            min_checkpoint_clearance_m=args.body_radius,
-        )
-        path = save_topology(topology, args.output_dir, tag)
-        print(f"[explore-vlm] saved topology ({len(topology.checkpoints)} checkpoints, "
-              f"{len(topology.edges)} edges) to {path}")
+        extract_final_topology(args, grid, tag, label="explore-vlm")
 
     print(f"[explore-vlm] saved final grid + point cloud to {args.output_dir}")
     print(f"[explore-vlm] report -> {report}")

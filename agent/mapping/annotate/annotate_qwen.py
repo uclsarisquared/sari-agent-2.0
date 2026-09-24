@@ -40,10 +40,7 @@ from agent_core.llm import (  # noqa: E402
     ChatEndpoint, EndpointProfile, image_url_part,
 )
 from agent_core.models import annotator_model  # noqa: E402
-from annotator_sys_inst import (  # noqa: E402
-    SYS_INST_CLASSIFY, CLASSIFY_SCHEMA,
-    build_annotation_instructions, schema_for, effective_kind,
-)
+from annotator_sys_inst import resolve_request  # noqa: E402
 
 DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in secrets.env
 DEFAULT_TIMEOUT_S = 300.0
@@ -56,7 +53,7 @@ class EndpointAnnotateError(RuntimeError):
     is skipped and --resume continues, instead of killing the whole pass."""
 
 
-def _image_part(label, path, model):
+def _image_part(label, path):
     with open(path, "rb") as f:
         raw = f.read()
     mime = mimetypes.guess_type(path)[0] or "image/png"
@@ -83,14 +80,15 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
     transport = ChatEndpoint(profile, timeout=timeout)
     model = profile.model
 
-    content = _image_part("STANDING", image_path, model)
+    content = _image_part("STANDING", image_path)
     for label, path in (extra_views or []):
-        content += _image_part(label, path, model)
+        content += _image_part(label, path)
 
+    # Static system prompt first, per-call images last: keeps the cacheable prefix byte-stable.
     messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": content},
-        ]
+        {"role": "system", "content": system},
+        {"role": "user", "content": content},
+    ]
     extra = ({"chat_template_kwargs": {"enable_thinking": think}}
              if profile.provider == "vllm" else None)
 
@@ -128,13 +126,6 @@ def annotate(image_path, system, schema, *, model=DEFAULT_MODEL, effort=None,
     return result, envelope
 
 
-def _build_request(args):
-    if args.classify:
-        return SYS_INST_CLASSIFY, CLASSIFY_SCHEMA, "classify"
-    kind = "non_shelf" if args.kind == "non_shelf" else effective_kind(args.kind)
-    return build_annotation_instructions(kind), schema_for(kind), f"annotate:{kind}"
-
-
 def main():
     p = argparse.ArgumentParser(description="Annotate one capture via the configured endpoint.")
     p.add_argument("image", help="STANDING view (a PNG from the capture walk)")
@@ -148,7 +139,7 @@ def main():
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     args = p.parse_args()
 
-    system, schema, label = _build_request(args)
+    system, schema, label = resolve_request(args.classify, args.kind)
     views = [("CROUCHED", args.crouch)] if args.crouch else None
     print(f"[endpoint] {label}  model={args.model}  {os.path.basename(args.image)}")
     try:

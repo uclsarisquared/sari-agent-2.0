@@ -26,28 +26,19 @@ import json
 import os
 import sys
 
-import numpy as np
-
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/graph
 _MAPPING_DIR = os.path.dirname(_THIS_DIR)                         # mapping
 if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from occupancy_grid import OccupancyGrid  # noqa: E402
+from occupancy_grid import load_grid  # noqa: E402
 from topology import _distance_to_occupied  # noqa: E402
 
 DEFAULT_STANDOFF_M = 0.75
 """The clearance explore.py's executor effectively demands ahead of it before it will move at
 all: --safety-margin (0.65) + --min-step (0.1). Checkpoints below this are the ones the
 annotator's navigator may not be able to reach."""
-
-
-def load_grid(output_dir, tag, resolution):
-    log_odds = np.load(os.path.join(output_dir, f"grid_{tag}.npy"))
-    grid = OccupancyGrid(size_m=log_odds.shape[0] * resolution, resolution=resolution)
-    grid.log_odds = log_odds
-    return grid
 
 
 def audit(grid, checkpoints, standoff_m, connectivity=8):

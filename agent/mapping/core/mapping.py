@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 SENSOR_HEIGHT_OFFSET_M = 1.485
 """Meters the LiDAR sensor sits above the agent's reported root position
 (world_pos[1], i.e. what TransformAgent reports as translation). Unity's
@@ -47,60 +49,42 @@ def _hit_height_above_root(v_deg, r, sensor_height_offset=SENSOR_HEIGHT_OFFSET_M
     return r * math.sin(math.radians(v_deg)) + sensor_height_offset
 
 
+def _scan_arrays(scan):
+    """(ranges[ch, az], v_deg[ch, 1], az_deg[az]) as float arrays, in scan order."""
+    channels, samples = scan["channels"], scan["azimuth_samples"]
+    ranges = np.asarray(scan["ranges"][:channels * samples], dtype=float).reshape(channels, samples)
+    v_deg = np.asarray(scan["vertical_angles_deg"][:channels], dtype=float).reshape(channels, 1)
+    az_deg = scan["azimuth_start_deg"] + np.arange(samples) * scan["azimuth_step_deg"]
+    return ranges, v_deg, az_deg
+
+
+def _to_world_xz(lx, lz, world_pos, yaw_deg):
+    """Rotate sensor-local (x, z) by Unity's left-handed Euler(0, yaw, 0) and offset."""
+    yaw = math.radians(yaw_deg)
+    cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+    return lx * cos_y + lz * sin_y + world_pos[0], -lx * sin_y + lz * cos_y + world_pos[2]
+
+
 def iter_banded_hits(scan, world_pos, yaw_deg, min_obstacle_height=0.05,
                      max_obstacle_height=2.0, sensor_height_offset=SENSOR_HEIGHT_OFFSET_M,
                      self_exclusion_range=SELF_EXCLUSION_RANGE_M):
-    """Shared projection core for the height-banded 2D mapping path: yields
-    (wx, wz, height_above_root) for every LiDAR hit that clears the range/
-    self-exclusion filters AND falls within [min_obstacle_height,
-    max_obstacle_height] of the agent's own body (see _hit_height_above_root).
+    """Yield (wx, wz, height_above_root) for every hit that clears the range/self-exclusion
+    filters and falls within [min_obstacle_height, max_obstacle_height] of the agent's root.
 
-    Both scan_to_world_points() - which discards the height - and voxel_grid's
-    3D integrate - which bins by it - consume this, so the fragile rotation-sign
-    convention and the height-band filter live in exactly ONE place and can't
-    drift between the 2D grid and the voxel grid. Rotation sign follows Unity's
-    left-handed Y-up Euler(0, yaw, 0): verify against a real scan next to a known
-    wall before trusting it.
-
-    Horizontal placement uses the ground-projected distance r*cos(v_deg), NOT the
-    raw slant range r: a downward/upward-angled channel's hit is closer to the
-    sensor horizontally than its slant range by exactly cos(v), and an earlier
-    version that used r placed steep channels' hits too far out - smearing a shelf
-    face across a range of depths (worst near the FOV edges, e.g. ~40% over-range
-    at 45deg) and reading it as an over-thick, ragged block. This now matches the
-    same r*cos(v) decomposition _hit_height_above_root (r*sin(v)) and
-    scan_to_world_points_3d already use, so height and ground-distance come from
-    one consistent spherical->cartesian split.
+    Shared by scan_to_world_points() and VoxelGrid.integrate so the rotation convention and
+    height band live in one place. Horizontal placement uses the ground-projected distance
+    r*cos(v), not the slant range r (slant range smeared steep channels' hits too far out).
     """
-    yaw = math.radians(yaw_deg)
-    cos_y, sin_y = math.cos(yaw), math.sin(yaw)
-    channels = scan["channels"]
-    azimuth_samples = scan["azimuth_samples"]
-    ranges = scan["ranges"]
-    max_range = scan["max_range"]
-
+    ranges, v_deg, az_deg = _scan_arrays(scan)
+    v = np.radians(v_deg)
     exclusion_range = max(scan.get("min_range", 0.0), self_exclusion_range)
-    for ch in range(channels):
-        v_deg = scan["vertical_angles_deg"][ch]
-        horiz_scale = math.cos(math.radians(v_deg))
-        row_start = ch * azimuth_samples
-        for az_i in range(azimuth_samples):
-            r = ranges[row_start + az_i]
-            if r >= max_range - 1e-3:
-                continue
-            if r <= exclusion_range + 1e-3:
-                # Exclude unreliable near returns and the agent's own body, which can
-                # otherwise appear as a persistent obstacle near the sensor.
-                continue
-            height = _hit_height_above_root(v_deg, r, sensor_height_offset)
-            if not (min_obstacle_height <= height <= max_obstacle_height):
-                continue
-            horiz = r * horiz_scale  # ground-projected distance, not slant range
-            az = math.radians(scan["azimuth_start_deg"] + az_i * scan["azimuth_step_deg"])
-            lx, lz = math.sin(az) * horiz, math.cos(az) * horiz
-            wx = lx * cos_y + lz * sin_y + world_pos[0]
-            wz = -lx * sin_y + lz * cos_y + world_pos[2]
-            yield wx, wz, height
+    height = ranges * np.sin(v) + sensor_height_offset
+    keep = ((ranges < scan["max_range"] - 1e-3) & (ranges > exclusion_range + 1e-3)
+            & (height >= min_obstacle_height) & (height <= max_obstacle_height))
+    horiz = (ranges * np.cos(v))[keep]  # ground-projected distance, not slant range
+    az = np.radians(np.broadcast_to(az_deg, ranges.shape)[keep])
+    wx, wz = _to_world_xz(np.sin(az) * horiz, np.cos(az) * horiz, world_pos, yaw_deg)
+    yield from zip(wx.tolist(), wz.tolist(), height[keep].tolist())
 
 
 def scan_to_world_points(scan, world_pos, yaw_deg, min_obstacle_height=0.05,
@@ -129,43 +113,17 @@ def scan_to_world_points(scan, world_pos, yaw_deg, min_obstacle_height=0.05,
 
 def scan_to_world_points_3d(scan, world_pos, yaw_deg, vertical_band_deg=90.0,
                              sensor_height_offset=SENSOR_HEIGHT_OFFSET_M):
-    """Project LiDAR hits into world XYZ, keeping each channel's own height.
-
-    Unlike scan_to_world_points() (which filters to a collision-relevant
-    height band for the 2D mapping plane), this keeps every channel within
-    vertical_band_deg for the full 3D structure (point-cloud visualization),
-    correcting for sensor_height_offset (see SENSOR_HEIGHT_OFFSET_M - the
-    sensor tracks the live camera/head position, not world_pos[1] itself).
-    Same rotation convention as scan_to_world_points() (Unity left-handed
-    Y-up Euler(0, yaw, 0)).
-    """
-    yaw = math.radians(yaw_deg)
-    cos_y, sin_y = math.cos(yaw), math.sin(yaw)
-    points = []
-    channels = scan["channels"]
-    azimuth_samples = scan["azimuth_samples"]
-    ranges = scan["ranges"]
-    max_range = scan["max_range"]
-
-    for ch in range(channels):
-        v_deg = scan["vertical_angles_deg"][ch]
-        if abs(v_deg) > vertical_band_deg:
-            continue
-        v = math.radians(v_deg)
-        row_start = ch * azimuth_samples
-        for az_i in range(azimuth_samples):
-            r = ranges[row_start + az_i]
-            if r >= max_range - 1e-3:
-                continue
-            az = math.radians(scan["azimuth_start_deg"] + az_i * scan["azimuth_step_deg"])
-            horiz = r * math.cos(v)
-            ly = _hit_height_above_root(v_deg, r, sensor_height_offset)
-            lx, lz = math.sin(az) * horiz, math.cos(az) * horiz
-            wx = lx * cos_y + lz * sin_y + world_pos[0]
-            wz = -lx * sin_y + lz * cos_y + world_pos[2]
-            wy = ly + world_pos[1]
-            points.append((wx, wy, wz))
-    return points
+    """Project LiDAR hits into world XYZ, keeping each channel's own height (point-cloud
+    visualization). Unlike scan_to_world_points() there is no height band, only
+    vertical_band_deg; same rotation convention."""
+    ranges, v_deg, az_deg = _scan_arrays(scan)
+    v = np.radians(v_deg)
+    keep = (ranges < scan["max_range"] - 1e-3) & (np.abs(v_deg) <= vertical_band_deg)
+    horiz = (ranges * np.cos(v))[keep]
+    wy = (ranges * np.sin(v) + sensor_height_offset)[keep] + world_pos[1]
+    az = np.radians(np.broadcast_to(az_deg, ranges.shape)[keep])
+    wx, wz = _to_world_xz(np.sin(az) * horiz, np.cos(az) * horiz, world_pos, yaw_deg)
+    return list(zip(wx.tolist(), wy.tolist(), wz.tolist()))
 
 
 def clearance_ahead(scan, heading_deg, cone_deg=20.0, vertical_band_deg=40.0):
@@ -205,69 +163,36 @@ def swept_clearance_ahead(
     sensor_height_offset=SENSOR_HEIGHT_OFFSET_M, max_lateral_deg=70.0,
     self_exclusion_range=SELF_EXCLUSION_RANGE_M, debug=False
 ):
-    """Minimum forward distance to any LiDAR hit that falls within body_radius
-    of the straight-line path along heading_deg — i.e. clearance for a
-    cylinder of that radius swept forward, not just a point.
+    """Minimum forward distance to any in-band LiDAR hit within body_radius of the straight
+    line along heading_deg - clearance for a swept cylinder, not an angular cone (a cone's
+    linear coverage shrinks with range and misses close off-axis obstacles).
 
-    A fixed angular cone (see clearance_ahead) checks a constant *angle*, so
-    the linear slice of the world it covers shrinks with range: an obstacle
-    just outside the cone can still be well within the agent's actual body
-    width once the agent is close to it. Decomposing each ray into a
-    forward/lateral pair against the travel line avoids that, at the cost of
-    needing an estimate of the agent's radius (shoulder/hand width) — tune
-    body_radius to the sim's actual agent footprint.
-
-    Height-band filtered ([min_obstacle_height, max_obstacle_height] relative
-    to the agent's own root position — see _hit_height_above_root) rather than
-    a fixed vertical angle, so overhanging ceiling signage the agent can never
-    physically reach doesn't count as a blocking obstacle, while
-    min_obstacle_height keeps ordinary floor hits from doing the same. Hits
-    within max(scan["min_range"], self_exclusion_range) are also excluded -
-    see SELF_EXCLUSION_RANGE_M for why a plain sensor min_range wasn't enough
-    (confirmed live: the agent's own body produces a persistent close-range hit
-    the sensor's own spec doesn't cover).
-
-    If debug=True, returns (min_seen, debug_info) where debug_info is a dict
-    describing the closest counted hit (or None if nothing counted) - use this
-    to diagnose an unexpectedly small/constant clearance reading (e.g. a
-    self-hit) rather than guessing from the returned distance alone.
+    Hits within max(scan["min_range"], self_exclusion_range) are excluded (see
+    SELF_EXCLUSION_RANGE_M). If debug=True, returns (min_seen, debug_info) describing the
+    closest counted hit, or None if nothing counted.
     """
-    channels = scan["channels"]
-    azimuth_samples = scan["azimuth_samples"]
-    ranges = scan["ranges"]
+    ranges, v_deg, az_deg = _scan_arrays(scan)
     max_range = scan["max_range"]
     exclusion_range = max(scan.get("min_range", 0.0), self_exclusion_range)
-    min_seen = max_range
-    min_seen_debug = None
-
-    for ch in range(channels):
-        v_deg = scan["vertical_angles_deg"][ch]
-        row_start = ch * azimuth_samples
-        for az_i in range(azimuth_samples):
-            az = scan["azimuth_start_deg"] + az_i * scan["azimuth_step_deg"]
-            rel_deg = normalize_deg(az - heading_deg)
-            if abs(rel_deg) > max_lateral_deg:
-                continue
-            r = ranges[row_start + az_i]
-            if r >= max_range - 1e-3:
-                continue
-            if r <= exclusion_range + 1e-3:
-                continue
-            height = _hit_height_above_root(v_deg, r, sensor_height_offset)
-            if not (min_obstacle_height <= height <= max_obstacle_height):
-                continue
-            rel = math.radians(rel_deg)
-            forward = r * math.cos(rel)
-            lateral = r * math.sin(rel)
-            if forward <= 0 or abs(lateral) > body_radius:
-                continue
-            if forward < min_seen:
-                min_seen = forward
-                if debug:
-                    min_seen_debug = {
-                        "channel": ch, "v_deg": v_deg, "range": r,
-                        "height_above_root": height, "az_rel_deg": rel_deg, "lateral": lateral,
-                    }
+    rel_deg = np.broadcast_to(normalize_deg(az_deg - heading_deg), ranges.shape)
+    height = ranges * np.sin(np.radians(v_deg)) + sensor_height_offset
+    rel = np.radians(rel_deg)
+    forward = ranges * np.cos(rel)
+    lateral = ranges * np.sin(rel)
+    counted = ((np.abs(rel_deg) <= max_lateral_deg)
+               & (ranges < max_range - 1e-3) & (ranges > exclusion_range + 1e-3)
+               & (height >= min_obstacle_height) & (height <= max_obstacle_height)
+               & (forward > 0) & (np.abs(lateral) <= body_radius)
+               & (forward < max_range))
+    if not counted.any():
+        return (max_range, None) if debug else max_range
+    idx = np.unravel_index(np.argmin(np.where(counted, forward, np.inf)), ranges.shape)
+    min_seen = float(forward[idx])
     if debug:
-        return min_seen, min_seen_debug
+        ch = int(idx[0])
+        return min_seen, {
+            "channel": ch, "v_deg": float(v_deg[ch, 0]), "range": float(ranges[idx]),
+            "height_above_root": float(height[idx]), "az_rel_deg": float(rel_deg[idx]),
+            "lateral": float(lateral[idx]),
+        }
     return min_seen

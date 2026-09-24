@@ -145,7 +145,7 @@ def main():
                         max_visits=args.max_visits, zoom=not args.no_zoom,
                         tag=f"t{i:02d}_")
             except Exception as e:
-                report["outcome"] = f"error"
+                report["outcome"] = "error"
                 report["error"] = f"{type(e).__name__}: {e}"
                 print(f"[locate] ERROR {report['error'][:140]}")
             dt = time.time() - t1

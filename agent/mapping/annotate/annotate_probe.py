@@ -22,7 +22,6 @@ Endpoint: vLLM at <OPENAI_API_URL>/v1 or Vertex's /endpoints/openapi compatibili
 Model id comes from $OPENAI_ANNOTATOR_MODEL (falling back to $OPENAI_MODEL) in the repo-root secrets.env.
 """
 import argparse
-import base64
 import json
 import mimetypes
 import os
@@ -32,10 +31,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Repo-root secrets.env (agent/mapping/annotate/ -> repo root is four parents up), resolved from
-# __file__ so the endpoint creds load regardless of CWD - this module is the shared endpoint
-# resolver for the mapping tools (vlm_planner, explore_vlm import resolve_api_key/resolve_base_url
-# from here), and several of them are run standalone without agent.py's loader ever executing.
+# Repo-root secrets.env (four parents up), resolved from __file__ so endpoint creds load
+# regardless of CWD when this probe runs standalone.
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / "secrets.env")
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))        # mapping/annotate
@@ -44,60 +41,11 @@ if _MAPPING_DIR not in sys.path:
     sys.path.insert(0, _MAPPING_DIR)
 import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
-from annotator_sys_inst import (  # noqa: E402
-    SYS_INST_CLASSIFY, CLASSIFY_SCHEMA,
-    build_annotation_instructions, schema_for, effective_kind,
-)
+from annotator_sys_inst import resolve_request  # noqa: E402
 from agent_core.models import annotator_model  # noqa: E402
-from agent_core.llm import (  # noqa: E402
-    ChatEndpoint, EndpointProfile, image_url_part, normalize_endpoint_root,
-)
+from agent_core.llm import ChatEndpoint, EndpointProfile, image_url_part  # noqa: E402
 
 DEFAULT_MODEL = annotator_model()  # $OPENAI_ANNOTATOR_MODEL / $OPENAI_MODEL in secrets.env
-
-
-def image_content_block(model, mime_type, base64_data):
-    """Compatibility wrapper around the shared provider-neutral image part builder."""
-    return image_url_part(base64.b64decode(base64_data), mime_type)
-
-
-def resolve_api_key(explicit=None):
-    """The qwen server REQUIRES a bearer key since 2026-07 (measured: /v1/models returns 401
-    without it - the old "vLLM ignores it" era is over). $OPENAI_API_KEY first; conda-meta/state
-    fallback because invoking sari_env_old's python.exe directly skips the env-var hooks.
-    Resolved at call time, never hardcoded, so a rotated key is picked up automatically."""
-    if explicit not in (None, "", "none"):
-        key = explicit
-    else:
-        key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        try:
-            import json as _json
-            conda_state = os.getenv("SARI_CONDA_STATE", r"C:/Sari/sari_env_old/conda-meta/state")
-            with open(conda_state, encoding="utf-8") as f:
-                ev = _json.load(f).get("env_vars", {})
-            key = ev.get("OPENAI_API_KEY")
-        except OSError:
-            pass
-    return key or "none"
-
-
-def resolve_base_url(explicit):
-    """OPENAI_API_URL owns scheme, host, and port; this resolver appends /v1.
-    Same env-then-conda-state resolution as resolve_api_key, for the same reason: invoking
-    sari_env_old's python.exe directly skips the activation hooks that set the vars."""
-    raw = explicit or os.environ.get("OPENAI_API_URL")
-    if not raw:
-        try:
-            import json as _json
-            conda_state = os.getenv("SARI_CONDA_STATE", r"C:/Sari/sari_env_old/conda-meta/state")
-            with open(conda_state, encoding="utf-8") as f:
-                raw = _json.load(f).get("env_vars", {}).get("OPENAI_API_URL")
-        except OSError:
-            pass
-    if not raw:
-        sys.exit("no --base-url, no $OPENAI_API_URL, and no sari_env_old conda state to read")
-    return f"{normalize_endpoint_root(raw)}/v1"
 
 
 def main():
@@ -132,19 +80,15 @@ def main():
         raw = f.read()
     mime = mimetypes.guess_type(args.image)[0] or "image/png"
 
-    if args.classify:
-        system, schema, label = SYS_INST_CLASSIFY, CLASSIFY_SCHEMA, "classify"
-    else:
-        kind = effective_kind(args.kind) if args.kind != "non_shelf" else "non_shelf"
-        system, schema, label = build_annotation_instructions(kind), schema_for(kind), f"annotate:{kind}"
+    system, schema, label = resolve_request(args.classify, args.kind)
 
     messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": [
-                {"type": "text", "text": "PRIMARY image:"},
-                image_url_part(raw, mime),
-            ]},
-        ]
+        {"role": "system", "content": system},
+        {"role": "user", "content": [
+            {"type": "text", "text": "PRIMARY image:"},
+            image_url_part(raw, mime),
+        ]},
+    ]
     extra = ({"chat_template_kwargs": {"enable_thinking": args.think}}
              if profile.provider == "vllm" else None)
 

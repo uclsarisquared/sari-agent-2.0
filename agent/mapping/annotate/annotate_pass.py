@@ -40,7 +40,6 @@ Backend is annotate_claude_cli (claude -p on the claude.ai / Max-plan login). Sw
     python mapping/annotate/annotate_pass.py mapping/output --ids 15 67 --skip-classify
 """
 import argparse
-import glob
 import json
 import math
 import os
@@ -385,12 +384,9 @@ def _checkout_interaction_xz(output_dir, cp):
     grid_path = os.path.join(output_dir, "grid_final.npy")
     if not os.path.exists(grid_path):
         return None
-    import numpy as np
-    from occupancy_grid import OccupancyGrid
+    from occupancy_grid import load_grid
     from shelf_coverage import dock_interaction_xz
-    log_odds = np.load(grid_path)
-    grid = OccupancyGrid(size_m=log_odds.shape[0] * 0.1, resolution=0.1)  # the pipeline's fixed 0.1m res
-    grid.log_odds = log_odds
+    grid = load_grid(output_dir, "final", 0.1)  # the pipeline's fixed 0.1m res
     occupied = grid.log_odds > grid.OCCUPIED_THRESHOLD
     sx, sz = cp["shelf_cell"]
     r = int(round(1.2 / grid.res))  # the landmark pass's observed radius: "this structure", locally
@@ -399,6 +395,34 @@ def _checkout_interaction_xz(output_dir, cp):
     if not structure:
         return None
     return dock_interaction_xz(grid, occupied, structure, tuple(cp["cell"]), (sx, sz))
+
+
+def output_paths(output_dir, out_tag):
+    """(annotations_<tag>.json, products_<tag>.json, semantic_map_<tag>.txt) under output_dir."""
+    return (os.path.join(output_dir, f"annotations_{out_tag}.json"),
+            os.path.join(output_dir, f"products_{out_tag}.json"),
+            os.path.join(output_dir, f"semantic_map_{out_tag}.txt"))
+
+
+def load_resumed(ann_path, resume):
+    """Previously written annotations when resuming, else {}."""
+    if not (resume and os.path.exists(ann_path)):
+        return {}
+    with open(ann_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_annotations(annotations, ann_path):
+    with open(ann_path, "w", encoding="utf-8") as f:
+        json.dump(annotations, f, indent=2, ensure_ascii=False)
+
+
+def annotation_detail(rec):
+    """One-line log summary of a record: shelf types + item count, or non-shelf."""
+    ann = rec["annotation"]
+    if rec["effective_kind"] == SHELF_KIND:
+        return f"{ann.get('shelf_type')} {len(ann.get('items', []))} item(s)"
+    return "non-shelf"
 
 
 def write_derived_outputs(annotations, topology, ann_path, prod_path, map_path,
@@ -415,8 +439,7 @@ def write_derived_outputs(annotations, topology, ann_path, prod_path, map_path,
         promote_checkout_landmarks(annotations, topology, topo_path, output_dir)
     refresh_graph_fields(annotations, topology)
     add_route_hints(annotations, topology)
-    with open(ann_path, "w", encoding="utf-8") as f:
-        json.dump(annotations, f, indent=2, ensure_ascii=False)
+    save_annotations(annotations, ann_path)
     products = flatten_products(annotations)
     with open(prod_path, "w", encoding="utf-8") as f:
         json.dump(products, f, indent=2, ensure_ascii=False)
@@ -435,14 +458,10 @@ def run(args):
         topology = json.load(f)
 
     capture_dir = args.capture_dir or os.path.join(args.output_dir, "captures")
-    ann_path = os.path.join(args.output_dir, f"annotations_{args.out_tag}.json")
-    prod_path = os.path.join(args.output_dir, f"products_{args.out_tag}.json")
-    map_path = os.path.join(args.output_dir, f"semantic_map_{args.out_tag}.txt")
+    ann_path, prod_path, map_path = output_paths(args.output_dir, args.out_tag)
 
-    annotations = {}
-    if args.resume and os.path.exists(ann_path):
-        with open(ann_path, encoding="utf-8") as f:
-            annotations = json.load(f)
+    annotations = load_resumed(ann_path, args.resume)
+    if annotations:
         print(f"[annotate_pass] resuming - {len(annotations)} checkpoint(s) already annotated")
 
     targets = select_checkpoints(topology, args)
@@ -483,17 +502,10 @@ def run(args):
 
             annotations[str(cp["id"])] = rec
             # Write after every checkpoint so an interrupted pass keeps its progress and --resume works.
-            with open(ann_path, "w", encoding="utf-8") as f:
-                json.dump(annotations, f, indent=2, ensure_ascii=False)
-
-            ann = rec["annotation"]
-            if rec["effective_kind"] == SHELF_KIND:
-                detail = f"{ann.get('shelf_type')} {len(ann.get('items', []))} item(s)"
-            else:
-                detail = "non-shelf"
+            save_annotations(annotations, ann_path)
             lbl = rec["classify_label"]
             print(f"[annotate_pass] id={cp['id']:3d} kind={rec['topology_kind']:8s} "
-                  f"classify={lbl or '-':9s} -> {rec['effective_kind']:9s} {detail} "
+                  f"classify={lbl or '-':9s} -> {rec['effective_kind']:9s} {annotation_detail(rec)} "
                   f"(${rec['cost_equiv_usd'] or 0:.3f})")
             done += 1
 

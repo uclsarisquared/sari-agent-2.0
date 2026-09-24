@@ -190,6 +190,15 @@ def schema_for(kind):
     return SHELF_ANNOTATION_SCHEMA if kind == SHELF_KIND else NON_SHELF_ANNOTATION_SCHEMA
 
 
+def resolve_request(classify, kind):
+    """(system, schema, label) for a one-image CLI call: Stage 1 if classify, else Stage 2 for
+    `kind` (a topology kind or "non_shelf")."""
+    if classify:
+        return SYS_INST_CLASSIFY, CLASSIFY_SCHEMA, "classify"
+    kind = effective_kind(kind)
+    return build_annotation_instructions(kind), schema_for(kind), f"annotate:{kind}"
+
+
 if __name__ == "__main__":
     # Eyeball the composed prompts: python mapping/annotate/annotator_sys_inst.py
     print("effective_kind(topology_kind, classifier_label):")

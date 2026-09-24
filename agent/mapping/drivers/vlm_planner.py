@@ -90,13 +90,13 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 from sim.env import RequestScreenshot, TransformAgent  # noqa: E402
 
 from frontier_planner import (  # noqa: E402
+    FrontierPickingMixin,
     FrontierPlanner,
     NavCommand,
     PlannerState,
     _inflate_occupied,
     _line_of_sight,
     astar,
-    cluster_frontiers,
     simplify_path,
 )
 from mapping import normalize_deg  # noqa: E402
@@ -371,10 +371,11 @@ class _VLMClientMixin:
         return png
 
     def _ask(self, system, schema, user_blocks, label):
+        # Static system prompt first, volatile map/pose/images last (byte-stable cache prefix).
         messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_blocks},
-            ]
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_blocks},
+        ]
         extra = ({"chat_template_kwargs": {"enable_thinking": self.think}}
                  if self.profile.provider == "vllm" else None)
         t0 = time.time()
@@ -459,7 +460,7 @@ class _VLMClientMixin:
         return path
 
 
-class VLMFrontierPlanner(_VLMClientMixin):
+class VLMFrontierPlanner(_VLMClientMixin, FrontierPickingMixin):
     """role=full: the VLM picks the frontier AND emits the waypoint. No A* anywhere.
 
     This is the arm that actually tests NavReasonPlan.md's claim. It is a drop-in for
@@ -570,30 +571,15 @@ class VLMFrontierPlanner(_VLMClientMixin):
     def update(self, cur_world_xz, cur_cell):
         self._step += 1
 
-        # Frontier detection and DONE conditions are byte-identical to FrontierPlanner's, so the
-        # arms stop on the same criterion and their coverage is comparable.
-        frontier_cells = self.grid.frontiers()
-        if len(frontier_cells) == 0:
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-        clusters = cluster_frontiers(frontier_cells, connectivity=self.connectivity,
-                                     min_cluster_size=self.min_cluster_size)
+        # Frontier detection, DONE conditions and circuit breaker are FrontierPlanner's own
+        # (shared mixin), so the arms stop on the same criterion and coverage is comparable.
+        clusters = self._detect_clusters()
         if not clusters:
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-
-        # Same circuit breaker as FrontierPlanner: if we keep deciding from the exact same cell
-        # with no movement, the run is over rather than looping to max_steps.
-        if cur_cell == self._no_progress_pick_cell:
-            self._no_progress_pick_count += 1
-        else:
-            self._no_progress_pick_cell = cur_cell
-            self._no_progress_pick_count = 0
-        if self._no_progress_pick_count >= self.max_replans_without_moving:
+            return self._done("no frontier clusters")
+        if self._breaker_tripped(cur_cell):
             print(f"[vlm] circuit breaker: {self.max_replans_without_moving} decisions from cell "
                   f"{cur_cell} with no movement -> done", flush=True)
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
+            return self._done("circuit breaker tripped")
 
         # Coast toward an un-reached waypoint when --vlm-replan-every > 1. Default 1 re-asks every
         # step (most responsive, most expensive) - capability is not traded for cost here.
@@ -799,24 +785,11 @@ class VLMGoalPlanner(FrontierPlanner, _VLMClientMixin):
         self._step += 1
 
         # Circuit breaker + frontier detection + DONE conditions: same as the parent's.
-        if cur_cell == self._no_progress_pick_cell:
-            self._no_progress_pick_count += 1
-        else:
-            self._no_progress_pick_cell = cur_cell
-            self._no_progress_pick_count = 0
-        if self._no_progress_pick_count >= self.max_replans_without_moving:
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-
-        frontier_cells = self.grid.frontiers()
-        if len(frontier_cells) == 0:
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
-        clusters = cluster_frontiers(frontier_cells, connectivity=self.connectivity,
-                                     min_cluster_size=self.min_cluster_size)
+        if self._breaker_tripped(cur_cell):
+            return self._done("circuit breaker tripped")
+        clusters = self._detect_clusters()
         if not clusters:
-            self.state = PlannerState.DONE
-            return NavCommand(kind="done")
+            return self._done("no frontier clusters")
 
         for i, c in enumerate(clusters):
             c.vlm_id = i
@@ -854,25 +827,4 @@ class VLMGoalPlanner(FrontierPlanner, _VLMClientMixin):
                 ordered = [chosen] + [c for c in clusters if c is not chosen]
             self.decisions.append(record)
 
-        for consider_blocklisted in (False, True):
-            for cluster in ordered:
-                if not consider_blocklisted and cluster.centroid_cell in self._blocklist:
-                    continue
-                path_world, _reached = self._plan_to_cluster(cur_cell, cluster)
-                if path_world is not None:
-                    self.goal_cluster = cluster
-                    self.path_world = path_world
-                    self.waypoint_idx = 1 if len(path_world) > 1 else 0
-                    self.state = PlannerState.FOLLOWING
-                    self._best_dist_to_goal = math.inf
-                    self._steps_since_progress = 0
-                    self._stuck_counter = 0
-                    return NavCommand(kind="goto_waypoint",
-                                      target_world_xz=self.path_world[self.waypoint_idx],
-                                      goal_world_xz=self.grid.to_world(*cluster.centroid_cell),
-                                      replanned=True)
-                if not consider_blocklisted:
-                    self._blocklist[cluster.centroid_cell] = self.goal_blocklist_steps
-
-        self.state = PlannerState.DONE
-        return NavCommand(kind="done")
+        return self._plan_first_reachable(cur_cell, ordered)

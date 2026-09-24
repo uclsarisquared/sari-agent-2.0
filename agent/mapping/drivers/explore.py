@@ -56,7 +56,6 @@ import _bootstrap  # noqa: F401,E402  (agent root + all mapping category dirs)
 
 from sim.env import TransformAgent, SetHandsActive  # noqa: E402
 
-from occupancy_grid import OccupancyGrid  # noqa: E402
 from voxel_grid import VoxelGrid  # noqa: E402
 from pointcloud_map import PointCloudMap  # noqa: E402
 from lidar_client import RequestLidarScan  # noqa: E402
@@ -69,8 +68,10 @@ from mapping import (  # noqa: E402
     SELF_EXCLUSION_RANGE_M,
 )
 from frontier_planner import FrontierPlanner  # noqa: E402
+from occupancy_grid import draw_grid  # noqa: E402
 from topology import (  # noqa: E402
     extract_topology,
+    kind_counts,
     save_topology,
     DEFAULT_MIN_BRANCH_LENGTH_M,
     DEFAULT_DOORWAY_MAX_WIDTH_M,
@@ -196,15 +197,9 @@ def find_escape_heading(scan, safety_margin, min_step, *, body_radius, min_obsta
 
 
 def save_snapshot(grid, output_dir, tag, interactive_backend=False, show_now=False):
-    """Save a grid snapshot (.npy + .png). By default forces the Agg backend
-    (no display needed, safe on any machine including headless ones). Pass
-    interactive_backend=True to skip that - required for show_now=True to
-    actually pop up a window, since matplotlib locks in its backend on the
-    first `import matplotlib.pyplot` in the process; if any earlier call in
-    this run forced Agg, a later show_now=True call here would silently do
-    nothing. Callers must pass the SAME interactive_backend value on every
-    save_snapshot() call within a run for this to work correctly.
-    """
+    """Save grid_<tag>.npy + .png. Forces Agg unless interactive_backend=True, which show_now
+    needs; matplotlib locks its backend on first pyplot import, so pass the SAME
+    interactive_backend on every call within a run."""
     os.makedirs(output_dir, exist_ok=True)
     np.save(os.path.join(output_dir, f"grid_{tag}.npy"), grid.log_odds)
     try:
@@ -215,41 +210,21 @@ def save_snapshot(grid, output_dir, tag, interactive_backend=False, show_now=Fal
     except ImportError:
         return
 
-    display = np.full(grid.log_odds.shape, 0.5)
-    display[grid.log_odds < grid.FREE_THRESHOLD] = 1.0
-    display[grid.log_odds > grid.OCCUPIED_THRESHOLD] = 0.0
-
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(display.T, origin="lower", cmap="gray", vmin=0, vmax=1)
-
-    # Crop to the explored region (plus a 1m margin) instead of the full grid extent - most
-    # of a 60m grid is still "unknown" gray on any run that hasn't mapped the whole store, so
-    # a full-extent plot renders the actual store as a small blob in the middle. Matches the
-    # crop build_shelf_graph.py uses, so the occupancy PNG and the graph PNG frame the same area.
-    known_cells = np.argwhere(display.T != 0.5)
-    if len(known_cells) > 0:
-        margin = int(round(1.0 / grid.res))  # 1m padding
-        y0, x0 = known_cells.min(axis=0) - margin
-        y1, x1 = known_cells.max(axis=0) + margin
-        ax.set_xlim(max(0, x0), min(grid.log_odds.shape[0], x1))
-        ax.set_ylim(max(0, y0), min(grid.log_odds.shape[1], y1))
-
+    draw_grid(ax, grid)  # cropped to the explored region, same framing as the shelf-graph PNG
     ax.set_title(f"Occupancy grid ({tag})")
     fig.savefig(os.path.join(output_dir, f"grid_{tag}.png"), dpi=150)
     if show_now:
         print("[explore] displaying final map - close the plot window to exit")
         plt.show()
-        plt.close("all")  # belt-and-braces: release the GUI backend's figure/window state too
+        plt.close("all")  # also release the GUI backend's figure/window state
     else:
         plt.close(fig)
 
 
-def _clear_output_dir(output_dir):
-    """Delete every file already in output_dir before a new run starts, so the folder only ever
-    shows this run's grid_*/points_* snapshots - otherwise a previous run's leftovers (e.g. a
-    higher step count, or stale grid_final.*) linger alongside the new ones and make the
-    directory listing confusing to read. Only removes files directly inside output_dir (not the
-    directory itself, and not subdirectories); a no-op if output_dir doesn't exist yet."""
+def _clear_output_dir(output_dir, label="explore"):
+    """Delete the files (not subdirectories) directly inside output_dir so it only holds this
+    run's outputs. No-op if the directory doesn't exist."""
     if not os.path.isdir(output_dir):
         return
     removed = 0
@@ -259,77 +234,81 @@ def _clear_output_dir(output_dir):
             os.remove(path)
             removed += 1
     if removed:
-        print(f"[explore] cleared {removed} file(s) from a previous run in {output_dir}")
+        print(f"[{label}] cleared {removed} file(s) from a previous run in {output_dir}")
 
 
-def run(args):
-    if args.clear_output:
-        _clear_output_dir(args.output_dir)
-
-    # Phase 1.1: scans update a 3D VoxelGrid, collapsed each step to voxel.grid - the same
-    # OccupancyGrid every consumer below reads. The band ([min,max]_obstacle_height, above-
-    # root frame) must match scan_to_world_points' own filter so the voxel column spans
-    # exactly the heights the 2D map cares about. See plans/phase1.1_voxelized_mapping.md.
-    voxel = VoxelGrid(
+def make_voxel(args):
+    """The run's VoxelGrid; its obstacle band must match scan_to_world_points' filter."""
+    return VoxelGrid(
         size_m=args.size, resolution=args.resolution,
         min_obstacle_height=args.min_obstacle_height,
         max_obstacle_height=args.max_obstacle_height,
         sensor_height_offset=args.sensor_height_offset,
     )
-    grid = voxel.grid
-    cloud = PointCloudMap()
-    planner = FrontierPlanner(
-        grid,
-        min_cluster_size=args.min_cluster_size,
-        connectivity=args.connectivity,
+
+
+def frontier_planner_kwargs(args):
+    """FrontierPlanner keyword args from this parser's planner flags."""
+    return dict(
+        min_cluster_size=args.min_cluster_size, connectivity=args.connectivity,
         goal_arrival_radius=args.goal_arrival_radius,
         waypoint_arrival_radius=args.waypoint_arrival_radius,
         replan_stuck_steps=args.replan_stuck_steps,
         replan_no_progress_steps=args.replan_no_progress_steps,
-        min_progress_m=args.min_progress_m,
-        goal_blocklist_steps=args.goal_blocklist_steps,
-        window_slack=args.window_slack,
-        min_window_cells=args.min_window_cells,
+        min_progress_m=args.min_progress_m, goal_blocklist_steps=args.goal_blocklist_steps,
+        window_slack=args.window_slack, min_window_cells=args.min_window_cells,
         astar_max_window_cells=args.astar_max_window_cells,
         max_replans_without_moving=args.max_replans_without_moving,
-        body_radius=args.body_radius,
-        debug=args.debug_planner,
+        body_radius=args.body_radius, debug=args.debug_planner,
     )
 
+
+def run_with_hands_stowed(args, voxel, grid, cloud, planner):
+    """Run _explore_loop from the live pose, hands stowed (their colliders aren't modelled
+    by the body-radius clearance check) and restored on exit."""
     pos, rot, _ = step_agent((0, 0, 0), (0, 0, 0), args.uri)
-
     if args.stow_hands:
-        # Hands carry their own colliders/physics-activation trigger; stowing them for
-        # the whole exploration run removes a collision surface the clearance check
-        # below never accounts for (it only models the body via --body-radius).
         SetHandsActive(False, uri=args.uri)
-
     try:
         _explore_loop(args, voxel, grid, cloud, pos, rot, planner)
     finally:
         if args.stow_hands:
             SetHandsActive(True, uri=args.uri)
 
+
+def extract_final_topology(args, grid, tag="final", label="explore"):
+    """Extract + save topology_<tag>.json, dropping checkpoints the body can't fit at."""
+    topology = extract_topology(
+        grid, connectivity=args.connectivity,
+        min_branch_length_m=args.topology_min_branch_length_m,
+        doorway_max_width_m=args.topology_doorway_max_width_m,
+        doorway_width_ratio=args.topology_doorway_width_ratio,
+        min_checkpoint_clearance_m=args.body_radius,
+    )
+    path = save_topology(topology, args.output_dir, tag)
+    print(f"[{label}] saved topology ({len(topology.checkpoints)} checkpoints "
+          f"{kind_counts(topology.checkpoints)}, {len(topology.edges)} edges) to {path}")
+    return topology
+
+
+def run(args):
+    if args.clear_output:
+        _clear_output_dir(args.output_dir)
+
+    # Scans update a 3D VoxelGrid, collapsed each step to voxel.grid (the 2D OccupancyGrid
+    # every consumer reads). See plans/phase1.1_voxelized_mapping.md.
+    voxel = make_voxel(args)
+    grid = voxel.grid
+    cloud = PointCloudMap()
+    planner = FrontierPlanner(grid, **frontier_planner_kwargs(args))
+    run_with_hands_stowed(args, voxel, grid, cloud, planner)
+
     save_snapshot(grid, args.output_dir, "final", interactive_backend=args.show_map, show_now=args.show_map)
     cloud.save(args.output_dir, "final")
     print(f"[explore] saved final grid + point cloud to {args.output_dir}")
 
     if args.extract_topology:
-        topology = extract_topology(
-            grid, connectivity=args.connectivity,
-            min_branch_length_m=args.topology_min_branch_length_m,
-            doorway_max_width_m=args.topology_doorway_max_width_m,
-            doorway_width_ratio=args.topology_doorway_width_ratio,
-            # Drop checkpoints the agent's body can't fit at (spurious junctions/doorways/
-            # ends the skeleton threads into a ragged shelf face) - same radius A* plans with.
-            min_checkpoint_clearance_m=args.body_radius,
-        )
-        topology_path = save_topology(topology, args.output_dir, "final")
-        kind_counts = {}
-        for c in topology.checkpoints:
-            kind_counts[c.kind] = kind_counts.get(c.kind, 0) + 1
-        print(f"[explore] saved topology ({len(topology.checkpoints)} checkpoints {kind_counts}, "
-              f"{len(topology.edges)} edges) to {topology_path}")
+        extract_final_topology(args, grid)
 
 
 def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
@@ -457,11 +436,7 @@ def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
             # the whole run (see save_snapshot's docstring) - show_now stays False here,
             # only the final call at end-of-run actually pops a window.
             save_snapshot(grid, args.output_dir, step, interactive_backend=args.show_map)
-            # include_ply=False: save_ply() re-serializes the WHOLE accumulated cloud with a
-            # per-point Python write() loop every call (see PointCloudMap.save_ply), which
-            # gets slower as the run goes on and was the actual source of the periodic
-            # multi-second pauses at each --save-every boundary. The .npy (fast, vectorized)
-            # still gets written each time; .ply is reserved for the one final export below.
+            # .npy only: the growing .ply export caused multi-second pauses; it's final-only.
             cloud.save(args.output_dir, step, include_ply=False)
 
 
