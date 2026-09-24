@@ -364,6 +364,18 @@ class TestExploreLoopVoxelWiring(unittest.TestCase):
         translations = [dt for dt, _dr in agent.calls if dt != (0.0, 0.0, 0.0)]
         self.assertFalse(translations, "a waypoint arrival (open clearance) must not trigger an escape step")
 
+    def test_arrival_does_not_mark_a_phantom_obstacle(self):
+        # Arrival (dist ~ 0) with no corridor hit used to stamp an occupied disc straight
+        # ahead at the clearance range; scan hits here stop at 2m, so (0, 2.5) must stay empty.
+        _agent, voxel, _grid, planner = self._run(
+            navs=[_move_nav(target=(0.0, 0.0)), _done_nav()],
+            clearances=[(2.5, None)],
+            nudges=[None],
+        )
+        self.assertEqual(len(planner.notify_blocked_calls), 1)
+        cx, cz = voxel.grid.cell(0.0, 2.5)
+        self.assertFalse((voxel.voxels[cx, cz] > 0).any())
+
     def test_forward_step_travels_along_facing_not_double_rotated(self):
         # After facing +X, send body-relative forward (0, 0, step_len).
         # Pre-rotating would make the simulator rotate twice and move sideways.

@@ -110,7 +110,7 @@ def goto(args, grid, inflated, target_world_xz, pos, rot):
         )
         step_len = min(args.step_size, dist, max(0.0, clearance - args.safety_margin))
 
-        if step_len < args.min_step:
+        if step_len < args.min_step and args.max_nudge_deg > 0:
             nudged = find_clear_heading(
                 scan, delta_yaw, args.min_step, args.safety_margin,
                 body_radius=args.body_radius, min_obstacle_height=args.min_obstacle_height,

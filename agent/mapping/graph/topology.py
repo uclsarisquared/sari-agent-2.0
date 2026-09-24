@@ -254,7 +254,7 @@ def _trace_edges(skeleton_cells, node_of, connectivity):
     seen = set()
     deduped = []
     for a_idx, b_idx, path in raw:
-        key = frozenset((a_idx, b_idx, len(path)))
+        key = (frozenset((a_idx, b_idx)), len(path))  # undirected pair + length
         if key in seen:
             continue
         seen.add(key)

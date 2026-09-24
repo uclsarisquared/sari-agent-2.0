@@ -374,8 +374,10 @@ def _explore_loop(args, voxel, grid, cloud, pos, rot, planner):
             # offending hit (blocked by dist/step-size, not an obstacle) - a mid-band bin.
             blocked_h = clearance_debug["height_above_root"] if clearance_debug else args.sensor_height_offset
             # Mark a body-radius region in the voxel grid so A* avoids the whole obstacle.
-            # A mark in the 2D grid would be overwritten by the next collapse.
-            voxel.mark_blocked_region((blocked_x, blocked_z), blocked_h, radius_m=args.body_radius)
+            # A mark in the 2D grid would be overwritten by the next collapse. Only when
+            # clearance-limited: an arrival (dist ~ 0) has no obstacle to mark.
+            if safe_step < args.min_step:
+                voxel.mark_blocked_region((blocked_x, blocked_z), blocked_h, radius_m=args.body_radius)
             # notify_blocked forces the planner back to NEED_GOAL (replan next step) and
             # blocklists the current goal, so whether we escape or hold below, the doomed
             # waypoint is abandoned rather than re-committed to.

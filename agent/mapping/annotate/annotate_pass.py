@@ -187,7 +187,7 @@ def view_paths(capture_dir, cp_id):
 
 
 def select_checkpoints(topology, args):
-    cps = topology["checkpoints"]
+    cps = list(topology["checkpoints"])  # copy: the sort below must not reorder the topology
     if args.kind != "all":
         kinds = {k.strip() for k in args.kind.split(",")}
         cps = [c for c in cps if c.get("kind") in kinds]
@@ -288,7 +288,7 @@ def render_semantic_map(annotations, topology):
         rec = annotations[cp_id]
         cp = by_id.get(int(cp_id), {})
         ann = rec.get("annotation", {})
-        summary = ann.get("semantic_summary", "").strip()
+        summary = (ann.get("semantic_summary") or "").strip()
         wx = cp.get("world_xz")
         pos = f" at ({wx[0]:.2f}, {wx[1]:.2f})" if wx else ""
         header = f"## Checkpoint {cp_id} [{rec['effective_kind']}]{pos}"

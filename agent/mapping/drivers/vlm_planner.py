@@ -58,8 +58,8 @@ DELIBERATE FAIRNESS CHOICES (all reversible, so the generosity itself is testabl
     coverage numbers would not be comparable - and "it quit at step 3" would waste a live run.
   * The VLM is re-asked every step by default (--vlm-replan-every 1): maximum responsiveness, and
     the most expensive setting. Cost is reported honestly rather than bought with capability.
-  * On an unusable reply we retry, then coast on the last good waypoint, then hold. We NEVER fall
-    back to A* - that would contaminate the arm being measured.
+  * On an unusable reply (after agent_core.llm's own retries) we coast on the last good waypoint,
+    then hold. We NEVER fall back to A* - that would contaminate the arm being measured.
 
 MEASURED SERVER LESSONS INHERITED FROM annotate_probe.py - do not re-litigate
 ----------------------------------------------------------------------------
@@ -316,23 +316,21 @@ def _describe_clusters(grid, clusters, cur_world_xz, yaw_deg):
 class _VLMClientMixin:
     """Shared Qwen plumbing + the honest bookkeeping both VLM planner roles need."""
 
-    def _init_vlm(self, *, uri, base_url, model, api_key, timeout, retries, mode,
+    def _init_vlm(self, *, uri, base_url, model, api_key, timeout, mode,
                   think, max_tokens, temperature, ascii_map_res, map_crop_m,
-                  include_clearance, capture_dir, debug):
+                  capture_dir, debug):
         self.uri = uri
         self.profile = EndpointProfile.from_env(model=model, base_url=base_url, api_key=api_key)
         self.endpoint = ChatEndpoint(self.profile, timeout=timeout)
         self.base = self.profile.base_url
         self.model = self.profile.model
         self.timeout = timeout
-        self.retries = retries
         self.mode = mode                      # "both" | "map" | "ego"
         self.think = think
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.ascii_map_res = ascii_map_res    # 0 disables the ASCII map
         self.map_crop_m = map_crop_m
-        self.include_clearance = include_clearance
         self.capture_dir = capture_dir
         self.vlm_debug = debug
 
@@ -474,8 +472,8 @@ class VLMFrontierPlanner(_VLMClientMixin, FrontierPickingMixin):
     """
 
     def __init__(self, grid, *, uri, base_url=None, model=DEFAULT_MODEL, api_key="none",
-                 timeout=180.0, retries=2, mode="both", think=False, max_tokens=1024,
-                 temperature=0.0, ascii_map_res=0.5, map_crop_m=None, include_clearance=False,
+                 timeout=180.0, mode="both", think=False, max_tokens=1024,
+                 temperature=0.0, ascii_map_res=0.5, map_crop_m=None,
                  capture_dir=None, min_cluster_size=4, connectivity=8, body_radius=0.3,
                  goal_arrival_radius=0.4, replan_every=1, max_replans_without_moving=10,
                  debug=False):
@@ -496,9 +494,9 @@ class VLMFrontierPlanner(_VLMClientMixin, FrontierPickingMixin):
         self._no_progress_pick_count = 0
 
         self._init_vlm(uri=uri, base_url=base_url, model=model, api_key=api_key, timeout=timeout,
-                       retries=retries, mode=mode, think=think, max_tokens=max_tokens,
+                       mode=mode, think=think, max_tokens=max_tokens,
                        temperature=temperature, ascii_map_res=ascii_map_res,
-                       map_crop_m=map_crop_m, include_clearance=include_clearance,
+                       map_crop_m=map_crop_m,
                        capture_dir=capture_dir, debug=debug)
 
     ADVICE_AGREE_RADIUS_M = 0.5  # within one body-diameter of the advice counts as "followed"
@@ -770,15 +768,15 @@ class VLMGoalPlanner(FrontierPlanner, _VLMClientMixin):
     """
 
     def __init__(self, grid, *, uri, base_url=None, model=DEFAULT_MODEL, api_key="none",
-                 timeout=180.0, retries=2, mode="both", think=False, max_tokens=1024,
-                 temperature=0.0, ascii_map_res=0.5, map_crop_m=None, include_clearance=False,
+                 timeout=180.0, mode="both", think=False, max_tokens=1024,
+                 temperature=0.0, ascii_map_res=0.5, map_crop_m=None,
                  capture_dir=None, debug=False, **planner_kwargs):
         FrontierPlanner.__init__(self, grid, **planner_kwargs)
         self._step = 0
         self._init_vlm(uri=uri, base_url=base_url, model=model, api_key=api_key, timeout=timeout,
-                       retries=retries, mode=mode, think=think, max_tokens=max_tokens,
+                       mode=mode, think=think, max_tokens=max_tokens,
                        temperature=temperature, ascii_map_res=ascii_map_res,
-                       map_crop_m=map_crop_m, include_clearance=include_clearance,
+                       map_crop_m=map_crop_m,
                        capture_dir=capture_dir, debug=debug)
 
     def _pick_and_plan(self, cur_cell):

@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import struct
+import threading
 
 import websockets
 
@@ -15,6 +16,17 @@ from sim.env import (
 MAGIC = b"LDR1"
 HEADER_FORMAT = "<4sHHffffId"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+
+_local = threading.local()
+
+
+def _thread_loop():
+    """A persistent event loop per thread; get_event_loop() raises off the main thread."""
+    loop = getattr(_local, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = _local.loop = asyncio.new_event_loop()
+    return loop
 
 
 def _signal_protocol_fault(payload) -> None:
@@ -87,7 +99,7 @@ def RequestLidarScan(uri: str = "ws://localhost:8080/commands", timeout: float =
     if not math.isfinite(budget) or budget <= 0:
         raise ValueError(f"timeout must be a positive finite number, got {budget!r}")
     try:
-        payload = asyncio.get_event_loop().run_until_complete(
+        payload = _thread_loop().run_until_complete(
             asyncio.wait_for(_request_scan_async(uri), timeout=budget)
         )
     except asyncio.TimeoutError as error:

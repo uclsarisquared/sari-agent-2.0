@@ -125,7 +125,8 @@ class Reconciler:
             # raw-squash PREFIX match only - prefix, not containment, because 'rc' is a
             # substring of 'supeRCrunch' and containment would family them together.
             raw = re.sub(r"[^a-z0-9]", "", name.lower())
-            hits = sorted(sku for sku, sq in self.sku_raw.items() if sq.startswith(raw))
+            # An empty raw name would prefix-match every SKU.
+            hits = sorted(sku for sku, sq in self.sku_raw.items() if raw and sq.startswith(raw))
             if len(hits) == 1:
                 return {"sku": hits[0], "sku_candidates": None, "variant_uncertain": False,
                         "match": {"method": "prefix", "score": 1.0, "runner_up": None}}

@@ -359,6 +359,7 @@ class FrontierPlanner(FrontierPickingMixin):
 
         self.state = PlannerState.NEED_GOAL
         self.goal_cluster = None
+        self.goal_cell = None      # cell the committed path ends at (centroid or vantage)
         self.path_world = []       # simplified waypoints, world (x, z) coords
         self.waypoint_idx = 0
         self._blocklist = {}       # centroid_cell -> steps remaining
@@ -499,13 +500,16 @@ class FrontierPlanner(FrontierPickingMixin):
                 if not consider_blocklisted and cluster.centroid_cell in self._blocklist:
                     continue
                 cluster_t0 = time.perf_counter()
-                path_world, _reached = self._plan_to_cluster(cur_cell, cluster)
+                path_world, reached_cell = self._plan_to_cluster(cur_cell, cluster)
                 self._dbg(f" cluster {i + 1}/{len(clusters)} size={cluster.size} "
                           f"centroid={cluster.centroid_cell} blocklisted={cluster.centroid_cell in self._blocklist} "
                           f"{time.perf_counter() - cluster_t0:.3f}s -> "
                           f"{'reachable' if path_world is not None else 'unreachable'}")
                 if path_world is not None:
                     self.goal_cluster = cluster
+                    # Arrival is judged at the cell actually planned to (a vantage may sit
+                    # metres from the centroid); blocklist/dissolve still key on the cluster.
+                    self.goal_cell = reached_cell
                     self.path_world = path_world
                     # index 0 is the start cell itself - aim at the next waypoint.
                     self.waypoint_idx = 1 if len(path_world) > 1 else 0
@@ -515,7 +519,7 @@ class FrontierPlanner(FrontierPickingMixin):
                     self._stuck_counter = 0
                     self._dbg(f"_pick_and_plan committed in {time.perf_counter() - pick_t0:.3f}s")
                     return NavCommand(kind="goto_waypoint", target_world_xz=self.path_world[self.waypoint_idx],
-                                      goal_world_xz=self.grid.to_world(*cluster.centroid_cell),
+                                      goal_world_xz=self.grid.to_world(*reached_cell),
                                       replanned=True)
                 if not consider_blocklisted:
                     # Unreachable at the max window: blocklist on the first pass only, so the
@@ -545,7 +549,7 @@ class FrontierPlanner(FrontierPickingMixin):
             return self._pick_and_plan(cur_cell)
 
         # FOLLOWING
-        goal_world = self.grid.to_world(*self.goal_cluster.centroid_cell)
+        goal_world = self.grid.to_world(*self.goal_cell)
         dist_to_goal = math.hypot(cur_world_xz[0] - goal_world[0], cur_world_xz[1] - goal_world[1])
 
         if dist_to_goal <= self.goal_arrival_radius:

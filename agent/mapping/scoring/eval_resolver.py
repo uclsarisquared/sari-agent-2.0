@@ -183,6 +183,8 @@ def main():
     sm = StoreMap()
     call = locate_task.make_backend(args)
     tasks = [t for t in build_tasks(sm) if not args.only or t[1] == args.only]
+    if not tasks:
+        sys.exit(f"no tasks match --only {args.only!r}")
 
     rows, by_stratum = [], {}
     t0 = time.time()

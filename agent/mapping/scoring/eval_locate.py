@@ -122,6 +122,8 @@ def main():
     call = locate_task.make_backend(args)
     sm = StoreMap()
     trials = [t for t in build_trials(sm) if not args.only or t[1] == args.only]
+    if not trials:
+        sys.exit(f"no trials match --only {args.only!r}")
     print(f"== live locate trials: {len(trials)} tasks, backend={args.backend}, "
           f"zoom={'OFF' if args.no_zoom else 'on'}, reconciled_index={sm.reconciled} ==")
 

@@ -161,7 +161,6 @@ def build_vlm_parser():
                    help="Qwen3.x reasoning. OFF by default on measured grounds: a probe run spent "
                         "its whole budget thinking, looped, and never answered.")
     g.add_argument("--vlm-timeout", type=float, default=180.0)
-    g.add_argument("--vlm-retries", type=int, default=2)
     g.add_argument("--vlm-max-tokens", type=int, default=1024)
     g.add_argument("--vlm-temperature", type=float, default=0.0)
     g.add_argument("--save-vlm-inputs", action=argparse.BooleanOptionalAction, default=False,
@@ -190,7 +189,7 @@ def build_planner(args, grid):
     capture_dir = os.path.join(args.output_dir, "vlm_inputs") if args.save_vlm_inputs else None
     common = dict(
         uri=args.uri, base_url=args.base_url, model=args.model, api_key=args.api_key,
-        timeout=args.vlm_timeout, retries=args.vlm_retries, mode=args.vlm_mode,
+        timeout=args.vlm_timeout, mode=args.vlm_mode,
         think=args.vlm_think, max_tokens=args.vlm_max_tokens, temperature=args.vlm_temperature,
         ascii_map_res=args.ascii_map_res, map_crop_m=args.map_crop_m,
         capture_dir=capture_dir, debug=args.debug_vlm,
