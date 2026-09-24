@@ -239,22 +239,22 @@ def zoom_tiles(image_path, out_dir, grid=(2, 2), overlap=0.15, scale=2):
     a few pixels after the vision encoder's downscale, and magnifying the crop is the only move
     that adds effective resolution without fighting the executor's 0.65 m safety margin."""
     from PIL import Image
-    im = Image.open(image_path)
-    w, h = im.size
-    base = os.path.splitext(os.path.basename(image_path))[0]
-    cols, rows = grid
-    tw, th = w / cols, h / rows
-    ox, oy = tw * overlap, th * overlap
-    paths = []
-    for r in range(rows):
-        for c in range(cols):
-            box = (max(0, int(c * tw - ox)), max(0, int(r * th - oy)),
-                   min(w, int((c + 1) * tw + ox)), min(h, int((r + 1) * th + oy)))
-            tile = im.crop(box)
-            tile = tile.resize((tile.width * scale, tile.height * scale), Image.LANCZOS)
-            p = os.path.join(out_dir, f"{base}_tile{r}{c}.png")
-            tile.save(p)
-            paths.append(p)
+    with Image.open(image_path) as im:
+        w, h = im.size
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        cols, rows = grid
+        tw, th = w / cols, h / rows
+        ox, oy = tw * overlap, th * overlap
+        paths = []
+        for r in range(rows):
+            for c in range(cols):
+                box = (max(0, int(c * tw - ox)), max(0, int(r * th - oy)),
+                       min(w, int((c + 1) * tw + ox)), min(h, int((r + 1) * th + oy)))
+                tile = im.crop(box)
+                tile = tile.resize((tile.width * scale, tile.height * scale), Image.LANCZOS)
+                p = os.path.join(out_dir, f"{base}_tile{r}{c}.png")
+                tile.save(p)
+                paths.append(p)
     return paths
 
 

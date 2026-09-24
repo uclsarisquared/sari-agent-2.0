@@ -25,7 +25,6 @@ from sim.env import SendCommand, RequestScreenshot, _GRIP_LEFT_, _GRIP_RIGHT_
 from sim.hand_reset import reset_hands_in_front2
 
 _model = md.vl(api_key=os.environ.get("MDREAM_API_KEY"))
-_URI = "ws://localhost:8080/commands"
 
 
 def _point_via_qwen(image: Image.Image, name: str):
@@ -34,7 +33,9 @@ def _point_via_qwen(image: Image.Image, name: str):
         MalformedContentError, call_with_api_retries, effective_max_tokens,
     )
     from agent_core import token_meter
-    from vision.perception import CLIENT, MODEL_NAME, _ENDPOINT_PROFILE, _encode_image
+    from vision.perception import (
+        BBOX_YMIN_FIRST, CLIENT, MODEL_NAME, _ENDPOINT_PROFILE, _encode_image,
+    )
     prompt = render_prompt("vision/qwen_point", TARGET_NAME=name)
     # Billed to perception, not to a role of its own: this is the same pointing job moondream was
     # doing, just on the fallback path, and an ablation of pointing wants both halves in one number.
@@ -63,7 +64,10 @@ def _point_via_qwen(image: Image.Image, name: str):
             raise MalformedContentError(
                 f"pointing response was malformed: {error}", content=text
             ) from error
-        ymin, xmin, ymax, xmax = box
+        if BBOX_YMIN_FIRST:
+            ymin, xmin, ymax, xmax = box
+        else:  # Qwen/vLLM is xmin-first
+            xmin, ymin, xmax, ymax = box
         return [{"x": (xmin + xmax) / 2000.0, "y": (ymin + ymax) / 2000.0}]
 
     with token_meter.role(token_meter.ROLE_PERCEPTION):
@@ -99,7 +103,7 @@ def reach_item_in_view(name: str, use_right_hand: bool) -> dict:
 
     command_name = "ReachRightAtPixel" if use_right_hand else "ReachLeftAtPixel"
     asyncio.get_event_loop().run_until_complete(
-        SendCommand({"command": command_name, "x": x_pct, "y": y_pct}, _URI)
+        SendCommand({"command": command_name, "x": x_pct, "y": y_pct})  # honours SARI_WS_URI
     )
     return {"reached": True}
 

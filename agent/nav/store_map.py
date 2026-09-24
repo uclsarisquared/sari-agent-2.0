@@ -406,6 +406,8 @@ def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_it
             center_to_scanner(debug_dir=debug_dir)   # re-centre and re-read
             continue
         slant = float(s["distance"])
+        if s.get("pitch_deg") is None:
+            break                                  # pre-Phase-D sim: no pitch, can't plan an advance
         theta = math.radians(float(s["pitch_deg"]))
         vertical = slant * math.sin(theta)
         gap = slant * math.cos(theta)
@@ -432,6 +434,8 @@ def align_to_scanner(nav, target_slant=0.85, max_lateral_iters=3, max_advance_it
     if aligned:
         reason = (f"squared on the pad (lateral {lateral * 1000:.0f} mm, residual yaw {yaw_off:+.1f} deg, "
                   f"slant {slant:.2f} m)")
+    elif slant is None:
+        reason = "no LiDAR hit on the scan pad - re-centre the pad and retry"
     elif not within_reach:
         reason = (f"aligned laterally but pad still {slant:.2f} m away (> {target_slant} m reach) - "
                   "advance closer, or the dock geometry blocks it (consider a spliced scan dock)")
@@ -464,7 +468,8 @@ def _approach_checkout(nav, hands, steps, drive, debug_dir):
     al = align_to_scanner(nav, debug_dir=debug_dir)
     steps["align"] = al
     sres = center_to_screen(debug_dir=debug_dir)
-    baseline = read_text_in_box(sres.get("box")) if sres.get("box") else []
+    baseline = (read_text_in_box(sres["box"], source_image=sres.get("_source_image"))
+                if sres.get("box") else [])
     center_to_scanner(debug_dir=debug_dir)
     return None, bool(al.get("aligned")), baseline
 

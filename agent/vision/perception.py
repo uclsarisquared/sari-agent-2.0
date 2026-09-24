@@ -42,6 +42,7 @@ CLIENT = OpenAI(
     base_url=_ENDPOINT_PROFILE.base_url,
     api_key=_ENDPOINT_PROFILE.api_key,
     max_retries=0,
+    timeout=180.0,  # match ChatEndpoint; the SDK default (600 s) stalls a look for 10 min
 )
 ORIGINAL_WIDTH = 1920
 ORIGINAL_HEIGHT = 1080

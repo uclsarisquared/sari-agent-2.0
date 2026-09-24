@@ -333,9 +333,18 @@ async def SendCommand(command: Dict[str, Any], uri: str = None, timeout: float =
     return _process_command_response(command, response)
 
 
+def _run_sync(coro):
+    """Run `coro` on this thread's loop, or a fresh one in a loop-less worker thread."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return loop.run_until_complete(coro)
+
+
 def _send(command: Dict[str, Any], uri: str = None):
     """Synchronously run one bounded SendCommand round trip."""
-    return asyncio.get_event_loop().run_until_complete(SendCommand(command, uri))
+    return _run_sync(SendCommand(command, uri))
 
 
 def _as_text(result) -> str:
@@ -562,7 +571,7 @@ def wait_for_ready(uri: str = None, timeout: float = 180.0, poll_seconds: float 
     while time.monotonic() < deadline:
         remaining = max(1.0, deadline - time.monotonic())
         try:
-            result = asyncio.get_event_loop().run_until_complete(
+            result = _run_sync(
                 asyncio.wait_for(_send_command_once({"command": "WaitUntilReady"}, uri), timeout=remaining))
         except (OSError, asyncio.TimeoutError, websockets.exceptions.WebSocketException) as e:
             logger.info(f"Sandbox at {uri} not reachable yet ({type(e).__name__}); retrying.")

@@ -24,6 +24,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9100
 DEFAULT_MAX_REQUEST_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_IN_FLIGHT = 32
+REQUEST_TIMEOUT_S = 30.0  # socket timeout so a short body cannot pin an admission slot
 MODEL_IDENTITY = "paddleocr:en:text-line-orientation"
 OCR_BACKEND_ENV = "SARI_OCR_BACKEND"
 OCR_BACKENDS = ("auto", "cpu", "directml", "cuda", "paddle", "onnx-cpu")
@@ -266,6 +267,7 @@ class OcrApplication:
 def make_handler(application: OcrApplication) -> type[BaseHTTPRequestHandler]:
     class OcrHandler(BaseHTTPRequestHandler):
         server_version = "SariOCR/1"
+        timeout = REQUEST_TIMEOUT_S
 
         def _json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
