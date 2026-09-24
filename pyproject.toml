@@ -74,7 +74,7 @@ dev = [
     "poethepoet>=0.37.0",
     "pytest>=8.3",
     "pytest-asyncio>=1.0,<2",
-    "python-semantic-release>=9.0.0",
+    "python-semantic-release>=9.21.0",  # same floor as .github/workflows/release.yml
 ]
 
 [tool.poe.tasks]
