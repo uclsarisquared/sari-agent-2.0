@@ -77,6 +77,13 @@ class VLMAgent(BaseAgent):
 
     def send_message(self, content: list) -> str:
         self.history.append({"role": "user", "content": content})
+        try:
+            return self._complete_turn()
+        except BaseException:
+            self.history.pop()  # keep user/assistant turns alternating after a failed call
+            raise
+
+    def _complete_turn(self) -> str:
         messages = [
             {"role": "system", "content": SYS_INST_VLM_LEAN},
             *self._outbound_history(),
@@ -118,7 +125,8 @@ class VLMAgent(BaseAgent):
                 completion.assistant_message if completion is not None
                 else {"role": "assistant", "content": reply}
             )
-        self.history.append(assistant_message)
+        # A None-content reply drops the key; history readers and resends need it.
+        self.history.append({**assistant_message, "content": assistant_message.get("content") or ""})
         return reply
 
     def _outbound_history(self) -> list[dict[str, Any]]:
@@ -148,7 +156,7 @@ class VLMAgent(BaseAgent):
         result = ""
         for message in self.history[-n:]:
             role = message["role"]
-            content = message["content"]
+            content = message.get("content") or ""
             if isinstance(content, list):
                 text = " ".join(part["text"] for part in content if part.get("type") == "text")
             else:

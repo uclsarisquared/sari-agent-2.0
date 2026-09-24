@@ -30,6 +30,7 @@ class HandController:
             return
         from manip.manipulation import set_hand_pose
 
+        self.pose = None  # unknown until both hands finish moving
         for side in ("left", "right"):
             arrived, reported, residual = set_hand_pose(pose, hand=side)
             if not arrived:

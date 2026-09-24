@@ -113,7 +113,11 @@ class GraphNavigator:
 
         _sync_pose(nav)
         here = store_map.nearest_checkpoint((nav.pos[0], nav.pos[2]))
-        target = min(remaining, key=lambda candidate: store_map.hops(here, candidate) or 99)
+        def distance(candidate):
+            hops = store_map.hops(here, candidate)
+            return 99 if hops is None else hops  # 0 = already here, so it ranks first
+
+        target = min(remaining, key=distance)
         self.visited.add(target)
         self.hands.set_pose("rest")
         if self.nav_mode == "graph-advised":

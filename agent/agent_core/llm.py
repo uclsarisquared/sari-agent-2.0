@@ -520,7 +520,7 @@ def endpoint_creds() -> tuple[Optional[str], Optional[str]]:
                 values = json.load(handle).get("env_vars", {})
             endpoint = endpoint or values.get("OPENAI_API_URL")
             key = key or values.get("OPENAI_API_KEY")
-        except OSError:
+        except (OSError, ValueError):  # missing or malformed state file
             pass
     if endpoint:
         endpoint = normalize_endpoint_root(endpoint)
@@ -849,7 +849,10 @@ def _parse_structured(
                 value = parser(candidate)
                 validator.validate(value)
                 return value
-            except (json.JSONDecodeError, SyntaxError, ValueError, ValidationError) as error:
+            except (
+                json.JSONDecodeError, SyntaxError, ValueError, TypeError, RecursionError,
+                ValidationError,
+            ) as error:
                 last_error = error
     detail = getattr(last_error, "message", str(last_error))
     raise MalformedContentError(

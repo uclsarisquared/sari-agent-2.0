@@ -169,8 +169,8 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
         "per_leg_minutes",
         "sandbox_startup_timeout",
         "capture_interval",
-    } and value < 0:
-        raise RunConfigError(f"{path}: {label} cannot be negative")
+    } and (not math.isfinite(value) or value < 0):
+        raise RunConfigError(f"{path}: {label} must be a finite non-negative number")
 
 
 class TomlConfig:

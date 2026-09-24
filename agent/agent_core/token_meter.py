@@ -50,6 +50,7 @@ ROLES = (
 )
 
 _lock = threading.Lock()
+_write_lock = threading.Lock()  # serializes tokens.json writes
 _installed = False
 _run_dir: Optional[str] = None
 _last_dump = 0.0
@@ -180,12 +181,20 @@ def record_api_call(role_name: Optional[str] = None) -> None:
         pass
 
 
-def _dump_if_due(due: bool, totals: dict[str, Any]) -> None:
-    """Periodic crash-safe dump; called after releasing the lock."""
+def _claim_dump_locked() -> bool:
+    """Claim this interval's periodic dump so only one thread writes it. Caller holds the lock."""
     global _last_dump
-    if due and _run_dir:
-        _last_dump = time.monotonic()
-        _write(totals)
+    now = time.monotonic()
+    if not _run_dir or now - _last_dump < DUMP_INTERVAL_S:
+        return False
+    _last_dump = now
+    return True
+
+
+def _write_current() -> None:
+    """Snapshot under the write lock so a stale snapshot can never overwrite a newer one."""
+    with _write_lock:
+        _write(totals())
 
 
 def _record_api_call(role_name: Optional[str] = None) -> None:
@@ -196,9 +205,9 @@ def _record_api_call(role_name: Optional[str] = None) -> None:
         row = _totals["by_role"].setdefault(
             billed_to, {"tokens_in": 0, "tokens_out": 0, "calls": 0, "api_calls": 0})
         row["api_calls"] = int(row.get("api_calls") or 0) + 1
-        due = time.monotonic() - _last_dump >= DUMP_INTERVAL_S
-        totals = _copy_locked()
-    _dump_if_due(due, totals)
+        due = _claim_dump_locked()
+    if due:
+        _write_current()
 
 
 def _record(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
@@ -230,9 +239,9 @@ def _record(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
             row["tokens_out"] += int(tokens_out)
             row["calls"] += 1
 
-        due = time.monotonic() - _last_dump >= DUMP_INTERVAL_S
-        totals = _copy_locked()
-    _dump_if_due(due, totals)
+        due = _claim_dump_locked()
+    if due:
+        _write_current()
 
 
 def _copy_locked() -> dict[str, Any]:
@@ -288,8 +297,9 @@ def dump(run_dir: Optional[str] = None) -> None:
         _run_dir = run_dir
     if not _run_dir:
         return
-    _last_dump = time.monotonic()
-    _write(totals())
+    with _lock:
+        _last_dump = time.monotonic()
+    _write_current()
 
 
 def _write(payload: dict[str, Any]) -> None:
