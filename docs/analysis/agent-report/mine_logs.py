@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 BENCH_ROOT = REPO / "bench_runs"
 BATTERIES = ["20260727_020820-easy", "20260728_143857-medium", "20260730_205702-hard"]
 

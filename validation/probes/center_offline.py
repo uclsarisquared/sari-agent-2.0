@@ -1,5 +1,5 @@
 """
-center_offline_check.py - A/B the centring MATH offline, no Unity sim required.
+center_offline.py - A/B the centring MATH offline, no Unity sim required.
 
 Given saved capture PNG(s) and a target description, this runs the SAME deterministic
 detector center_object_on_screen now uses (perception._detect_bbox_px, temp 0), then
@@ -23,9 +23,9 @@ known FOV geometry (centre -> 0, right edge -> half hFOV, bottom edge -> half vF
 and prints how far the retired /19.2 model was off at the edges.
 
 Usage:
-    python center_offline_check.py --selftest
-    python center_offline_check.py IMG.png --target "a can of Century Tuna" --repeat 3
-    python center_offline_check.py "mapping/output/captures/*_primary.png" --target "Piattos"
+    python center_offline.py --selftest
+    python center_offline.py IMG.png --target "a can of Century Tuna" --repeat 3
+    python center_offline.py "mapping/output/captures/*_primary.png" --target "Piattos"
 """
 import argparse
 import glob

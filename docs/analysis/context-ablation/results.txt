@@ -95,7 +95,7 @@ order  arm       battery                                graded success
 7      a3        20260730_172208_context-ablation-a3    0.44          
 8      a4        20260730_192703_context-ablation-a4    0.56          
 
-Spearman rho(run order, graded success) = -0.43 over 8 arms, exact p = 0.299.
+Spearman rho(run order, graded success) = -0.52 over 8 arms, exact p = 0.192.
 Not significant: with eight arms a rho of this size is unremarkable, and
 the highest-scoring arm ran third. No drift correction is warranted.
 

@@ -87,6 +87,29 @@ def permutation_test(xs, ys, iters=20000, seed=0) -> float:
     return (hits + 1) / (iters + 1)
 
 
+def average_ranks(values) -> list[float]:
+    """1-based ranks; ties share their mean rank (needed for a valid Spearman rho)."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[start]]:
+            end += 1
+        for position in range(start, end + 1):
+            ranks[order[position]] = (start + end) / 2 + 1
+        start = end + 1
+    return ranks
+
+
+def pearson(xs, ys) -> float:
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    return sxy / math.sqrt(sxx * syy) if sxx and syy else float("nan")
+
+
 def section(title: str) -> None:
     print(f"\n{title}\n{'=' * len(title)}")
 
@@ -201,18 +224,13 @@ def main() -> int:
         rates.append(rate)
         body.append([index, arm, rs[0]["battery"], f"{rate:.2f}"])
     table(["order", "arm", "battery", "graded success"], body)
-    ranks = sorted(range(len(rates)), key=lambda i: rates[i])
-    ranked = [0] * len(rates)
-    for position, i in enumerate(ranks):
-        ranked[i] = position + 1
     n = len(rates)
-    d2 = sum((i + 1 - ranked[i]) ** 2 for i in range(n))
-    rho = 1 - 6 * d2 / (n * (n * n - 1))
+    ranked = average_ranks(rates)
+    rho = pearson(list(range(1, n + 1)), ranked)
     # Exact permutation p: 8! orderings is small enough to enumerate.
     import itertools
     extreme = sum(1 for perm in itertools.permutations(range(1, n + 1))
-                  if abs(1 - 6 * sum((perm[i] - ranked[i]) ** 2
-                                     for i in range(n)) / (n * (n * n - 1))) >= abs(rho) - 1e-12)
+                  if abs(pearson(perm, ranked)) >= abs(rho) - 1e-12)
     print(f"\nSpearman rho(run order, graded success) = {rho:+.2f} over {n} arms, "
           f"exact p = {extreme / math.factorial(n):.3f}.")
     print("Not significant: with eight arms a rho of this size is unremarkable, and")
@@ -221,7 +239,7 @@ def main() -> int:
     section("5. Context cost per LLM call (costable attempts)")
     print("Input tokens per call reads context size directly, but it is an average over")
     print("that arm's own call mix -- an arm whose runs went longer took more late-leg")
-    print("calls, which are the expensive ones. Read section 7 for the deconfounded view.")
+    print("calls, which are the expensive ones. See growth.py for the deconfounded view.")
     body = []
     for arm in ARMS:
         clean = costable(arm)
@@ -250,7 +268,7 @@ def main() -> int:
     table(["arm", "n", "steps", "steps/att", "tok_in/step", "tok_in/att", "wall_min"], body)
     print("\ntok_in/att is dominated by how long an arm survived, not by its context")
     print("policy: an attempt that runs to the 40-minute leg cap spends 40 minutes of")
-    print("tokens. Section 7 removes the run-length term.")
+    print("tokens. growth.py removes the run-length term.")
 
     section("8. Permutation tests on cost vs baseline (costable attempts)")
     base_clean = costable("baseline")
@@ -264,8 +282,8 @@ def main() -> int:
                    lambda r: r["actor_in"] / r["actor_calls"] if r["actor_calls"] else None,
                    lambda r: r["steps"],
                    lambda r: r["semantic_chars"]):
-            xs = [v for v in map(fn, clean) if v]
-            ys = [v for v in map(fn, base_clean) if v]
+            xs = [v for v in map(fn, clean) if v is not None]   # keep real zeros
+            ys = [v for v in map(fn, base_clean) if v is not None]
             cells.append(f"{mean(xs) / mean(ys) - 1:+.0%} p={permutation_test(xs, ys):.3f}")
         body.append(cells)
     table(["arm", "tok_in/att", "actor/call", "steps", "semantic chars"], body)

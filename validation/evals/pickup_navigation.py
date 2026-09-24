@@ -245,7 +245,8 @@ def main():
         kw = tuple(k.strip().lower() for k in args.match.split(",")) if args.match else ()
         todo = [(args.task, kw)]
     else:
-        todo = [TASKS[i] for i in args.tasks] if args.tasks else TASKS
+        # Built-in tasks carry no keywords, so success needs a manual audit of gripped_names.
+        todo = [(TASKS[i], ()) for i in args.tasks] if args.tasks else [(t, ()) for t in TASKS]
     # Agent runtime = the OpenAI-compatible endpoint from secrets.env
     # (user directive 2026-07-19; OpenRouter retired on 402).
     agent = EmbodiedAgent(

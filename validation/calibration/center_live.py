@@ -1,5 +1,5 @@
 """
-center_live_test.py - exercise the CLOSED-LOOP centring against the LIVE Unity sim.
+center_live.py - exercise the CLOSED-LOOP centring against the LIVE Unity sim.
 
 Needs the sim in Play mode (ws://localhost:8080) with the agent already facing the shelf so
 the target is somewhere in frame. Drives center_object_on_screen for one target and reports
@@ -10,9 +10,9 @@ a per-look look<i>_bbox.png showing the VLM's candidate boxes (yellow), the lock
 and the aim crosshair (green). The hands are disabled for the run (active hand prefabs can fill
 the camera and occlude the target) and re-enabled after.
 
-    python center_live_test.py --target "a can of Century Tuna"
-    python center_live_test.py --target "Piattos" --aim 0.5 0.67      # aim at the grab point
-    python center_live_test.py --target "Ritz crackers" --max-iters 4 --tol 15
+    python center_live.py --target "a can of Century Tuna"
+    python center_live.py --target "Piattos" --aim 0.5 0.67      # aim at the grab point
+    python center_live.py --target "Ritz crackers" --max-iters 4 --tol 15
 
 Read the [CENTER] lines: residual should shrink toward (0,0) and end 'within tolerance'. If it
 oscillates or grows, that is the thing to catch here (wrong sign / gain), not in a full run.

@@ -253,7 +253,7 @@ correction in the table. Reading `attempts.jsonl` directly would say every arm i
 worse than the control; that is an artefact of the predicate, not a result.
 
 **Run order does not explain the spread.** Spearman ρ(run order, graded success)
-= −0.43, exact *p* = 0.299 over 8 arms, and the best-scoring arm ran third.
+= −0.52 (tie-corrected), exact *p* = 0.192 over 8 arms, and the best-scoring arm ran third.
 
 ### Per prompt, out of 3
 

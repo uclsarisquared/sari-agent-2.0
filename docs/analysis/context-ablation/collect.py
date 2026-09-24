@@ -33,7 +33,7 @@ BATTERIES = {
 }
 # Arms compared against each other (hard-baseline ran a different prompt set).
 ARMS = [arm for arm in BATTERIES if arm != "hard-baseline"]
-DEFAULT_BENCH_RUNS = pathlib.Path(__file__).resolve().parent.parent / "bench_runs"
+DEFAULT_BENCH_RUNS = pathlib.Path(__file__).resolve().parents[3] / "bench_runs"  # repo root
 
 ROLES = ("actor", "semantic", "episodic", "perception", "guard",
          "findings", "resolver", "decomposer", "responder")

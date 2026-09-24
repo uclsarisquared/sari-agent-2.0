@@ -93,7 +93,7 @@ def main() -> int:
                       if int(r[f"{role}_calls"] or 0) >= args.min_calls]
             result = fit(points)
             if not result:
-                body.append([arm, len(points), "-", "-", "-", "-"])
+                body.append([arm, len(points), "-", "-", "-", "-", "-"])
                 continue
             base, slope, r2 = result
             lo, hi = boot_ci(points, 1)
@@ -123,9 +123,11 @@ def main() -> int:
         cells = [arm]
         for n in (5, 10, 20, 40):
             value = base + slope * (n - 1)
-            reference = ref_fit[0] + ref_fit[1] * (n - 1)
-            cells.append(f"{value:,.0f}" + ("" if arm == "baseline"
-                                            else f" ({value / reference - 1:+.0%})"))
+            delta = ""
+            if arm != "baseline" and ref_fit:   # no baseline fit -> absolute values only
+                reference = ref_fit[0] + ref_fit[1] * (n - 1)
+                delta = f" ({value / reference - 1:+.0%})"
+            cells.append(f"{value:,.0f}{delta}")
         body.append(cells)
     table(["arm", "call 5", "call 10", "call 20", "call 40"], body)
     print("\nRead down a column: that is what one actor call costs at that point in a")
