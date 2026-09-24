@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.8.7 (2026-09-24)
+
+### Bug Fixes
+
+- **bench**: Lock attempt.json updates and close lease, encoder and resume gaps
+  ([`5707d16`](https://github.com/uclsarisquared/sari-agent-2.0/commit/5707d162dda20a27ca21c771c0b7c70b321a8747))
+
+
 ## v1.8.6 (2026-09-24)
 
 ### Bug Fixes
