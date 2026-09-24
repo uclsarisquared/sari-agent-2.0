@@ -180,9 +180,16 @@ def record_api_call(role_name: Optional[str] = None) -> None:
         pass
 
 
+def _dump_if_due(due: bool, totals: dict[str, Any]) -> None:
+    """Periodic crash-safe dump; called after releasing the lock."""
+    global _last_dump
+    if due and _run_dir:
+        _last_dump = time.monotonic()
+        _write(totals)
+
+
 def _record_api_call(role_name: Optional[str] = None) -> None:
     """Internal request-attempt counter shared by the SDK and raw-HTTP paths."""
-    global _last_dump
     billed_to = str(role_name or _role_var.get() or UNATTRIBUTED)
     with _lock:
         _totals["api_calls"] = int(_totals.get("api_calls") or 0) + 1
@@ -191,15 +198,10 @@ def _record_api_call(role_name: Optional[str] = None) -> None:
         row["api_calls"] = int(row.get("api_calls") or 0) + 1
         due = time.monotonic() - _last_dump >= DUMP_INTERVAL_S
         totals = _copy_locked()
-
-    if due and _run_dir:
-        _last_dump = time.monotonic()
-        _write(totals)
+    _dump_if_due(due, totals)
 
 
 def _record(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
-    global _last_dump
-
     # Read outside the lock: it is a per-thread lookup and taking it under the lock would pin the
     # role to whoever happens to be waiting.
     billed_to = str(role_name or _role_var.get() or UNATTRIBUTED)
@@ -230,10 +232,7 @@ def _record(model: Any, usage: Any, role_name: Optional[str] = None) -> None:
 
         due = time.monotonic() - _last_dump >= DUMP_INTERVAL_S
         totals = _copy_locked()
-
-    if due and _run_dir:
-        _last_dump = time.monotonic()
-        _write(totals)
+    _dump_if_due(due, totals)
 
 
 def _copy_locked() -> dict[str, Any]:
@@ -314,10 +313,7 @@ def _write(payload: dict[str, Any]) -> None:
 def reset() -> None:
     """Zeroes the counters (tests only - a real process meters one run from start to finish)."""
     with _lock:
-        _totals["tokens_in"] = 0
-        _totals["tokens_out"] = 0
-        _totals["calls"] = 0
-        _totals["api_calls"] = 0
-        _totals["untracked_calls"] = 0
+        for key in ("tokens_in", "tokens_out", "calls", "api_calls", "untracked_calls"):
+            _totals[key] = 0
         _totals["by_model"] = {}
         _totals["by_role"] = {}

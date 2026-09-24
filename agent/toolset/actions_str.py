@@ -1,20 +1,22 @@
-
-
-NAVIGATION_ACTIONS = ("move_forward: Move forward 0.1 meters. This will move in the Z-axis. Maximum 10 steps per action.\n"
-                      "move_backward: Move backward 0.1 meters. Maximum 10 steps per action.\n"
-                      "move_left: Move left 0.1 meters. Maximum 10 steps per action.\n"
-                      "move_right: Move right 0.1 meters. Maximum 10 steps per action.\n"
-                      "pan_left: Pan left 2.5 degrees. Maximum 15 steps per action.\n"
-                      "pan_right: Pan right 2.5 degrees. Maximum 15 steps per action.\n"
-                      "tilt_up: Tilt up 2.5 degrees. Maximum 10 steps per action.\n"
-                      "tilt_down: Tilt down 2.5 degrees. Maximum 10 steps per action.\n")
-
-PERCEPTION_ACTIONS = (
+# Camera actions shared by navigation and perception.
+_CAMERA_ACTIONS = (
     "pan_left: Pan left 2.5 degrees. Maximum 15 steps per action.\n"
     "pan_right: Pan right 2.5 degrees. Maximum 15 steps per action.\n"
     "tilt_up: Tilt up 2.5 degrees. Maximum 10 steps per action.\n"
     "tilt_down: Tilt down 2.5 degrees. Maximum 10 steps per action.\n"
-    "center_object_on_screen: Rotate the camera in a closed loop until the target object is centred in the frame (it detects the target and verifies the result). Use this to centre the target before grabbing - do not rely on eyeballed pan_left/pan_right for the final centring.\n"
+)
+
+NAVIGATION_ACTIONS = (
+    "move_forward: Move forward 0.1 meters. This will move in the Z-axis. Maximum 10 steps per action.\n"
+    "move_backward: Move backward 0.1 meters. Maximum 10 steps per action.\n"
+    "move_left: Move left 0.1 meters. Maximum 10 steps per action.\n"
+    "move_right: Move right 0.1 meters. Maximum 10 steps per action.\n"
+    + _CAMERA_ACTIONS
+)
+
+PERCEPTION_ACTIONS = (
+    _CAMERA_ACTIONS
+    + "center_object_on_screen: Rotate the camera in a closed loop until the target object is centred in the frame (it detects the target and verifies the result). Use this to centre the target before grabbing - do not rely on eyeballed pan_left/pan_right for the final centring.\n"
 )
 
 MANIPULATION_ACTIONS = (

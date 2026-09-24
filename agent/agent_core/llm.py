@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import ast
 import base64
 import copy
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
 import os
@@ -120,14 +122,13 @@ def effective_max_tokens(
     override_name = _VERTEX_TOKEN_OVERRIDE[workload]
     raw_override = os.getenv(override_name)
     if raw_override is not None:
-        original_override = raw_override
         try:
             override = int(raw_override)
         except ValueError as error:
             raise EndpointConfigurationError(
                 f"{override_name} must be an exact positive integer, got {raw_override!r}."
             ) from error
-        if override <= 0 or str(override) != original_override:
+        if override <= 0 or str(override) != raw_override:
             raise EndpointConfigurationError(
                 f"{override_name} must be an exact positive integer, got {raw_override!r}."
             )
@@ -169,8 +170,8 @@ class ADCBearerToken:
         self._refresh_retry_at = 0.0
         self._lock = threading.Lock()
 
-    def _needs_refresh(self) -> bool:
-        from datetime import datetime, timedelta, timezone
+    def _expires_within(self, margin_s: float) -> bool:
+        """True when the token is missing or expires within ``margin_s`` seconds."""
         if not getattr(self._credentials, "token", None):
             return True
         expiry = getattr(self._credentials, "expiry", None)
@@ -178,18 +179,13 @@ class ADCBearerToken:
             return False
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
-        return expiry <= datetime.now(timezone.utc) + timedelta(seconds=self._refresh_margin_s)
+        return expiry <= datetime.now(timezone.utc) + timedelta(seconds=margin_s)
+
+    def _needs_refresh(self) -> bool:
+        return self._expires_within(self._refresh_margin_s)
 
     def _token_is_valid(self) -> bool:
-        from datetime import datetime, timezone
-        if not getattr(self._credentials, "token", None):
-            return False
-        expiry = getattr(self._credentials, "expiry", None)
-        if expiry is None:
-            return True
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        return expiry > datetime.now(timezone.utc)
+        return not self._expires_within(0)
 
     def __call__(self) -> str:
         if self._needs_refresh():
@@ -241,6 +237,17 @@ def shared_adc_bearer_token() -> ADCBearerToken:
             if _adc_bearer_token is None:
                 _adc_bearer_token = ADCBearerToken()
     return _adc_bearer_token
+
+
+def _thinking_level(extra_body: dict[str, Any] | None) -> str | None:
+    return (extra_body or {}).get("google", {}).get("thinking_config", {}).get("thinking_level")
+
+
+def _merged_body(default: dict[str, Any] | None, extra: dict[str, Any] | None) -> dict[str, Any]:
+    body = dict(default or {})
+    if extra:
+        body.update(extra)
+    return body
 
 
 @dataclass(frozen=True)
@@ -314,13 +321,7 @@ class EndpointProfile:
 
     @property
     def thinking_level(self) -> str | None:
-        if self.provider != "vertex":
-            return None
-        return (
-            self.extra_body.get("google", {})
-            .get("thinking_config", {})
-            .get("thinking_level")
-        )
+        return _thinking_level(self.extra_body) if self.provider == "vertex" else None
 
 
 @dataclass(frozen=True)
@@ -425,12 +426,10 @@ class ChatEndpoint:
                 temperature=temperature, max_tokens=max_tokens, extra_body=extra_body,
                 workload=workload,
             ).completion.raw_response
-        body = dict(self.profile.extra_body)
-        if extra_body:
-            body.update(extra_body)
         kwargs: dict[str, Any] = {
             "model": model or self.profile.model, "messages": messages,
-            "temperature": temperature, "extra_body": body,
+            "temperature": temperature,
+            "extra_body": _merged_body(self.profile.extra_body, extra_body),
         }
         budget = effective_max_tokens(
             self.profile.provider, max_tokens, workload, self.profile.thinking_level
@@ -555,6 +554,8 @@ def build_content(*parts) -> list:
             continue
         if isinstance(part, Image.Image):
             content.append(encode_image(part))
+        elif isinstance(part, dict):  # pre-encoded part, e.g. a reused image_url
+            content.append(part)
         elif isinstance(part, str):
             content.append({"type": "text", "text": part})
     return content
@@ -645,6 +646,16 @@ def _exception_chain(error: Exception):
         current = current.__cause__ or current.__context__
 
 
+def _status_failure_kind(status_code: Any) -> str | None:
+    if not isinstance(status_code, int):
+        return None
+    if status_code == 429:
+        return "rate_limit"
+    if status_code in (408, 409) or status_code >= 500:
+        return "http_status"
+    return None
+
+
 def _direct_api_failure_kind(error: BaseException) -> str | None:
     if isinstance(error, MalformedContentError):
         return "malformed_content"
@@ -655,16 +666,8 @@ def _direct_api_failure_kind(error: BaseException) -> str | None:
     if isinstance(error, (APIConnectionError, RequestsConnectionError, ConnectionError)):
         return "connection"
     if isinstance(error, APIStatusError):
-        if error.status_code in (408, 409, 429) or error.status_code >= 500:
-            return "rate_limit" if error.status_code == 429 else "http_status"
-        return None
-    response = getattr(error, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int) and (
-        status_code in (408, 409, 429) or status_code >= 500
-    ):
-        return "rate_limit" if status_code == 429 else "http_status"
-    return None
+        return _status_failure_kind(error.status_code)
+    return _status_failure_kind(getattr(getattr(error, "response", None), "status_code", None))
 
 
 def _transient_error_in_chain(error: Exception) -> BaseException:
@@ -817,6 +820,9 @@ def _messages_with_schema_prompt(
     raise ValueError("structured completion requires a user message for schema instructions")
 
 
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+
+
 def _parse_structured(
     completion: CompletionResult, validator: Any, *, tolerant: bool, call_name: str,
 ) -> Any:
@@ -828,7 +834,7 @@ def _parse_structured(
         )
     candidates = [text.strip()]
     if tolerant:
-        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        fenced = _FENCED_JSON_RE.search(text)
         if fenced:
             candidates.append(fenced.group(1).strip())
         for left, right in (("{", "}"), ("[", "]")):
@@ -836,8 +842,8 @@ def _parse_structured(
             if start >= 0 and end > start:
                 candidates.append(text[start:end + 1])
     last_error: Exception | None = None
+    parsers = (json.loads, ast.literal_eval) if tolerant else (json.loads,)
     for candidate in dict.fromkeys(candidates):
-        parsers = (json.loads, __import__("ast").literal_eval) if tolerant else (json.loads,)
         for parser in parsers:
             try:
                 value = parser(candidate)
@@ -874,9 +880,7 @@ def structured_chat_completion(
     """Execute provider-aware structured output, including Vertex's one fallback phase."""
     validator = validate_json_schema(schema, provider=provider)
     effective = effective_max_tokens(provider, max_tokens, workload, thinking_level)
-    body = dict(default_extra_body or {})
-    if extra_body:
-        body.update(extra_body)
+    body = _merged_body(default_extra_body, extra_body)
 
     def request(request_messages: list[dict[str, Any]], *, native: bool) -> CompletionResult:
         kwargs: dict[str, Any] = {
@@ -985,11 +989,7 @@ class BaseAgent(ABC):
         workload: Workload = "reasoning",
     ) -> CompletionResult:
         """Completion-result path used when provider message metadata must survive history."""
-        thinking_level = (
-            (self.config.extra_body or {}).get("google", {})
-            .get("thinking_config", {})
-            .get("thinking_level")
-        )
+        thinking_level = _thinking_level(self.config.extra_body)
         effective = effective_max_tokens(
             self.config.provider, self.config.max_tokens, workload, thinking_level
         )

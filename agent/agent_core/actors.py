@@ -15,15 +15,27 @@ from PIL import Image
 from agent_core import token_meter
 from agent_core.context import SemanticLog
 from agent_core.context_policy import ContextPolicy, validate_context_policy
+from agent_core.contracts import extract_json
 from agent_core.llm import BaseAgent, LLMConfig, MalformedContentError, build_content
 from agent_core.sys_inst import SYS_INST_VLM_LEAN
+
+
+# Legacy salvage form for actor replies that are not a parseable mapping.
+_ACTIONS_RE = re.compile(r"['\"]actions['\"]\s*:\s*\[([^\[\]]*)\]", re.DOTALL)
+_TIMES_RE = re.compile(r"['\"]times['\"]\s*:\s*\[([^\[\]]*)\]", re.DOTALL)
+_QUOTED_RE = re.compile(r"['\"]([^'\"]+)['\"]")
+_INT_RE = re.compile(r"-?\d+")
+
+
+def _client(config: LLMConfig) -> OpenAI:
+    return OpenAI(base_url=config.base_url, api_key=config.api_key, max_retries=0)
 
 
 class AssociativeLearner(BaseAgent):
     """LLM client used to produce semantic decisions and episodic reflections."""
     def __init__(self, config: Optional[LLMConfig] = None) -> None:
         super().__init__(config)
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key, max_retries=0)
+        self.client = _client(self.config)
 
     def generate_content(
         self,
@@ -53,7 +65,7 @@ class VLMAgent(BaseAgent):
     ) -> None:
         super().__init__(config)
         self.context_policy = validate_context_policy(context_policy)
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key, max_retries=0)
+        self.client = _client(self.config)
         self.history: List[Dict[str, Any]] = []
         # Retained here for compatibility. MemoryRuntime owns mutation/persistence at runtime.
         self.episodic_memory = ""
@@ -70,8 +82,7 @@ class VLMAgent(BaseAgent):
             *self._outbound_history(),
         ]
         def validate(raw: str) -> str:
-            match = self.extractable_json_structured_output.search(raw or "")
-            blob = match.group(1) if match else str(raw or "").strip()
+            blob = extract_json(self.extractable_json_structured_output, str(raw or ""))
             parsed = None
             for parser in (ast.literal_eval, json.loads):
                 try:
@@ -82,10 +93,10 @@ class VLMAgent(BaseAgent):
                     parsed = candidate
                     break
             if parsed is None:
-                actions = re.search(r"['\"]actions['\"]\s*:\s*\[([^\[\]]*)\]", blob, re.DOTALL)
-                times = re.search(r"['\"]times['\"]\s*:\s*\[([^\[\]]*)\]", blob, re.DOTALL)
-                action_items = re.findall(r"['\"]([^'\"]+)['\"]", actions.group(1)) if actions else []
-                time_items = re.findall(r"-?\d+", times.group(1)) if times else []
+                actions = _ACTIONS_RE.search(blob)
+                times = _TIMES_RE.search(blob)
+                action_items = _QUOTED_RE.findall(actions.group(1)) if actions else []
+                time_items = _INT_RE.findall(times.group(1)) if times else []
                 if not action_items or len(action_items) != len(time_items):
                     raise MalformedContentError(
                         "actor response did not contain usable actions and times", content=raw

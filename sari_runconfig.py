@@ -173,8 +173,8 @@ def _validate_value(path: Path, section: str, key: str, value: object, expected:
         raise RunConfigError(f"{path}: {label} cannot be negative")
 
 
-class RunConfig:
-    """Validated TOML values, with config-relative filesystem paths made absolute."""
+class TomlConfig:
+    """Validated per-section TOML values."""
 
     def __init__(self, path: Path, values: dict[str, dict[str, Any]]) -> None:
         self.path = path
@@ -183,8 +183,44 @@ class RunConfig:
     def get(self, section: str, key: str, default: Any = None) -> Any:
         return self._values.get(section, {}).get(key, default)
 
+
+class RunConfig(TomlConfig):
+    """Validated TOML values, with config-relative filesystem paths made absolute."""
+
     def has(self, section: str, key: str) -> bool:
         return key in self._values.get(section, {})
+
+
+def load_toml_tables(
+    path: str | Path, schema: dict[str, Any], error: type[ValueError], kind: str
+) -> tuple[Path, dict[str, dict[str, Any]]]:
+    """Read a TOML file whose top level must be known ``schema`` sections holding tables."""
+    config_path = Path(path).expanduser().resolve()
+    try:
+        with config_path.open("rb") as handle:
+            raw = tomli.load(handle)
+    except FileNotFoundError as cause:
+        raise error(f"{kind} config does not exist: {config_path}") from cause
+    except (OSError, tomli.TOMLDecodeError) as cause:
+        raise error(f"could not load {kind} config {config_path}: {cause}") from cause
+
+    unknown_sections = sorted(set(raw) - set(schema))
+    if unknown_sections:
+        raise error(f"{config_path}: unknown section(s): {', '.join(unknown_sections)}")
+    for section, section_values in raw.items():
+        if not isinstance(section_values, dict):
+            raise error(f"{config_path}: [{section}] must be a TOML table")
+    return config_path, raw
+
+
+def reject_unknown_keys(
+    config_path: Path, section: str, section_values: dict[str, Any],
+    known: Any, error: type[ValueError],
+) -> None:
+    unknown_keys = sorted(set(section_values) - set(known))
+    if unknown_keys:
+        names = ", ".join(f"{section}.{key}" for key in unknown_keys)
+        raise error(f"{config_path}: unknown option(s): {names}")
 
 
 def load_run_config(path: str | Path) -> RunConfig:
@@ -194,25 +230,10 @@ def load_run_config(path: str | Path) -> RunConfig:
     from both the repository root and ``agent/``.
     """
 
-    config_path = Path(path).expanduser().resolve()
-    try:
-        with config_path.open("rb") as handle:
-            raw = tomli.load(handle)
-    except FileNotFoundError as error:
-        raise RunConfigError(f"run config does not exist: {config_path}") from error
-    except (OSError, tomli.TOMLDecodeError) as error:
-        raise RunConfigError(f"could not load run config {config_path}: {error}") from error
-
-    unknown_sections = sorted(set(raw) - set(_SCHEMA))
-    if unknown_sections:
-        raise RunConfigError(
-            f"{config_path}: unknown section(s): {', '.join(unknown_sections)}"
-        )
+    config_path, raw = load_toml_tables(path, _SCHEMA, RunConfigError, "run")
 
     values: dict[str, dict[str, Any]] = {}
     for section, section_values in raw.items():
-        if not isinstance(section_values, dict):
-            raise RunConfigError(f"{config_path}: [{section}] must be a TOML table")
         for (deprecated_section, deprecated_key), replacement in _DEPRECATED_KEYS.items():
             if section != deprecated_section or deprecated_key not in section_values:
                 continue
@@ -227,10 +248,7 @@ def load_run_config(path: str | Path) -> RunConfig:
                 file=sys.stderr,
             )
             section_values[replacement] = section_values.pop(deprecated_key)
-        unknown_keys = sorted(set(section_values) - set(_SCHEMA[section]))
-        if unknown_keys:
-            names = ", ".join(f"{section}.{key}" for key in unknown_keys)
-            raise RunConfigError(f"{config_path}: unknown option(s): {names}")
+        reject_unknown_keys(config_path, section, section_values, _SCHEMA[section], RunConfigError)
 
         values[section] = {}
         for key, value in section_values.items():

@@ -20,6 +20,7 @@ from agent_core.contracts import (
     EpisodicReflection,
     SemanticDecision,
     available_actions,
+    extract_json,
     parse_episodic_reflection,
     parse_semantic_decision,
     parse_plan_revision_request,
@@ -28,7 +29,7 @@ from agent_core.contracts import (
     stop_response,
 )
 from agent_core.hands import HandController
-from agent_core.llm import LLMConfig, MalformedContentError, build_content
+from agent_core.llm import LLMConfig, MalformedContentError, build_content, encode_image
 from agent_core.memory_runtime import MemoryRuntime
 from agent_core.navigation import GraphNavigator
 from agent_core.sys_inst import SYS_INST_ASSOCIATIVE_EPISODIC, SYS_INST_ASSOCIATIVE_SEMANTIC
@@ -78,6 +79,15 @@ class StepRequest:
             self.raw_state.get("last_reach") if isinstance(self.raw_state, dict) else None
         )
         return reach_move_steps(last_reach)
+
+
+def _delegated(service: str, attr: str) -> property:
+    """Legacy read/write attribute view onto a runtime service field."""
+    return property(
+        lambda self: getattr(getattr(self, service)(), attr),
+        lambda self, value: setattr(getattr(self, service)(), attr, value),
+        doc=f"Legacy view of {service}().{attr}.",
+    )
 
 
 class EmbodiedAgent:
@@ -180,127 +190,20 @@ class EmbodiedAgent:
         service.leg = self.__dict__.get("_mem_leg")
         return service
 
-    # compatibility API
+    # compatibility API: legacy attribute views onto the hand and navigation services
 
-    @property
-    def _hands_active(self):
-        """Expose the hand controller's activation state for legacy callers."""
-        return self._hand_service().active
-
-    @_hands_active.setter
-    def _hands_active(self, value) -> None:
-        """Update the legacy activation-state view through the hand controller."""
-        self._hand_service().active = value
-
-    @property
-    def _hand_pose(self):
-        """Expose the tracked canonical hand pose for legacy callers."""
-        return self._hand_service().pose
-
-    @_hand_pose.setter
-    def _hand_pose(self, value) -> None:
-        """Update the legacy hand-pose view through the hand controller."""
-        self._hand_service().pose = value
-
-    @property
-    def _graph_nav(self):
-        """Expose the lazily-created graph navigation session for legacy callers."""
-        return self._navigation_service().graph_nav
-
-    @_graph_nav.setter
-    def _graph_nav(self, value) -> None:
-        """Replace the legacy graph navigation session."""
-        self._navigation_service().graph_nav = value
-
-    @property
-    def _advised_llm_calls(self):
-        """Expose the graph advisor's LLM-call count for legacy reporting."""
-        return self._navigation_service().advised_llm_calls
-
-    @_advised_llm_calls.setter
-    def _advised_llm_calls(self, value) -> None:
-        """Update the graph advisor's legacy LLM-call counter."""
-        self._navigation_service().advised_llm_calls = value
-
-    @property
-    def _advised_stats(self):
-        """Expose graph advisor hop statistics for legacy reporting."""
-        return self._navigation_service().advised_stats
-
-    @_advised_stats.setter
-    def _advised_stats(self, value) -> None:
-        """Replace the graph advisor's legacy hop statistics."""
-        self._navigation_service().advised_stats = value
-
-    @property
-    def _advised_shot_idx(self):
-        """Expose the graph advisor screenshot sequence index."""
-        return self._navigation_service().advised_shot_idx
-
-    @_advised_shot_idx.setter
-    def _advised_shot_idx(self, value) -> None:
-        """Update the graph advisor screenshot sequence index."""
-        self._navigation_service().advised_shot_idx = value
-
-    @property
-    def _nav_candidates(self):
-        """Expose resolved navigation candidates for legacy callers."""
-        return self._navigation_service().candidates
-
-    @_nav_candidates.setter
-    def _nav_candidates(self, value) -> None:
-        """Replace the navigator's resolved candidate list."""
-        self._navigation_service().candidates = value
-
-    @property
-    def _nav_visited(self):
-        """Expose the candidates visited in the active navigation task."""
-        return self._navigation_service().visited
-
-    @_nav_visited.setter
-    def _nav_visited(self, value) -> None:
-        """Replace the navigator's visited-candidate set."""
-        self._navigation_service().visited = value
-
-    @property
-    def _nav_task(self):
-        """Expose the task whose navigation candidates are cached."""
-        return self._navigation_service().task
-
-    @_nav_task.setter
-    def _nav_task(self, value) -> None:
-        """Update the task associated with cached navigation candidates."""
-        self._navigation_service().task = value
-
-    @property
-    def _nav_seeded(self):
-        """Expose plan-provided navigation candidates awaiting use."""
-        return self._navigation_service().seeded
-
-    @_nav_seeded.setter
-    def _nav_seeded(self, value) -> None:
-        """Update the plan-provided navigation candidate seed."""
-        self._navigation_service().seeded = value
-
-    @property
-    def _nav_seeded_name(self):
-        """Expose the target name associated with seeded candidates."""
-        return self._navigation_service().seeded_name
-
-    @_nav_seeded_name.setter
-    def _nav_seeded_name(self, value) -> None:
-        """Update the target name associated with seeded candidates."""
-        self._navigation_service().seeded_name = value
-
-    @property
-    def _nav_resolution(self):
-        """Expose the latest target-resolution record for legacy callers."""
-        return self._navigation_service().resolution
-
-    @_nav_resolution.setter
-    def _nav_resolution(self, value) -> None:
-        """Replace the latest target-resolution record."""
-        self._navigation_service().resolution = value
+    _hands_active = _delegated("_hand_service", "active")
+    _hand_pose = _delegated("_hand_service", "pose")
+    _graph_nav = _delegated("_navigation_service", "graph_nav")
+    _advised_llm_calls = _delegated("_navigation_service", "advised_llm_calls")
+    _advised_stats = _delegated("_navigation_service", "advised_stats")
+    _advised_shot_idx = _delegated("_navigation_service", "advised_shot_idx")
+    _nav_candidates = _delegated("_navigation_service", "candidates")
+    _nav_visited = _delegated("_navigation_service", "visited")
+    _nav_task = _delegated("_navigation_service", "task")
+    _nav_seeded = _delegated("_navigation_service", "seeded")
+    _nav_seeded_name = _delegated("_navigation_service", "seeded_name")
+    _nav_resolution = _delegated("_navigation_service", "resolution")
 
     def set_semantic_memory(self) -> None:
         """Reset semantic memory from the configured map's base knowledge."""
@@ -394,22 +297,23 @@ class EmbodiedAgent:
 
     # LLM passes
 
+    def _learner_mapping(self, raw: str, label: str):
+        """Literal-eval the learner's fenced reply, raising a retryable contract error."""
+        pattern = self.associative_learner.extractable_json_structured_output
+        try:
+            return ast.literal_eval(extract_json(pattern, str(raw or "")))
+        except (SyntaxError, ValueError, TypeError) as error:
+            raise MalformedContentError(
+                f"{label} response was not a valid mapping: {error}", content=raw
+            ) from error
+
     def _call_associative(
-        self, system_instruction: str, image: Optional[Image.Image], text: str
+        self, system_instruction: str, image: Optional[Image.Image | dict], text: str
     ) -> str:
         """Run one image-aware semantic learner pass with semantic token attribution."""
         content = build_content(image, "## CURRENT OBSERVATION\n", text)
         def validate(raw: str) -> str:
-            try:
-                parsed = ast.literal_eval(
-                    self.associative_learner.extractable_json_structured_output.search(raw).group(1)
-                    if self.associative_learner.extractable_json_structured_output.search(raw)
-                    else str(raw or "").strip()
-                )
-            except (AttributeError, SyntaxError, ValueError, TypeError) as error:
-                raise MalformedContentError(
-                    f"semantic response was not a valid mapping: {error}", content=raw
-                ) from error
+            parsed = self._learner_mapping(raw, "semantic")
             if not isinstance(parsed, dict) or "mode" not in parsed:
                 raise MalformedContentError(
                     "semantic response must be a mapping containing mode", content=raw
@@ -435,14 +339,7 @@ class EmbodiedAgent:
     def _call_episodic(self, history_text: str) -> str:
         """Run one episodic-reflection pass over compact conversation history."""
         def validate(raw: str) -> str:
-            pattern = self.associative_learner.extractable_json_structured_output
-            match = pattern.search(raw or "")
-            try:
-                parsed = ast.literal_eval(match.group(1) if match else str(raw or "").strip())
-            except (SyntaxError, ValueError, TypeError) as error:
-                raise MalformedContentError(
-                    f"episodic response was not a valid mapping: {error}", content=raw
-                ) from error
+            parsed = self._learner_mapping(raw, "episodic")
             required = {"dense_summary", "what_worked", "what_to_avoid"}
             if not isinstance(parsed, dict) or not required.issubset(parsed):
                 raise MalformedContentError(
@@ -464,6 +361,12 @@ class EmbodiedAgent:
         except MalformedContentError as error:
             return str(error.content or "")
 
+    def _plan_revision_control(self, step: StepRequest) -> Optional[dict]:
+        """Return the experimental plan-revision control block, when enabled for this step."""
+        if not (self.__dict__.get("adaptive_leg_replanning") and isinstance(step.raw_state, dict)):
+            return None
+        return step.raw_state.get("_plan_revision_control") or {}
+
     def _semantic_prompt(self, step: StepRequest) -> str:
         """Build the learner prompt, including episodic context after the first step."""
         if step.first_step:
@@ -481,21 +384,20 @@ class EmbodiedAgent:
                 f"## EXISTING EPISODIC MEMORY: {self.vlm_agent.episodic_memory}\n"
                 f"## STATE: {step.state_text}\n"
             )
-        if self.__dict__.get("adaptive_leg_replanning") and isinstance(step.raw_state, dict):
-            control = step.raw_state.get("_plan_revision_control") or {}
-            if control.get("allowed"):
-                prompt += (
-                    "\n## EXPERIMENTAL PLAN REVISION\n"
-                    "Only when concrete current evidence contradicts the plan because of a missing "
-                    "prerequisite, stale assumption, unreachable goal, or dependency change, you may "
-                    "add plan_revision_request shaped as "
-                    "{'reason_code': 'missing_prerequisite | stale_assumption | unreachable_goal | "
-                    "dependency_change', 'evidence': 'concrete observed contradiction', "
-                    "'suggested_change': 'desired planning outcome'}. The suggested change is not a "
-                    "replacement plan. Do not request revision for path blockage or motor recovery.\n"
-                )
-            if control.get("feedback"):
-                prompt += f"\n## PLAN REVISION FEEDBACK\n{control['feedback']}\n"
+        control = self._plan_revision_control(step) or {}
+        if control.get("allowed"):
+            prompt += (
+                "\n## EXPERIMENTAL PLAN REVISION\n"
+                "Only when concrete current evidence contradicts the plan because of a missing "
+                "prerequisite, stale assumption, unreachable goal, or dependency change, you may "
+                "add plan_revision_request shaped as "
+                "{'reason_code': 'missing_prerequisite | stale_assumption | unreachable_goal | "
+                "dependency_change', 'evidence': 'concrete observed contradiction', "
+                "'suggested_change': 'desired planning outcome'}. The suggested change is not a "
+                "replacement plan. Do not request revision for path blockage or motor recovery.\n"
+            )
+        if control.get("feedback"):
+            prompt += f"\n## PLAN REVISION FEEDBACK\n{control['feedback']}\n"
         return prompt
 
     def _actor_prompt(
@@ -512,24 +414,16 @@ class EmbodiedAgent:
             if decision.next_action and not nav_note
             else ""
         )
-        if step.first_step:
-            return (
-                f"## CURRENT TIMESTEP: {step.timestep}\n"
-                f"## MAIN TASK: {step.task}\n"
-                f"## RECALL FROM SEMANTIC MEMORY: {decision.recall}\n"
-                f"{next_action_line}"
-                f"## STATE: {step.state_text}\n"
-                f"## AGENT MODE: {mode}\n"
-                f"## AVAILABLE ACTIONS:\n{actions}"
-                f"{nav_note}"
-            )
+        # Step 1 names the task; later steps carry episodic memory instead.
+        task_line = f"## MAIN TASK: {step.task}\n" if step.first_step else ""
         episodic_line = (
             f"## EXISTING EPISODIC MEMORY: {self.vlm_agent.episodic_memory}\n"
-            if self.context_policy.episodic_in_actor
+            if not step.first_step and self.context_policy.episodic_in_actor
             else ""
         )
         return (
             f"## CURRENT TIMESTEP: {step.timestep}\n"
+            f"{task_line}"
             f"## RECALL FROM SEMANTIC MEMORY: {decision.recall}\n"
             f"{next_action_line}"
             f"{episodic_line}"
@@ -565,8 +459,10 @@ class EmbodiedAgent:
     def execute_lean(self, request: dict, timestep: int) -> dict:
         """Execute semantic routing, actor response, and memory updates for one step."""
         step = StepRequest.from_mapping(request, timestep)
+        # Encode once; the actor reuses it unless navigation returns a fresh frame.
+        observation = encode_image(step.screenshot)
         semantic_text = self._call_associative(
-            SYS_INST_ASSOCIATIVE_SEMANTIC, step.screenshot, self._semantic_prompt(step)
+            SYS_INST_ASSOCIATIVE_SEMANTIC, observation, self._semantic_prompt(step)
         )
         decision = parse_semantic_decision(
             self.associative_learner.extractable_json_structured_output, semantic_text
@@ -576,11 +472,7 @@ class EmbodiedAgent:
             self._semantic_tag(timestep), decision.new_semantic_memory
         )
 
-        control = (
-            step.raw_state.get("_plan_revision_control")
-            if isinstance(step.raw_state, dict) else None
-        )
-        if self.__dict__.get("adaptive_leg_replanning") and (control or {}).get("allowed"):
+        if (self._plan_revision_control(step) or {}).get("allowed"):
             revision_request = parse_plan_revision_request(
                 self.associative_learner.extractable_json_structured_output, semantic_text
             )
@@ -608,7 +500,6 @@ class EmbodiedAgent:
             move_steps = None
 
         nav_note = ""
-        screenshot = step.screenshot
         if mode == AgentMode.NAVIGATION.value and self.nav_mode in ("graph", "graph-advised"):
             nav_note, fresh_png = (
                 self._metric_approach(move_steps)
@@ -616,7 +507,7 @@ class EmbodiedAgent:
                 else self._graph_navigate(step.task, step.nav_goal)
             )
             if fresh_png is not None:
-                screenshot = Image.open(BytesIO(fresh_png)).convert("RGB")
+                observation = encode_image(Image.open(BytesIO(fresh_png)).convert("RGB"))
             mode = AgentMode.PERCEPTION.value
 
         if mode == AgentMode.MANIPULATION.value:
@@ -635,7 +526,7 @@ class EmbodiedAgent:
         )
         actor_prompt = self._actor_prompt(step, decision, mode, actions, nav_note)
         response_text = self.vlm_agent.send_message(
-            build_content(screenshot, "## CURRENT OBSERVATION\n" + actor_prompt)
+            build_content(observation, "## CURRENT OBSERVATION\n" + actor_prompt)
         )
         logger.info(f"[actor] {response_text}")
 

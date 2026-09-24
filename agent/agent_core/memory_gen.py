@@ -60,14 +60,15 @@ def render_base_semantic_memory(store_map=None):
         lines.append(f"{counter}. Checkpoint {counter} (COUNTER / drop-off): "
                      f"{(c['summary'] or 'the checkout counter').strip()}")
 
+    listed = shelf_ids + ([counter] if counter is not None else [])
     lines += ["", "**Connectivity** (which checkpoints link to which - use for rough routing):"]
-    for cp_id in shelf_ids + ([counter] if counter is not None else []):
+    for cp_id in listed:
         cp = sm.checkpoint(cp_id)
         lines.append(f"- Checkpoint {cp_id} connects to: "
                      + ", ".join(str(n) for n in cp["neighbors"]))
 
     lines += ["", "**Fast Tracking** (use this to guide you quickly to the target object):"]
-    for cp_id in shelf_ids + ([counter] if counter is not None else []):
+    for cp_id in listed:
         cp = sm.checkpoint(cp_id)
         x, z = cp["world_xz"]
         raw = sm.by_id[cp_id]

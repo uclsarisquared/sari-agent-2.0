@@ -31,6 +31,19 @@ ADVISOR_SCHEMA = {
 }
 
 
+def _sync_pose(nav):
+    """Refresh the session's pose from the simulator with a zero move."""
+    from explore import step_agent
+
+    nav.pos, nav.rot, _ = step_agent((0, 0, 0), (0, 0, 0), nav.args.uri)
+
+
+def _fresh_frame(uri=None):
+    from sim.env import RequestScreenshot
+
+    return RequestScreenshot(save_image=False, uri=uri)["image"]
+
+
 class GraphNavigator:
     """Own all graph-session, candidate, and per-hop advisor state."""
 
@@ -79,9 +92,7 @@ class GraphNavigator:
         self.task = None
 
     def navigate(self, main_task: str, nav_goal: Optional[str] = None) -> NavigationResult:
-        from explore import step_agent
         from nav import locate_task
-        from sim.env import RequestScreenshot
 
         store_map, nav = self.session()
         if self.task != main_task:
@@ -100,15 +111,9 @@ class GraphNavigator:
             self.visited = set()
             remaining = list(self.candidates)
 
-        nav.pos, nav.rot, _ = step_agent((0, 0, 0), (0, 0, 0), nav.args.uri)
-        x, z = nav.pos[0], nav.pos[2]
-        target = min(
-            remaining,
-            key=lambda candidate: store_map.hops(
-                store_map.nearest_checkpoint((x, z)), candidate
-            )
-            or 99,
-        )
+        _sync_pose(nav)
+        here = store_map.nearest_checkpoint((nav.pos[0], nav.pos[2]))
+        target = min(remaining, key=lambda candidate: store_map.hops(here, candidate) or 99)
         self.visited.add(target)
         self.hands.set_pose("rest")
         if self.nav_mode == "graph-advised":
@@ -119,7 +124,7 @@ class GraphNavigator:
             ok, end_checkpoint = nav.goto(target), target
 
         info = store_map.checkpoint(end_checkpoint)
-        fresh = RequestScreenshot(save_image=False, uri=nav.args.uri)["image"]
+        fresh = _fresh_frame(nav.args.uri)
         if not ok:
             note = (
                 f"## NAVIGATOR: could not reach checkpoint {target} (path blocked). "
@@ -169,7 +174,6 @@ class GraphNavigator:
         )
 
     def advised_goto(self, store_map, nav, target, nav_goal):
-        from explore import step_agent
         from nav import locate_task
 
         ask = locate_task.backend_callable(self.advisor_backend)
@@ -182,7 +186,7 @@ class GraphNavigator:
         target_info = store_map.checkpoint(target)
         target_holds = ", ".join(target_info["holds"]) or "unannotated"
 
-        nav.pos, nav.rot, _ = step_agent((0, 0, 0), (0, 0, 0), nav.args.uri)
+        _sync_pose(nav)
         current = store_map.nearest_checkpoint((nav.pos[0], nav.pos[2]))
         budget = 2 * (store_map.hops(current, target) or 1) + 2
         for hop in range(1, budget + 1):
@@ -213,9 +217,11 @@ class GraphNavigator:
                 )
                 result = {}
             self.advised_llm_calls += 1
-            pick = result.get("next_checkpoint") if isinstance(result, dict) else None
-            stop = bool(result.get("stop_here")) if isinstance(result, dict) else False
-            reason = (result.get("reason") or "")[:200] if isinstance(result, dict) else ""
+            if not isinstance(result, dict):
+                result = {}
+            pick = result.get("next_checkpoint")
+            stop = bool(result.get("stop_here"))
+            reason = (result.get("reason") or "")[:200]
             invalid = pick not in neighbors and not stop
             if invalid:
                 pick = advice if advice is not None else neighbors[0]
@@ -246,7 +252,7 @@ class GraphNavigator:
                     "falling back to deterministic drive"
                 )
                 break
-            nav.pos, nav.rot, _ = step_agent((0, 0, 0), (0, 0, 0), nav.args.uri)
+            _sync_pose(nav)
             current = store_map.nearest_checkpoint((nav.pos[0], nav.pos[2]))
         if current == target:
             return True, current
@@ -285,12 +291,11 @@ class GraphNavigator:
 
     def navigate_to_counter(self) -> NavigationResult:
         from nav.store_map import go_to_counter
-        from sim.env import RequestScreenshot
 
         _, nav = self.session()
         self.hands.set_pose("rest")
         result = go_to_counter(nav)
-        fresh = RequestScreenshot(save_image=False, uri=nav.args.uri)["image"]
+        fresh = _fresh_frame(nav.args.uri)
         if not result.get("arrived"):
             note = (
                 "## NAVIGATOR: could not reach the checkout counter "
@@ -321,11 +326,11 @@ class GraphNavigator:
         return result
 
     def metric_approach(self, move_steps: int) -> NavigationResult:
-        from sim.env import RequestScreenshot, move_forward
+        from sim.env import move_forward
 
         self.hands.set_pose("rest")
         move_forward(move_steps)
-        fresh = RequestScreenshot(save_image=False)["image"]
+        fresh = _fresh_frame()
         note = (
             f"## MOVED {move_steps} STEP(S) (~{move_steps * 0.1:.1f} m) FORWARD to close the "
             "measured reach gap - you are still facing the same shelf. RE-CENTER on the target "

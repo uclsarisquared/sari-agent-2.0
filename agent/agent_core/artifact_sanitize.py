@@ -11,6 +11,10 @@ _DROP_KEYS = {
     "debug",
     "debug_payload",
     "raw_debug",
+    "base64",
+    "image",
+    "image_bytes",
+    "screenshot",
 }
 
 
@@ -20,11 +24,7 @@ def semantic_artifact_view(value: Any) -> Any:
         cleaned = {}
         for key, item in value.items():
             normalized = str(key).lower()
-            if (
-                normalized in _DROP_KEYS
-                or normalized.endswith("_b64")
-                or normalized in {"base64", "image", "image_bytes", "screenshot"}
-            ):
+            if normalized in _DROP_KEYS or normalized.endswith("_b64"):
                 continue
             cleaned[key] = semantic_artifact_view(item)
         return cleaned
