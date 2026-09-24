@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.8.5 (2026-09-24)
+
+### Bug Fixes
+
+- **mapping**: Stop phantom obstacles and fix edge dedup and vantage arrival
+  ([`e12cb28`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e12cb28ceeb1ab868e2fb5954f8b2a645eed34c2))
+
+- **watch**: Fix completion notice, log deltas and dashboard state bugs
+  ([`a75cfed`](https://github.com/uclsarisquared/sari-agent-2.0/commit/a75cfed1f3065c26fb4229cb0680fc7d5bc08ecf))
+
+
 ## v1.8.4 (2026-09-24)
 
 ### Bug Fixes
