@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
-import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from sari_bench import capture, video
+from sari_bench.storage import (
+    attempt_dirs,
+    read_json_object,
+    resolve_scope_root,
+    write_bytes_atomic,
+)
 
 _LEGACY_FRAME = re.compile(r"^frame\d+-\d+\.jpg$")
 
@@ -23,14 +25,6 @@ class CleanupResult:
     bytes: int = 0
     skipped: str = ""
     seeded_latest: bool = False
-
-
-def _manifest(path: Path) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
 
 
 def _seed_latest(capture_dir: Path, candidates: list[Path]) -> bool:
@@ -50,22 +44,11 @@ def _seed_latest(capture_dir: Path, candidates: list[Path]) -> bool:
         data = newest.read_bytes()
     except OSError:
         return False
-    fd, temp_name = tempfile.mkstemp(prefix=".latest.", suffix=".jpg.tmp", dir=capture_dir)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(temp_name, capture_dir / capture.LATEST_CAPTURE)
+        write_bytes_atomic(capture_dir / capture.LATEST_CAPTURE, data)
     except OSError:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp_name)
         return False
     return True
-
-
-def _attempt_dirs(scope: Path) -> list[Path]:
-    if (scope / "attempt.json").is_file():
-        return [scope]
-    return sorted({path.parent for path in scope.rglob("attempt.json")})
 
 
 def inspect_attempt(attempt: Path, root: Path, *, apply: bool = False) -> CleanupResult:
@@ -76,7 +59,7 @@ def inspect_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Cleanu
     except (OSError, ValueError):
         result.skipped = "attempt is outside the requested root"
         return result
-    manifest = _manifest(attempt / "attempt.json")
+    manifest = read_json_object(attempt / "attempt.json")
     if not manifest:
         result.skipped = "attempt.json is missing or unreadable"
         return result
@@ -141,15 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--run-dir", type=Path)
     parser.add_argument("--apply", action="store_true", help="Delete eligible files (default is dry-run).")
     args = parser.parse_args(argv)
-    requested = args.run_dir if args.run_dir is not None else args.bench_root
-    try:
-        root = requested.resolve(strict=True)
-    except OSError as error:
-        parser.error(f"requested root is unavailable: {error}")
-    if not root.is_dir():
-        parser.error("requested root is not a directory")
+    root = resolve_scope_root(parser, args)
 
-    results = [inspect_attempt(attempt, root, apply=args.apply) for attempt in _attempt_dirs(root)]
+    results = [inspect_attempt(attempt, root, apply=args.apply) for attempt in attempt_dirs(root)]
     total_files = total_bytes = 0
     verb = "removed" if args.apply else "would remove"
     for result in results:

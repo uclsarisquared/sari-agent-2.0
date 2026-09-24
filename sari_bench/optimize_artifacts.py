@@ -20,8 +20,14 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
-from sari_bench import video
-from sari_bench.storage import write_json_atomic
+from sari_bench import capture, video
+from sari_bench.storage import (
+    attempt_dirs,
+    read_json_object,
+    resolve_scope_root,
+    write_bytes_atomic,
+    write_json_atomic,
+)
 
 PROFILE = "sari-bench-artifacts-v1"
 _REQUEUE = re.compile(r"\.requeue\d+$")
@@ -39,26 +45,6 @@ class OptimizeResult:
     replay_reencoded: bool = False
     skipped: str = ""
     notes: list[str] = field(default_factory=list)
-
-
-def _manifest(path: Path) -> dict:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _attempt_dirs(scope: Path) -> list[Path]:
-    if (scope / "attempt.json").is_file():
-        return [scope]
-    attempts: list[Path] = []
-    # rglob follows neither directory symlinks nor inaccessible directories in normal use, but the
-    # later per-attempt symlink gate remains authoritative.
-    for path in scope.rglob("attempt.json"):
-        if path.is_file():
-            attempts.append(path.parent)
-    return sorted(set(attempts))
 
 
 def _has_symlink(attempt: Path) -> bool:
@@ -131,7 +117,7 @@ def _visual_artifacts(attempt: Path) -> list[Path]:
             _CLIENT_PNG.match(name)
             or name.lower().startswith("clientscreenshot") and name.lower().endswith((".jpg", ".jpeg"))
             or name.lower() in {"annotated_target.png", "annotated_target.jpg", "annotated_target.jpeg"}
-            or (path.parent.name.startswith("leg") and re.match(r"^step\d+(?:_[^.]+)?\.(?:png|jpe?g)$", name, re.I))
+            or (path.parent.name.startswith("leg") and capture.is_step_frame(path))
         ):
             candidates.append(path)
     # Avoid unlinking a file which lives below a directory we will remove.
@@ -153,20 +139,6 @@ def _jpeg_bytes(source: Path, quality: int) -> bytes:
         out = BytesIO()
         image.save(out, format="JPEG", quality=quality, subsampling=0)
         return out.getvalue()
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".jpg.tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
-        raise
 
 
 def _video_stream(path: Path) -> tuple[int, int, float] | None:
@@ -238,10 +210,12 @@ def _reencode_replay(replay: Path) -> tuple[bool, str]:
             temporary.unlink()
 
 
-def purge_archived_visual_artifacts(attempt: Path, *, apply: bool = False) -> tuple[int, str]:
+def purge_archived_visual_artifacts(
+    attempt: Path, *, apply: bool = False, replay_validated: bool = False
+) -> tuple[int, str]:
     """Remove replay-covered visuals from one archived requeue, only after replay validation."""
     replay = attempt / video.REPLAY_NAME
-    if not video.valid_replay(replay):
+    if not replay_validated and not video.valid_replay(replay):
         return 0, "replay.mp4 is missing, incomplete, or unreadable; preserved visual artifacts"
     files = _visual_artifacts(attempt)
     if apply:
@@ -264,7 +238,7 @@ def optimize_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Optim
         result.skipped = "attempt contains a symlink"
         return result
     manifest_path = attempt / "attempt.json"
-    manifest = _manifest(manifest_path)
+    manifest = read_json_object(manifest_path)
     if not manifest:
         result.skipped = "attempt.json is missing or unreadable"
         return result
@@ -277,7 +251,9 @@ def optimize_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Optim
     # An already marked replay is not encoded again. PNG conversion/deletion remains independently
     # idempotent, so an interrupted optimizer invocation can safely be re-run.
     optimized = (manifest.get("artifact_optimization") or {}).get("profile") == PROFILE
-    if replay.exists() and not optimized:
+    # Past this block an existing replay has been validated once; don't ffprobe it again.
+    replay_validated = replay.exists()
+    if replay_validated and not optimized:
         if not video.valid_replay(replay):
             result.skipped = "replay.mp4 is missing, incomplete, or unreadable"
             return result
@@ -289,12 +265,14 @@ def optimize_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Optim
             result.replay_reencoded = True
         else:
             result.notes.append("would re-encode replay.mp4 to CRF 28")
-    elif replay.exists() and not video.valid_replay(replay):
+    elif replay_validated and not video.valid_replay(replay):
         result.skipped = "replay.mp4 is missing, incomplete, or unreadable"
         return result
 
     if kind == "archived_requeue":
-        files, reason = purge_archived_visual_artifacts(attempt, apply=apply)
+        files, reason = purge_archived_visual_artifacts(
+            attempt, apply=apply, replay_validated=replay_validated
+        )
         if reason:
             result.skipped = reason
             return result
@@ -308,7 +286,7 @@ def optimize_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Optim
                 continue
             if apply:
                 try:
-                    _write_atomic(jpg, _jpeg_bytes(png, quality))
+                    write_bytes_atomic(jpg, _jpeg_bytes(png, quality))
                     png.unlink()
                 except Exception as error:  # do not delete the source if any conversion step fails
                     result.skipped = f"could not convert {png.name}: {type(error).__name__}: {error}"
@@ -334,15 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--run-dir", type=Path)
     parser.add_argument("--apply", action="store_true", help="Apply changes (default: dry-run).")
     args = parser.parse_args(argv)
-    requested = args.run_dir if args.run_dir is not None else args.bench_root
-    try:
-        root = requested.resolve(strict=True)
-    except OSError as error:
-        parser.error(f"requested root is unavailable: {error}")
-    if not root.is_dir():
-        parser.error("requested root is not a directory")
+    root = resolve_scope_root(parser, args)
 
-    attempts = _attempt_dirs(root)
+    attempts = attempt_dirs(root)
     results = []
     for index, attempt in enumerate(attempts, start=1):
         print(

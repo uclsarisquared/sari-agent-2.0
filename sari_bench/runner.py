@@ -24,6 +24,7 @@ import socket
 import sys
 import time
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ from sari_bench.storage import (
     edit_json_locked,
     file_lock,
     purge_attempt_rows,
+    read_json_object,
     upsert_attempt_row,
     write_json_atomic,
 )
@@ -119,11 +121,6 @@ BATTERY_MANIFEST = "battery.json"
 BATTERY_HEARTBEAT_SECONDS = 5.0
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Writes JSON via a temp file + rename, so a reader polling this path never sees half a file."""
-    write_json_atomic(path, payload)
-
-
 def _patch_json(path: Path, fields: dict[str, Any]) -> None:
     """Merges `fields` into an existing JSON object. Best-effort: manifest bookkeeping must never
     take down an attempt that is otherwise fine."""
@@ -132,18 +129,19 @@ def _patch_json(path: Path, fields: dict[str, Any]) -> None:
         if not isinstance(current, dict):
             current = {}
         current.update(fields)
-        _write_json_atomic(path, current)
+        write_json_atomic(path, current)
     except (OSError, ValueError) as error:  # noqa: BLE001
         _log(f"could not patch {path}: {error!r}")
 
 
 def _manifest_field(path: Path, key: str) -> Any:
     """Reads one field back out of a manifest, or None if it is missing/unreadable."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return payload.get(key) if isinstance(payload, dict) else None
+    return read_json_object(path).get(key)
+
+
+def _sandbox_eligible(sandbox: dict[str, Any]) -> bool:
+    """Registered with a store and not quarantined."""
+    return bool(sandbox.get("store_loaded", True)) and not sandbox.get("quarantined")
 
 
 def purge_attempt_records(output_dir: Path, prompt_id: str, attempt: int) -> None:
@@ -242,7 +240,7 @@ def materialize_already_successful(
         run_dir.mkdir(parents=True, exist_ok=True)
         ended_at = datetime.now().isoformat(timespec="seconds")
         fields = BenchmarkRunner._cancellation_fields(winner)
-        _write_json_atomic(
+        write_json_atomic(
             run_dir / ATTEMPT_MANIFEST,
             {
                 "run_id": uuid.uuid4().hex,
@@ -321,7 +319,7 @@ def load_prompts(path: Path) -> list[Prompt]:
             )
         )
 
-    duplicates = {p.id for p in prompts if sum(1 for q in prompts if q.id == p.id) > 1}
+    duplicates = {prompt_id for prompt_id, count in Counter(p.id for p in prompts).items() if count > 1}
     if duplicates:
         raise ValueError(f"{path}: duplicate prompt ids {sorted(duplicates)}")
     return prompts
@@ -446,6 +444,8 @@ class BenchmarkRunner:
         self._peak_workers = 0
         self._prior_wall_seconds = 0.0
         self._local_quarantines: set[str] = set()
+        # path -> ((inode, mtime_ns, size), payload) for manifests polled by winner checks.
+        self._json_cache: dict[Path, tuple[tuple[int, int, int], dict[str, Any]]] = {}
 
     async def run(self) -> dict[str, Any]:
         if self.initialize_battery:
@@ -670,15 +670,20 @@ class BenchmarkRunner:
             # is re-read rather than inherited: the manifest names what is running now.
             current.update(self._model_identity())
             current["coordinator"] = self.coordinator_url
-            current["concurrency"] = self.concurrency if self.concurrency is not None else "auto"
-            current["concurrency_mode"] = "fixed" if self.concurrency is not None else "auto"
-            current["concurrency_limit"] = self.concurrency
+            current.update(self._concurrency_fields())
 
         pending = [key for key in planned_items if key not in completed]
         _log(
             f"resuming {self.output_dir}: {len(completed)} finished, {len(pending)} pending"
         )
         return pending
+
+    def _concurrency_fields(self) -> dict[str, Any]:
+        return {
+            "concurrency": self.concurrency if self.concurrency is not None else "auto",
+            "concurrency_mode": "fixed" if self.concurrency is not None else "auto",
+            "concurrency_limit": self.concurrency,
+        }
 
     def _semantic_config(self) -> dict[str, Any]:
         return {
@@ -707,29 +712,23 @@ class BenchmarkRunner:
         }
 
     def _validate_resume_config(self, battery: dict[str, Any]) -> None:
-        # Batteries created before completion guards were configurable used the deterministic
-        # backend. Treat an absent legacy field as that default, while still refusing a resume that
-        # would silently switch an old deterministic battery to VLM.
+        # Fields absent from older batteries resolve to the behaviour those batteries ran with.
+        legacy_defaults: dict[str, Callable[[], Any]] = {
+            "queue_mode": lambda: "prompt-first",
+            "completion_guard": lambda: "deterministic",
+            "context_policy": lambda: "baseline",
+            # Pre-option batteries aborted the task on the refusal cap.
+            "refusal_cap_action": lambda: "halt",
+            "adaptive_leg_replanning": lambda: False,
+            "ocr_url": resolve_ocr_url,
+            "api_max_attempts": lambda: DEFAULT_API_MAX_ATTEMPTS,
+            "max_api_requeues": lambda: DEFAULT_MAX_API_REQUEUES,
+            "sandbox_command_timeout_seconds": lambda: DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS,
+        }
+
         def existing_value(key: str) -> Any:
-            if key == "queue_mode" and key not in battery:
-                return "prompt-first"
-            if key == "completion_guard" and key not in battery:
-                return "deterministic"
-            if key == "context_policy" and key not in battery:
-                return "baseline"
-            # Batteries recorded before the option existed aborted the task on the refusal cap.
-            if key == "refusal_cap_action" and key not in battery:
-                return "halt"
-            if key == "adaptive_leg_replanning" and key not in battery:
-                return False
-            if key == "ocr_url" and key not in battery:
-                return resolve_ocr_url()
-            if key == "api_max_attempts" and key not in battery:
-                return DEFAULT_API_MAX_ATTEMPTS
-            if key == "max_api_requeues" and key not in battery:
-                return DEFAULT_MAX_API_REQUEUES
-            if key == "sandbox_command_timeout_seconds" and key not in battery:
-                return DEFAULT_SANDBOX_COMMAND_TIMEOUT_SECONDS
+            if key not in battery and key in legacy_defaults:
+                return legacy_defaults[key]()
             return battery.get(key)
 
         mismatches = [
@@ -745,11 +744,7 @@ class BenchmarkRunner:
 
     @staticmethod
     def _read_manifest(path: Path) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        return read_json_object(path)
 
     def _result_from_finished_manifest(
         self,
@@ -858,24 +853,27 @@ class BenchmarkRunner:
         except OSError:
             return ""
 
-    def _matching_run_pids(self, run_dir: Path) -> list[int]:
-        matches: list[int] = []
-        proc = Path("/proc")
+    @staticmethod
+    def _proc_cmdline(entry: Path) -> list[str] | None:
         try:
-            entries = list(proc.iterdir())
+            command = (entry / "cmdline").read_bytes().split(b"\0")
         except OSError:
-            return matches
-        for entry in entries:
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            try:
-                command = (entry / "cmdline").read_bytes().split(b"\0")
-            except OSError:
-                continue
-            if str(run_dir).encode() in command and self.agent_entry.encode() in command:
-                matches.append(pid)
-        return matches
+            return None
+        return [part.decode(errors="replace") for part in command if part]
+
+    def _runs_attempt(self, command: list[str] | None, run_dir: Path) -> bool:
+        return bool(command) and str(run_dir) in command and self.agent_entry in command
+
+    def _matching_run_pids(self, run_dir: Path) -> list[int]:
+        try:
+            entries = list(Path("/proc").iterdir())
+        except OSError:
+            return []
+        return [
+            int(entry.name)
+            for entry in entries
+            if entry.name.isdigit() and self._runs_attempt(self._proc_cmdline(entry), run_dir)
+        ]
 
     def _pid_matches_manifest(
         self,
@@ -883,12 +881,7 @@ class BenchmarkRunner:
         run_dir: Path,
         manifest: dict[str, Any],
     ) -> bool:
-        try:
-            command = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
-            command_text = [part.decode(errors="replace") for part in command if part]
-        except OSError:
-            return False
-        if str(run_dir) not in command_text or self.agent_entry not in command_text:
+        if not self._runs_attempt(self._proc_cmdline(Path("/proc") / str(pid)), run_dir):
             return False
         recorded_start = str(manifest.get("process_start_ticks") or "")
         return not recorded_start or recorded_start == self._process_start_ticks(pid)
@@ -948,12 +941,7 @@ class BenchmarkRunner:
                             _log("automatic concurrency: coordinator connection restored")
                             connection_error = None
 
-                        capacity = sum(
-                            1
-                            for sandbox in pool
-                            if bool(sandbox.get("store_loaded", True))
-                            and not sandbox.get("quarantined")
-                        )
+                        capacity = sum(1 for sandbox in pool if _sandbox_eligible(sandbox))
                         desired = min(planned_attempts, capacity)
                         while len(workers) < desired:
                             index = len(workers)
@@ -989,10 +977,7 @@ class BenchmarkRunner:
         def pool_problem() -> str:
             if not last_pool:
                 return "none registered"
-            if not any(
-                bool(sandbox.get("store_loaded", True)) and not sandbox.get("quarantined")
-                for sandbox in last_pool
-            ):
+            if not any(_sandbox_eligible(sandbox) for sandbox in last_pool):
                 return "registered sandbox(es) have no store loaded"
             states: dict[str, int] = {}
             for sandbox in last_pool:
@@ -1000,6 +985,14 @@ class BenchmarkRunner:
                 states[state] = states.get(state, 0) + 1
             state_summary = ", ".join(f"{state}={count}" for state, count in sorted(states.items()))
             return f"none ready or coordinator-leased; sim states: {state_summary}"
+
+        def no_usable_sandbox() -> SandboxStartupError:
+            return SandboxStartupError(
+                f"No usable sandbox registered with {self.coordinator_url} after "
+                f"{self.sandbox_startup_timeout:g}s ({pool_problem()}). Start the Distributed "
+                "Sari Bench Unity player with SARI_BENCH_COORDINATOR pointing to "
+                f"{self.coordinator_url.rstrip('/')}/sandbox, then rerun dbench."
+            )
 
         while True:
             remaining = deadline - time.monotonic()
@@ -1011,12 +1004,7 @@ class BenchmarkRunner:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     if reached_coordinator:
-                        raise SandboxStartupError(
-                            f"No usable sandbox registered with {self.coordinator_url} after "
-                            f"{self.sandbox_startup_timeout:g}s ({pool_problem()}). Start the Distributed "
-                            "Sari Bench Unity player with SARI_BENCH_COORDINATOR pointing to "
-                            f"{self.coordinator_url.rstrip('/')}/sandbox, then rerun dbench."
-                        ) from error
+                        raise no_usable_sandbox() from error
                     reason = str(error) or type(error).__name__
                     raise SandboxStartupError(
                         f"Coordinator {self.coordinator_url} was not reachable within "
@@ -1028,8 +1016,7 @@ class BenchmarkRunner:
                 # A leased member is healthy but busy; a Ready member can be acquired immediately.
                 # Booting/Resetting members get the full startup window to become Ready.
                 if any(
-                    bool(sandbox.get("store_loaded", True))
-                    and not sandbox.get("quarantined")
+                    _sandbox_eligible(sandbox)
                     and (bool(sandbox.get("lease_id")) or sandbox.get("state") == STATE_READY)
                     for sandbox in last_pool
                 ):
@@ -1037,12 +1024,7 @@ class BenchmarkRunner:
                     return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise SandboxStartupError(
-                        f"No usable sandbox registered with {self.coordinator_url} after "
-                        f"{self.sandbox_startup_timeout:g}s ({pool_problem()}). Start the Distributed "
-                        "Sari Bench Unity player with SARI_BENCH_COORDINATOR pointing to "
-                        f"{self.coordinator_url.rstrip('/')}/sandbox, then rerun dbench."
-                    )
+                    raise no_usable_sandbox()
 
             await asyncio.sleep(min(1.0, max(0.0, remaining)))
 
@@ -1063,8 +1045,7 @@ class BenchmarkRunner:
         ready = sum(
             1
             for sandbox in pool
-            if bool(sandbox.get("store_loaded", True))
-            and not sandbox.get("quarantined")
+            if _sandbox_eligible(sandbox)
             and sandbox.get("state") == STATE_READY
             and not sandbox.get("lease_id")
         )
@@ -1079,11 +1060,9 @@ class BenchmarkRunner:
         """Read the battery denylist so sibling worker processes see faults immediately."""
         if sandbox_id in self._local_quarantines:
             return True
-        battery = self._read_manifest(self.output_dir / BATTERY_MANIFEST)
+        battery = self._read_json_cached(self.output_dir / BATTERY_MANIFEST)
         records = battery.get("quarantined_sandboxes") or {}
-        if isinstance(records, dict):
-            self._local_quarantines.update(str(key) for key in records)
-        elif isinstance(records, list):
+        if isinstance(records, (dict, list)):
             self._local_quarantines.update(str(key) for key in records)
         return sandbox_id in self._local_quarantines
 
@@ -1277,45 +1256,22 @@ class BenchmarkRunner:
             battery.clear()
             battery.update(
                 {
-                "battery_id": self.output_dir.name,
-                "output_dir": str(self.output_dir),
-                "started_at": datetime.now().isoformat(timespec="seconds"),
-                # Epoch alongside the human-readable stamp so a reader can do arithmetic on the
-                # start without reparsing a local-time string, and the clock below can be resumed.
-                "started_epoch": time.time(),
-                "wall_seconds": 0.0,
-                "heartbeat_at": datetime.now().isoformat(timespec="seconds"),
-                **self._model_identity(),
-                "coordinator": self.coordinator_url,
-                "tries": self.tries,
-                "queue_mode": self.queue_mode,
-                "concurrency": self.concurrency if self.concurrency is not None else "auto",
-                "concurrency_mode": "fixed" if self.concurrency is not None else "auto",
-                "concurrency_limit": self.concurrency,
-                "peak_workers": self._peak_workers,
-                "time_limit_minutes": self.time_limit_minutes,
-                "per_leg_minutes": self.per_leg_minutes,
-                "max_steps": self.max_steps,
-                "arm": self.arm,
-                "context_policy": self.context_policy,
-                "capture_interval_seconds": self.capture_interval,
-                "map_dir": str(Path(self.map_dir).resolve()) if self.map_dir else None,
-                "leg_retries": self.leg_retries,
-                "completion_guard": self.completion_guard,
-                "refusal_cap_action": self.refusal_cap_action,
-                "adaptive_leg_replanning": self.adaptive_leg_replanning,
-                "api_max_attempts": self.api_max_attempts,
-                "max_api_requeues": self.max_api_requeues,
-                "ocr_url": self.ocr_url,
-                "timeout_grace_seconds": self.timeout_grace,
-                "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
-                "lease_acquire_timeout_seconds": self.lease_acquire_timeout,
-                "sandbox_command_timeout_seconds": self.sandbox_command_timeout,
-                "agent_entry": self.agent_entry,
-                "agent_cwd": str(Path(self.agent_cwd).resolve()),
-                "planned_attempts": planned_attempts,
-                "prompts": [asdict(prompt) for prompt in self.prompts.values()],
-                "resume_count": 0,
+                    "battery_id": self.output_dir.name,
+                    "output_dir": str(self.output_dir),
+                    "started_at": datetime.now().isoformat(timespec="seconds"),
+                    # Epoch too, so the clock can be resumed without reparsing local time.
+                    "started_epoch": time.time(),
+                    "wall_seconds": 0.0,
+                    "heartbeat_at": datetime.now().isoformat(timespec="seconds"),
+                    **self._model_identity(),
+                    "coordinator": self.coordinator_url,
+                    **self._concurrency_fields(),
+                    "peak_workers": self._peak_workers,
+                    **self._semantic_config(),
+                    "sandbox_startup_timeout_seconds": self.sandbox_startup_timeout,
+                    "lease_acquire_timeout_seconds": self.lease_acquire_timeout,
+                    "planned_attempts": planned_attempts,
+                    "resume_count": 0,
                 }
             )
 
@@ -1601,11 +1557,10 @@ class BenchmarkRunner:
             result.api_max_attempts = self.api_max_attempts
             result.max_api_requeues = self.max_api_requeues
             result.run_dir = str(run_dir)
-            if _manifest_field(run_dir / ATTEMPT_MANIFEST, "stop_reason") == ALREADY_SUCCESSFUL:
+            manifest = read_json_object(run_dir / ATTEMPT_MANIFEST)
+            if manifest.get("stop_reason") == ALREADY_SUCCESSFUL:
                 result.end_reason = ALREADY_SUCCESSFUL
-                result.winning_attempt_key = str(
-                    _manifest_field(run_dir / ATTEMPT_MANIFEST, "winning_attempt_key") or ""
-                )
+                result.winning_attempt_key = str(manifest.get("winning_attempt_key") or "")
             # Close out the manifest so the watcher stops showing this attempt as live. Every exit
             # path lands here, including SandboxLost after its requeues are exhausted.
             _patch_json(
@@ -1683,7 +1638,7 @@ class BenchmarkRunner:
         timeout = self.time_limit_minutes * 60.0 + self.timeout_grace
         manifest_path = run_dir / ATTEMPT_MANIFEST
         started_wall = time.time()
-        _write_json_atomic(
+        write_json_atomic(
             manifest_path,
             {
                 "run_id": uuid.uuid4().hex,
@@ -1771,6 +1726,10 @@ class BenchmarkRunner:
                 self._capture_until_exit(process, run_dir, lease.commands_uri, manifest_path)
             )
 
+            async def stop_agent() -> None:
+                await self._kill(process)
+                await capture_task
+
             try:
                 done, pending = await asyncio.wait(
                     {wait_task, lost_task, api_retry_task, sandbox_fault_task},
@@ -1792,8 +1751,7 @@ class BenchmarkRunner:
                         "ended_at": datetime.now().isoformat(timespec="seconds"),
                     },
                 )
-                if capture_task is not None:
-                    await capture_task
+                await capture_task
                 raise
             finally:
                 for task in (wait_task, lost_task, api_retry_task, sandbox_fault_task):
@@ -1803,11 +1761,9 @@ class BenchmarkRunner:
             # Like the API signal check below, inspect the path too so an agent that writes and
             # exits in one scheduler slice cannot turn an infrastructure fault into agent_error.
             if sandbox_fault_signal.exists():
-                await self._kill(process)
-                if capture_task is not None:
-                    await capture_task
-                fault = self._sandbox_fault_payload(sandbox_fault_signal)
-                reason = self._sandbox_fault_message(sandbox_fault_signal)
+                await stop_agent()
+                fault = read_json_object(sandbox_fault_signal)
+                reason = self._sandbox_fault_message(fault)
                 source = f"{prompt.id}/try{attempt:02d}"
 
                 if str(fault.get("code") or "") == "sandbox_command_timeout":
@@ -1857,37 +1813,27 @@ class BenchmarkRunner:
             # Check the file itself as well as the watcher task. This closes the race where the
             # agent writes the signal immediately before exiting and process.wait() wins the loop.
             if api_retry_signal.exists():
-                await self._kill(process)
-                if capture_task is not None:
-                    await capture_task
+                await stop_agent()
                 raise ApiRetriesExhausted(self._api_retry_exhaustion_message(api_retry_signal))
 
             if lost_task in done:
-                await self._kill(process)
-                if capture_task is not None:
-                    await capture_task
+                await stop_agent()
                 raise lost_task.result()
 
             if wait_task not in done:
                 _log(f"{prompt.id} try {attempt}: exceeded {timeout:.0f}s; terminating")
-                await self._kill(process)
-                if capture_task is not None:
-                    await capture_task
+                await stop_agent()
                 return self._result_from_run_dir(
                     prompt, attempt, run_dir, exit_code=None, outcome="harness_timeout"
                 )
 
             exit_code = wait_task.result()
-            if capture_task is not None:
-                await capture_task
+            await capture_task
 
-        stopped_for_success = (
-            _manifest_field(run_dir / ATTEMPT_MANIFEST, "stop_reason") == ALREADY_SUCCESSFUL
-        )
+        manifest = read_json_object(manifest_path)
+        stopped_for_success = manifest.get("stop_reason") == ALREADY_SUCCESSFUL
         outcome = "completed" if exit_code == 0 else "agent_error"
-        if stopped_for_success or (
-            outcome == "agent_error" and _manifest_field(run_dir / ATTEMPT_MANIFEST, "killed_by")
-        ):
+        if stopped_for_success or (outcome == "agent_error" and manifest.get("killed_by")):
             # An operator killing a collapsed attempt from the dashboard reaches the agent as a
             # signal, which looks exactly like a crash from here. Don't score it as one.
             outcome = "operator_kill"
@@ -1896,9 +1842,7 @@ class BenchmarkRunner:
         )
         if stopped_for_success:
             result.end_reason = ALREADY_SUCCESSFUL
-            result.winning_attempt_key = str(
-                _manifest_field(run_dir / ATTEMPT_MANIFEST, "winning_attempt_key") or ""
-            )
+            result.winning_attempt_key = str(manifest.get("winning_attempt_key") or "")
         return result
 
     @staticmethod
@@ -1914,9 +1858,8 @@ class BenchmarkRunner:
 
     @staticmethod
     def _api_retry_exhaustion_message(path: Path) -> str:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        payload = read_json_object(path)
+        if not payload:
             return "transient API retry budget exhausted"
         attempts = payload.get("attempts")
         call_name = payload.get("call_name") or "model_call"
@@ -1937,16 +1880,7 @@ class BenchmarkRunner:
         return message
 
     @staticmethod
-    def _sandbox_fault_payload(path: Path) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _sandbox_fault_message(path: Path) -> str:
-        payload = BenchmarkRunner._sandbox_fault_payload(path)
+    def _sandbox_fault_message(payload: dict[str, Any]) -> str:
         if not payload:
             return "sandbox protocol fault"
         code = str(payload.get("code") or "sandbox_protocol_fault")
@@ -2000,11 +1934,7 @@ class BenchmarkRunner:
                 {"command": "ResetEnvironment"},
                 reset_timeout,
             )
-            reset_text = (
-                reset_reply.decode(errors="replace")
-                if isinstance(reset_reply, (bytes, bytearray))
-                else str(reset_reply)
-            )
+            reset_text = _reply_text(reset_reply)
             if "Environment reset" not in reset_text:
                 raise RuntimeError(f"unexpected reset reply: {reset_text[:200]!r}")
 
@@ -2035,12 +1965,7 @@ class BenchmarkRunner:
                 if not isinstance(response, bytes) or not response.startswith(b"LDR1"):
                     raise RuntimeError(f"probe did not return {expected}")
             elif failed_command == "RequestLidarCenter":
-                text = (
-                    response.decode(errors="replace")
-                    if isinstance(response, (bytes, bytearray))
-                    else str(response)
-                )
-                parsed = json.loads(text)
+                parsed = json.loads(_reply_text(response))
                 if not isinstance(parsed, dict) or "distance" not in parsed or "hit" not in parsed:
                     raise RuntimeError(f"probe did not return {expected}")
             elif failed_command in {"RequestScreenshot", "RequestAnnotation"}:
@@ -2053,19 +1978,26 @@ class BenchmarkRunner:
             detail = " ".join(str(error).splitlines()) or "no details"
             return False, f"{type(error).__name__}: {detail}"[:240]
 
+    def _read_json_cached(self, path: Path) -> dict[str, Any]:
+        """read_json_object, reparsed only when the file's stat changes. Treat as read-only."""
+        try:
+            stat = path.stat()
+        except OSError:
+            self._json_cache.pop(path, None)
+            return {}
+        key = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        cached = self._json_cache.get(path)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        payload = read_json_object(path)
+        if payload:
+            self._json_cache[path] = (key, payload)
+        return payload
+
     def _human_verified_winner(self, prompt_id: str) -> dict[str, Any] | None:
         """Returns durable cancellation metadata for this exact prompt ID, if one exists."""
-        try:
-            battery = json.loads(
-                (self.output_dir / BATTERY_MANIFEST).read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            battery = {}
-        durable = (
-            (battery.get("human_verified_winners") or {}).get(prompt_id)
-            if isinstance(battery, dict)
-            else None
-        )
+        battery = self._read_json_cached(self.output_dir / BATTERY_MANIFEST)
+        durable = (battery.get("human_verified_winners") or {}).get(prompt_id)
         if isinstance(durable, dict) and durable.get("winning_attempt_key"):
             return {
                 "winning_attempt_key": str(durable["winning_attempt_key"]),
@@ -2079,18 +2011,8 @@ class BenchmarkRunner:
         for run_dir in sorted(prompt_dir.iterdir()):
             if not run_dir.is_dir() or ".requeue" in run_dir.name:
                 continue
-            manifest = {}
-            try:
-                manifest = json.loads(
-                    (run_dir / ATTEMPT_MANIFEST).read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
-                continue
-            if (
-                isinstance(manifest, dict)
-                and manifest.get("state") == "finished"
-                and manifest.get("verified_success") is True
-            ):
+            manifest = self._read_json_cached(run_dir / ATTEMPT_MANIFEST)
+            if manifest.get("state") == "finished" and manifest.get("verified_success") is True:
                 return {
                     "winning_attempt_key": f"{prompt_id}/{run_dir.name}",
                     "stop_requested_at": str(
@@ -2442,9 +2364,7 @@ class BenchmarkRunner:
             "coordinator": self.coordinator_url,
             "tries": self.tries,
             "queue_mode": self.queue_mode,
-            "concurrency": self.concurrency if self.concurrency is not None else "auto",
-            "concurrency_mode": "fixed" if self.concurrency is not None else "auto",
-            "concurrency_limit": self.concurrency,
+            **self._concurrency_fields(),
             "peak_workers": self._peak_workers,
             "time_limit_minutes": self.time_limit_minutes,
             "max_steps": self.max_steps,
@@ -2468,12 +2388,16 @@ class BenchmarkRunner:
         }
 
         summary_path = self.output_dir / "summary.json"
-        _write_json_atomic(summary_path, summary)
+        write_json_atomic(summary_path, summary)
         _log(
             f"{summary['total_successes']}/{summary['total_attempts']} attempt(s) succeeded "
             f"in {summary['wall_seconds']}s, tokens in/out {total_in}/{total_out} -> {summary_path}"
         )
         return summary
+
+
+def _reply_text(reply: Any) -> str:
+    return reply.decode(errors="replace") if isinstance(reply, (bytes, bytearray)) else str(reply)
 
 
 def _log(message: str) -> None:

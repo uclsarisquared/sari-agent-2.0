@@ -449,10 +449,7 @@ class Coordinator:
         # A sandbox reporting Ready after a release is what actually returns it to the pool: the
         # reset it was told to run has finished.
         if sandbox.state == STATE_READY and sandbox.lease_id is None:
-            self._active_resets.discard(sandbox_id)
-            self._pending_resets = [
-                pending for pending in self._pending_resets if pending[0] != sandbox_id
-            ]
+            self._forget_reset(sandbox_id)
             sandbox.reset_started_at = None
             sandbox.reset_reason = ""
             await self._pump_resets()
@@ -464,10 +461,7 @@ class Coordinator:
             return
 
         self.log(f"Sandbox {sandbox_id} removed ({reason})")
-        self._active_resets.discard(sandbox_id)
-        self._pending_resets = [
-            pending for pending in self._pending_resets if pending[0] != sandbox_id
-        ]
+        self._forget_reset(sandbox_id)
         await self._pump_resets()
 
         # Close an evicted sandbox's socket so it reconnects and re-registers.
@@ -667,10 +661,7 @@ class Coordinator:
         sandbox.quarantined_at = quarantined_at
         self._save_state()
 
-        self._active_resets.discard(sandbox.sandbox_id)
-        self._pending_resets = [
-            pending for pending in self._pending_resets if pending[0] != sandbox.sandbox_id
-        ]
+        self._forget_reset(sandbox.sandbox_id)
         lease = self._leases.pop(sandbox.lease_id, None) if sandbox.lease_id else None
         sandbox.lease_id = None
         sandbox.lease_alias = ""
@@ -738,6 +729,13 @@ class Coordinator:
         ):
             self._pending_resets.append((sandbox_id, lease_id, reason))
         await self._pump_resets()
+
+    def _forget_reset(self, sandbox_id: str) -> None:
+        """Drop a sandbox's active and queued reset bookkeeping."""
+        self._active_resets.discard(sandbox_id)
+        self._pending_resets = [
+            pending for pending in self._pending_resets if pending[0] != sandbox_id
+        ]
 
     async def _pump_resets(self) -> None:
         """Starts queued resets up to the fleet-wide concurrency limit."""

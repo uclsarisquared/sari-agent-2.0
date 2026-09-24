@@ -165,8 +165,11 @@ class CoordinatorClient:
         )
         return bool(reply.get("known"))
 
+    async def _status_reply(self) -> dict[str, Any]:
+        return await self._request(encode("bench.status"), "bench.pool")
+
     async def pool(self) -> list[dict[str, Any]]:
-        reply = await self._request(encode("bench.status"), "bench.pool")
+        reply = await self._status_reply()
         return list(reply.get("sandboxes") or [])
 
     async def pool_status(self) -> tuple[list[dict[str, Any]], int]:
@@ -175,7 +178,7 @@ class CoordinatorClient:
         Separate from `pool` because only the dashboard needs the second number, and a coordinator
         too old to report it must read as "no queue" rather than as an error.
         """
-        reply = await self._request(encode("bench.status"), "bench.pool")
+        reply = await self._status_reply()
         try:
             waiting = max(0, int(reply.get("waiting") or 0))
         except (TypeError, ValueError):
@@ -187,7 +190,7 @@ class CoordinatorClient:
 
         Defaults preserve useful values when connected to a coordinator predating capacity caps.
         """
-        reply = await self._request(encode("bench.status"), "bench.pool")
+        reply = await self._status_reply()
         sandboxes = list(reply.get("sandboxes") or [])
         active = sum(1 for sandbox in sandboxes if sandbox.get("lease_id"))
         eligible = sum(1 for sandbox in sandboxes if bool(sandbox.get("store_loaded", True)))

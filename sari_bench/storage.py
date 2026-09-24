@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,51 @@ def battery_dir_name(name: str) -> str:
     """
     cleaned = _UNSAFE_IN_NAME.sub("-", name.strip()).strip("-._")
     return cleaned[:BATTERY_NAME_MAX].strip("-._")
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    """A JSON object from disk, or {} when missing, unreadable, or not an object."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Durably publish bytes via a unique fsynced temp file and rename."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.stem}.", suffix=f"{path.suffix}.tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+        raise
+
+
+def attempt_dirs(scope: Path) -> list[Path]:
+    """Every attempt dir (one holding attempt.json) at or below `scope`."""
+    if (scope / "attempt.json").is_file():
+        return [scope]
+    return sorted({path.parent for path in scope.rglob("attempt.json") if path.is_file()})
+
+
+def resolve_scope_root(parser: Any, args: Any) -> Path:
+    """The existing --run-dir/--bench-root directory a maintenance CLI operates on."""
+    requested = args.run_dir if args.run_dir is not None else args.bench_root
+    try:
+        root = requested.resolve(strict=True)
+    except OSError as error:
+        parser.error(f"requested root is unavailable: {error}")
+    if not root.is_dir():
+        parser.error("requested root is not a directory")
+    return root
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -71,8 +117,12 @@ def read_jsonl_rows(path: Path, *, strict: bool = False) -> list[dict[str, Any]]
     """Read JSON-object lines, optionally rejecting malformed content."""
     if not path.exists():
         return []
+    return _parse_jsonl_rows(path, path.read_text(encoding="utf-8"), strict=strict)
+
+
+def _parse_jsonl_rows(path: Path, text: str, *, strict: bool) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -108,7 +158,9 @@ def canonical_attempt_rows(
     """Return the latest row per logical attempt, optionally compacting the file."""
     path = output_dir / "attempts.jsonl"
     with file_lock(output_dir / ATTEMPTS_LOCK):
-        rows = read_jsonl_rows(path, strict=strict)
+        exists = path.exists()
+        text = path.read_text(encoding="utf-8") if exists else ""
+        rows = _parse_jsonl_rows(path, text, strict=strict)
         latest: dict[tuple[str, int], dict[str, Any]] = {}
         order: list[tuple[str, int]] = []
         for index, row in enumerate(rows, 1):
@@ -130,7 +182,7 @@ def canonical_attempt_rows(
                 order.append(key)
             latest[key] = row
         canonical = [latest[key] for key in order]
-        if rewrite and (rows != canonical or (path.exists() and not path.read_text().endswith("\n"))):
+        if rewrite and (rows != canonical or (exists and not text.endswith("\n"))):
             write_jsonl_atomic(path, canonical)
         return canonical
 

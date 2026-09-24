@@ -13,14 +13,17 @@ this is about disk space on old evidence, never about a run that could still be 
 from __future__ import annotations
 
 import argparse
-import contextlib
-import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+
+from sari_bench.storage import (
+    attempt_dirs,
+    read_json_object,
+    resolve_scope_root,
+    write_bytes_atomic,
+)
 
 MAX_SAVE_W, MAX_SAVE_H = 1920, 1080
 JPEG_QUALITY = 85
@@ -36,20 +39,6 @@ class ConvertResult:
     png_bytes: int = 0
     jpg_bytes: int = 0
     skipped: str = ""
-
-
-def _manifest(path: Path) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _attempt_dirs(scope: Path) -> list[Path]:
-    if (scope / "attempt.json").is_file():
-        return [scope]
-    return sorted({path.parent for path in scope.rglob("attempt.json")})
 
 
 def _to_jpeg(png_bytes: bytes) -> bytes:
@@ -91,7 +80,7 @@ def convert_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Conver
     except (OSError, ValueError):
         result.skipped = "attempt is outside the requested root"
         return result
-    manifest = _manifest(attempt / "attempt.json")
+    manifest = read_json_object(attempt / "attempt.json")
     if not manifest:
         result.skipped = "attempt.json is missing or unreadable"
         return result
@@ -135,16 +124,9 @@ def convert_attempt(attempt: Path, root: Path, *, apply: bool = False) -> Conver
             result.skipped = f"could not re-encode {png_path.name}: {error!r}"
             return result
 
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{jpg_path.stem}.", suffix=".jpg.tmp", dir=jpg_path.parent
-        )
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(jpeg)
-            os.replace(temp_name, jpg_path)
+            write_bytes_atomic(jpg_path, jpeg)
         except OSError as error:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp_name)
             result.skipped = f"could not write {jpg_path.name}: {error!r}"
             return result
         result.jpg_bytes += len(jpeg)
@@ -163,15 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--run-dir", type=Path)
     parser.add_argument("--apply", action="store_true", help="Convert files (default is dry-run).")
     args = parser.parse_args(argv)
-    requested = args.run_dir if args.run_dir is not None else args.bench_root
-    try:
-        root = requested.resolve(strict=True)
-    except OSError as error:
-        parser.error(f"requested root is unavailable: {error}")
-    if not root.is_dir():
-        parser.error("requested root is not a directory")
+    root = resolve_scope_root(parser, args)
 
-    results = [convert_attempt(attempt, root, apply=args.apply) for attempt in _attempt_dirs(root)]
+    results = [convert_attempt(attempt, root, apply=args.apply) for attempt in attempt_dirs(root)]
     total_files = total_png = total_jpg = 0
     verb = "converted" if args.apply else "would convert"
     for result in results:

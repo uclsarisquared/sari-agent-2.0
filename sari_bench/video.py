@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -34,8 +33,6 @@ from typing import Any
 
 from sari_bench import capture
 from sari_bench.watch import scan
-
-_STEP_FRAME = re.compile(r"^step(\d+)(?:_[^.]+)?\.(?:png|jpe?g)$", re.IGNORECASE)
 
 # Chat-attachment budget. Discord's real webhook cap is 10 MB; 8 leaves room for the embed and for
 # libx264 overshooting its target on the last GOP.
@@ -126,7 +123,8 @@ def collect_frames(run_dir: Path, *, include_captures: bool = True) -> list[tupl
     for leg_dir in leg_dirs:
         records = _steps_by_index(run_dir / f"{leg_dir.name}.jsonl")
         numbered = sorted(
-            ((int(m.group(1)), p) for p in leg_dir.iterdir() if (m := _STEP_FRAME.match(p.name))),
+            (step, p) for p in leg_dir.iterdir()
+            if (step := capture.step_frame_index(p)) is not None
         )
         for step, path in numbered:
             text = _caption(records.get(step), leg_dir.name, step)
@@ -327,9 +325,7 @@ def render(run_dir: Path, out_path: Path, *, fps: float = DEFAULT_FPS, width: in
             flush=True,
         )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    part_path = out_path.with_name(
-        f".{out_path.stem}.{os.getpid()}.{threading.get_ident()}.part{out_path.suffix}"
-    )
+    part_path = _part_path(out_path)
     try:
         with tempfile.TemporaryDirectory() as temp:
             staging = Path(temp)
@@ -477,14 +473,12 @@ def _render_continuous_for_upload(
     # One second per agent observation keeps clips short enough for Discord while the source's
     # intermediate frames make that second show motion rather than a single large jump. Never slow
     # a naturally short replay down just to meet that target.
-    step_count = len(collect_frames(run_dir, include_captures=False))
+    step_count = len(capture.step_frames(run_dir))
     target_duration = min(source_duration, max(1.0, step_count / UPLOAD_STEP_FPS))
     speed = target_duration / source_duration
     target_frames = max(1, round(target_duration * max(fps, 0.1)))
     bitrate = target_bitrate(target_frames, fps, max_bytes)
-    part_path = out_path.with_name(
-        f".{out_path.stem}.{os.getpid()}.{threading.get_ident()}.part{out_path.suffix}"
-    )
+    part_path = _part_path(out_path)
     filter_chain = (
         f"scale={width}:-2:flags=lanczos,setpts={speed:.12g}*PTS,fps={fps:.12g}"
     )
@@ -504,6 +498,13 @@ def _render_continuous_for_upload(
         print(f"[sari-bench video] upload transcode failed on {run_dir}: {error!r}", flush=True)
         return None
     return out_path
+
+
+def _part_path(out_path: Path) -> Path:
+    """A per-process/thread staging name beside `out_path`."""
+    return out_path.with_name(
+        f".{out_path.stem}.{os.getpid()}.{threading.get_ident()}.part{out_path.suffix}"
+    )
 
 
 def _run(command: list[str], *, timeout: float | None = None) -> None:

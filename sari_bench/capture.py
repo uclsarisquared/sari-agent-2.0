@@ -11,12 +11,13 @@ import queue
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
+
+from sari_bench.storage import write_bytes_atomic
 
 CAPTURE_DIR = "capture"
 LATEST_CAPTURE = "latest.jpg"
@@ -52,6 +53,11 @@ class CaptureStats:
 
 def is_step_frame(path: Path) -> bool:
     return bool(_STEP_FRAME.match(path.name))
+
+
+def step_frame_index(path: Path) -> int | None:
+    match = _STEP_FRAME.match(path.name)
+    return int(match.group(1)) if match else None
 
 
 _JPEG_SOI = b"\xff\xd8"
@@ -93,35 +99,37 @@ def frame_timestamp_ns(path: Path) -> int:
         return 0
 
 
+def step_frames(run_dir: Path) -> list[Path]:
+    """Every PNG/JPEG step frame under the attempt's leg dirs."""
+    if not run_dir.is_dir():
+        return []
+    return [
+        path
+        for leg_dir in run_dir.iterdir()
+        if leg_dir.is_dir() and leg_dir.name.startswith("leg")
+        for path in leg_dir.iterdir()
+        if path.is_file() and is_step_frame(path)
+    ]
+
+
 def observation_frames(run_dir: Path) -> list[Path]:
     """Legacy numbered captures plus exact/timestamped PNG/JPEG step frames."""
-    frames: list[Path] = []
     if not run_dir.is_dir():
-        return frames
+        return []
+    frames: list[Path] = []
     capture_dir = run_dir / CAPTURE_DIR
     if capture_dir.is_dir():
         frames.extend(
             path for path in capture_dir.iterdir()
             if path.is_file() and _CAPTURE_FRAME.match(path.name)
         )
-    for leg_dir in run_dir.iterdir():
-        if leg_dir.is_dir() and leg_dir.name.startswith("leg"):
-            frames.extend(path for path in leg_dir.iterdir() if path.is_file() and is_step_frame(path))
+    frames.extend(step_frames(run_dir))
     return frames
 
 
 def latest_step_frame(run_dir: Path) -> Path | None:
-    if not run_dir.is_dir():
-        return None
-    frames: list[Path] = []
-    for leg_dir in run_dir.iterdir():
-        if leg_dir.is_dir() and leg_dir.name.startswith("leg"):
-            frames.extend(
-                path for path in leg_dir.iterdir()
-                if path.is_file() and is_step_frame(path)
-            )
     return next(
-        (path for path in sorted(frames, key=frame_timestamp_ns, reverse=True)
+        (path for path in sorted(step_frames(run_dir), key=frame_timestamp_ns, reverse=True)
          if is_valid_frame(path)),
         None,
     )
@@ -204,17 +212,7 @@ def _publish_latest(run_dir: Path, jpeg: bytes) -> Path:
     capture_dir = run_dir / CAPTURE_DIR
     capture_dir.mkdir(parents=True, exist_ok=True)
     final = capture_dir / LATEST_CAPTURE
-    fd, temp_name = tempfile.mkstemp(prefix=".latest.", suffix=".jpg.tmp", dir=capture_dir)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(jpeg)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, final)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp_name)
-        raise
+    write_bytes_atomic(final, jpeg)
     return final
 
 
@@ -303,7 +301,8 @@ class AttemptRecorder:
         while not self.stopping.is_set():
             await asyncio.sleep(max(0.0, next_at - time.monotonic()))
             next_at += self.interval
-            step = latest_step_frame(self.run_dir)
+            # Off the loop: this walks every leg dir, and the runner hosts many recorders.
+            step = await asyncio.to_thread(latest_step_frame, self.run_dir)
             step_ns = frame_timestamp_ns(step) if step else 0
             if step is not None and step_ns > self.last_step_ns:
                 self.last_step_ns = step_ns

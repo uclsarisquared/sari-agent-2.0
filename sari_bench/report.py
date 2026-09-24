@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 from pathlib import Path
 from typing import Any
 
@@ -70,43 +69,27 @@ ROLE_COLUMNS = [
 ]
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(payload, dict):
-                rows.append(payload)
-    return rows
-
-
-def _tokens_of(run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]) -> tuple[int, int]:
+def _tokens_of(
+    recorded: dict[str, Any], summary: dict[str, Any], tokens_file: dict[str, Any]
+) -> tuple[int, int]:
     """The attempt's (tokens_in, tokens_out), from the most authoritative record available.
 
     attempts.jsonl for a finished attempt, then the agent's summary.json, then the tokens.json the
     agent rewrites as it goes - which is what makes a still-running or SIGKILLed attempt account for
     its tokens at all.
     """
-    for source in (recorded, summary, scan._read_json(run_dir / "tokens.json")):
+    for source in (recorded, summary, tokens_file):
         if isinstance(source, dict) and ("tokens_in" in source or "tokens_out" in source):
             return int(source.get("tokens_in") or 0), int(source.get("tokens_out") or 0)
     return 0, 0
 
 
 def _api_calls_of(
-    run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]
+    recorded: dict[str, Any], summary: dict[str, Any], tokens_file: dict[str, Any]
 ) -> int | None:
     """Actual request attempts, preserving unknown for data written before this meter existed."""
     nested = summary.get("tokens") if isinstance(summary.get("tokens"), dict) else {}
-    for source in (recorded, nested, summary, scan._read_json(run_dir / "tokens.json")):
+    for source in (recorded, nested, summary, tokens_file):
         if isinstance(source, dict) and source.get("api_calls") is not None:
             try:
                 return int(source["api_calls"])
@@ -115,7 +98,7 @@ def _api_calls_of(
     return None
 
 
-def _roles_of(run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]
+def _roles_of(recorded: dict[str, Any], summary: dict[str, Any], tokens_file: dict[str, Any]
               ) -> dict[str, dict[str, int]]:
     """The attempt's per-role token spend, from the same authority chain as ``_tokens_of``.
 
@@ -126,7 +109,7 @@ def _roles_of(run_dir: Path, recorded: dict[str, Any], summary: dict[str, Any]
     """
     tokens = summary.get("tokens") if isinstance(summary.get("tokens"), dict) else {}
     for raw in (recorded.get("tokens_by_role"), tokens.get("by_role"), summary.get("by_role"),
-                scan._read_json(run_dir / "tokens.json").get("by_role")):
+                tokens_file.get("by_role")):
         rows = scan.normalize_by_role(raw)
         if rows:
             return rows
@@ -205,8 +188,9 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         # "how many attempts were in a death loop when I killed them" answerable after the fact.
         view = scan.scan_attempt(run_dir, battery, now=0.0)
         legs = recorded.get("legs") or {}
-        tokens_in, tokens_out = _tokens_of(run_dir, recorded, summary)
-        api_calls = _api_calls_of(run_dir, recorded, summary)
+        tokens_file = scan._read_json(run_dir / "tokens.json")
+        tokens_in, tokens_out = _tokens_of(recorded, summary, tokens_file)
+        api_calls = _api_calls_of(recorded, summary, tokens_file)
 
         # Same fallback chain as every other field in this row - and, now that `verdict_agrees`
         # compares against it, the same answer the dashboard shows. The manifest belongs in the chain
@@ -285,7 +269,7 @@ def collect(battery: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             # Private, and dropped by every DictWriter here (extrasaction="ignore"). It rides the
             # attempt row so `role_rows` can expand the (attempt x role) grain without a second
             # traversal of the battery - see role_rows.
-            "_tokens_by_role": _roles_of(run_dir, recorded, summary),
+            "_tokens_by_role": _roles_of(recorded, summary, tokens_file),
         })
 
         for index, leg in enumerate(summary.get("legs") or []):

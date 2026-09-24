@@ -26,6 +26,19 @@ from sari_bench.protocol import DEFAULT_COORDINATOR_PORT
 USAGE = __doc__
 
 
+def _capacity_line(status: dict[str, object], *, quarantined: bool) -> str:
+    cap = status.get("capacity_limit")
+    line = (
+        f"Lease capacity: {'all' if cap is None else cap}; "
+        f"effective={status.get('effective_capacity', 0)}, "
+        f"active={status.get('active_leases', 0)}, "
+        f"eligible={status.get('eligible_sandboxes', 0)}"
+    )
+    if quarantined:
+        line += f", quarantined={status.get('quarantined_sandboxes', 0)}"
+    return line
+
+
 def _status(argv: list[str]) -> int:
     import argparse
 
@@ -49,13 +62,7 @@ def _status(argv: list[str]) -> int:
     if not pool:
         print("No sandboxes registered.")
         print("Total connected sandboxes: 0")
-        cap = status.get("capacity_limit")
-        print(
-            f"Lease capacity: {'all' if cap is None else cap}; "
-            f"effective={status.get('effective_capacity', 0)}, "
-            f"active={status.get('active_leases', 0)}, "
-            f"eligible={status.get('eligible_sandboxes', 0)}"
-        )
+        print(_capacity_line(status, quarantined=False))
         return 0
 
     print(f"{'SANDBOX':<14} {'ADDRESS':<24} {'STATE':<12} {'LEASE':<28} DETAIL")
@@ -80,14 +87,7 @@ def _status(argv: list[str]) -> int:
             f"{sandbox_label:<14} {address:<24} {state:<12} {lease:<28} {reset}"
         )
     print(f"Total connected sandboxes: {len(pool)}")
-    cap = status.get("capacity_limit")
-    print(
-        f"Lease capacity: {'all' if cap is None else cap}; "
-        f"effective={status.get('effective_capacity', 0)}, "
-        f"active={status.get('active_leases', 0)}, "
-        f"eligible={status.get('eligible_sandboxes', 0)}"
-        f", quarantined={status.get('quarantined_sandboxes', 0)}"
-    )
+    print(_capacity_line(status, quarantined=True))
     return 0
 
 
