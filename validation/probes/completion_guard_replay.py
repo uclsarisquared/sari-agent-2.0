@@ -15,7 +15,6 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -25,15 +24,12 @@ _ROOT = Path(__file__).resolve().parents[2] / "agent"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
 from orchestrator.pickup_vlm_guard import classify_pickup
 from orchestrator.subtask_completion import completion_predicate
-from agent_core.models import agent_model
-from agent_core.llm import normalize_endpoint_root
-
-load_dotenv(_ROOT.parent / "secrets.env")
+from agent_core.models import agent_model  # also loads secrets.env
+from agent_core.llm import EndpointProfile
 
 
 def _load_manifest(path):
@@ -62,26 +58,15 @@ def _confusion(rows, key):
     return counts
 
 
-def _runtime_client(base_url=None, api_key=None):
-    url = base_url or os.getenv("OPENAI_API_URL")
-    key = api_key or os.getenv("OPENAI_API_KEY")
-    if not (url and key):
-        raise RuntimeError("set OPENAI_API_URL and OPENAI_API_KEY (or pass --base-url/--api-key)")
-    url = f"{normalize_endpoint_root(url)}/v1"
-    return OpenAI(base_url=url, api_key=key, max_retries=0), url
-
-
 def run(manifest_path, output_path, base_url=None, api_key=None,
         model=None):
     model = model or agent_model()
     manifest_path = Path(manifest_path).resolve()
     rows = _load_manifest(manifest_path)
-    client, resolved_url = _runtime_client(base_url, api_key)
-    config = SimpleNamespace(
-        temperature=0.5,
-        max_tokens=1536,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
+    profile = EndpointProfile.from_env(provider="vllm", base_url=base_url, api_key=api_key)
+    client = OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0)
+    resolved_url = profile.base_url
+    config = SimpleNamespace(temperature=0.5, max_tokens=1536, extra_body=profile.extra_body)
     results = []
     for index, source in enumerate(rows):
         image_path = Path(source["image"])

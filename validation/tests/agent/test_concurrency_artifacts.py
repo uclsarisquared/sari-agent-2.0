@@ -1,7 +1,6 @@
 """Offline regression tests for attempt-local runtime artifacts."""
 
 from io import BytesIO
-import os
 from pathlib import Path
 import sys
 

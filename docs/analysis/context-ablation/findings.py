@@ -10,19 +10,17 @@ checks two things A4's design raises:
     shorter system prompt (subtask_agents.py:239-245) -- if the shorter prompt
     already lands under the cap, A4 is measuring a prompt rewrite, not a cap.
 
-Usage:  python3 analysis/context-ablation/findings.py [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/findings.py [--bench-runs DIR]
 """
 
 from __future__ import annotations
 
 import argparse
-import pathlib
 import re
 import statistics
 
-from collect import BATTERIES
+from collect import ARMS, BATTERIES, add_bench_runs_arg, table
 
-ARMS = ["baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"]
 HEADER = re.compile(r"^\[FINDINGS SUMMARY\]\s*$", re.M)
 # The block runs to the next bracketed log header or a leg banner.
 STOP = re.compile(r"^(\[[A-Z][A-Z ]+\]|--- LEG )", re.M)
@@ -39,10 +37,8 @@ def blocks(text: str) -> list[str]:
 
 
 def main() -> int:
-    here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     args = parser.parse_args()
 
     rows = []
@@ -59,12 +55,7 @@ def main() -> int:
                      f"{statistics.median(lengths):,.0f}",
                      f"{statistics.fmean(lengths):,.0f}", f"{max(lengths):,}",
                      f"{at_cap}/{len(lengths)}"])
-    headers = ["arm", "summaries", "min", "median", "mean", "max", "exactly 600 chars"]
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
+    table(["arm", "summaries", "min", "median", "mean", "max", "exactly 600 chars"], rows)
     print("\nA3 should show zero summaries: findings generation is skipped entirely.")
     print("For A4, 'exactly 600 chars' counts summaries the cap actually truncated;")
     print("everything below that length was produced short by the rewritten prompt.")

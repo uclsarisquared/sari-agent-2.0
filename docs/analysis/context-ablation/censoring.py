@@ -9,7 +9,7 @@ chances to be solved, and the arm carries a prompt it may well have solved.
 This walks each battery's `human_verified_winners` against the verdict actually
 recorded for the winning try.
 
-Usage:  python3 analysis/context-ablation/censoring.py [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/censoring.py [--bench-runs DIR]
 """
 
 from __future__ import annotations
@@ -18,9 +18,8 @@ import argparse
 import json
 import pathlib
 
-from collect import BATTERIES
+from collect import ARMS, BATTERIES, add_bench_runs_arg, table
 
-ARMS = ["baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"]
 
 
 def verdict_of(base: pathlib.Path, key: str) -> tuple[str, bool]:
@@ -33,10 +32,8 @@ def verdict_of(base: pathlib.Path, key: str) -> tuple[str, bool]:
 
 
 def main() -> int:
-    here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     args = parser.parse_args()
 
     rows = []
@@ -61,13 +58,8 @@ def main() -> int:
                                f"{siblings} sibling(s) destroyed"])
         rows.append([arm, len(winners), killed, wasted])
 
-    headers = ["arm", "prompts stopped early", "attempts destroyed",
-               "destroyed on a grant review overturned"]
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
+    table(["arm", "prompts stopped early", "attempts destroyed",
+           "destroyed on a grant review overturned"], rows)
 
     print("\nCases where a prompt's remaining tries were destroyed for a grant that did")
     print("not survive review:")

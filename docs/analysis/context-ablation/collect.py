@@ -5,7 +5,7 @@ Reads bench_runs/ directly; no dependencies outside the standard library.
 Writes attempts.csv (one row per attempt) next to this script so every number in
 the report can be re-derived and diffed.
 
-Usage:  python3 analysis/context-ablation/collect.py [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/collect.py [--bench-runs DIR]
 """
 
 from __future__ import annotations
@@ -31,6 +31,9 @@ BATTERIES = {
     # kept in the table, excluded from every arm-to-arm comparison.
     "hard-baseline": "20260730_205702_context-ablation-hard-baseline",
 }
+# Arms compared against each other (hard-baseline ran a different prompt set).
+ARMS = [arm for arm in BATTERIES if arm != "hard-baseline"]
+DEFAULT_BENCH_RUNS = pathlib.Path(__file__).resolve().parent.parent / "bench_runs"
 
 ROLES = ("actor", "semantic", "episodic", "perception", "guard",
          "findings", "resolver", "decomposer", "responder")
@@ -39,6 +42,21 @@ ROLES = ("actor", "semantic", "episodic", "perception", "guard",
 # stopping point. Operator kills and harness timeouts stop the clock from
 # outside, so their token and wall figures describe the harness, not the arm.
 CLEAN_OUTCOMES = {"completed"}
+
+
+def table(headers, rows) -> None:
+    """Print rows as a left-aligned, column-padded text table."""
+    if not rows:
+        return
+    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
+    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
+
+
+def add_bench_runs_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--bench-runs", type=pathlib.Path, default=DEFAULT_BENCH_RUNS)
 
 
 def leg_files(run_dir: pathlib.Path) -> list[pathlib.Path]:
@@ -153,8 +171,7 @@ def collect(bench_runs: pathlib.Path) -> list[dict]:
 def main() -> int:
     here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     parser.add_argument("--out", type=pathlib.Path, default=here / "attempts.csv")
     args = parser.parse_args()
 

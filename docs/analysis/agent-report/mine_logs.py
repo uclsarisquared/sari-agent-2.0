@@ -7,9 +7,9 @@ the agent rewrites for itself each timestep ("DENSE SUMMARY / WHAT WORKED / WHAT
 three are pulled out here so "interesting moment" is a repeatable search rather than a hunch.
 
 Usage:
-  python3 analysis/agent-report/mine_logs.py --theme recovery --limit 6
-  python3 analysis/agent-report/mine_logs.py --memory --glob 'hard_09/try*'
-  python3 analysis/agent-report/mine_logs.py --list-themes
+  python3 docs/analysis/agent-report/mine_logs.py --theme recovery --limit 6
+  python3 docs/analysis/agent-report/mine_logs.py --memory --glob 'hard_09/try*'
+  python3 docs/analysis/agent-report/mine_logs.py --list-themes
 """
 
 from __future__ import annotations
@@ -57,7 +57,8 @@ def parse_payload(text: str, start: int) -> dict[str, Any] | None:
             return None
         return payload if isinstance(payload, dict) else None
     # Dict reprs are logged on a single line, so the line is the whole payload.
-    line = text[start : text.find("\n", start) if text.find("\n", start) > 0 else len(text)]
+    end = text.find("\n", start)
+    line = text[start : end if end > 0 else len(text)]
     line = line.strip()
     if not line.startswith("{"):
         return None
@@ -127,7 +128,8 @@ def main() -> int:
             if text in seen:
                 continue
             seen.add(text)
-            points = sum(1 for word in keywords if word in text.lower())
+            lowered = text.lower()
+            points = sum(1 for word in keywords if word in lowered)
             if points >= args.min_score and len(text) >= args.min_chars:
                 hits.append((points, len(text), battery, key, speaker, payload))
 

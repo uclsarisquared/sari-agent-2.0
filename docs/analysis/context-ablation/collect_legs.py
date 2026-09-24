@@ -6,7 +6,7 @@ message history is rebuilt at each leg boundary, so an attempt-level fit that
 pools legs measures a mixture of leg lengths rather than growth within one.
 Per-leg role tokens live in each attempt's summary.json.
 
-Usage:  python3 analysis/context-ablation/collect_legs.py [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/collect_legs.py [--bench-runs DIR]
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 import pathlib
 import sys
 
-from collect import BATTERIES, ROLES
+from collect import BATTERIES, ROLES, add_bench_runs_arg
 
 
 def collect(bench_runs: pathlib.Path) -> list[dict]:
@@ -66,8 +66,7 @@ def collect(bench_runs: pathlib.Path) -> list[dict]:
 def main() -> int:
     here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     parser.add_argument("--out", type=pathlib.Path, default=here / "legs.csv")
     args = parser.parse_args()
     rows = collect(args.bench_runs)

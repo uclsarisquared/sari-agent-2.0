@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Arm-level statistics for the context-window ablation.
 
-Every table printed here is reproducible from analysis/context-ablation/attempts.csv,
+Every table printed here is reproducible from docs/analysis/context-ablation/attempts.csv,
 which collect.py builds straight out of bench_runs/. Standard library only.
 
-Usage:  python3 analysis/context-ablation/analyze.py [--csv PATH]
+Usage:  python3 docs/analysis/context-ablation/analyze.py [--csv PATH]
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ import random
 import statistics
 from collections import defaultdict
 
-ARMS = ["baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"]
+from collect import ARMS, table
+
 PROMPTS = ["easy_01", "easy_03", "medium_01", "medium_03", "hard_01", "hard_03"]
 NUMERIC = {"attempt", "success", "verified", "success_final", "excluded", "false_pass",
            "false_fail", "clean", "wall_seconds", "tokens_in", "tokens_out",
@@ -75,69 +76,19 @@ def permutation_test(xs, ys, iters=20000, seed=0) -> float:
         return float("nan")
     observed = abs(mean(xs) - mean(ys))
     pool = xs + ys
+    k, total = len(xs), math.fsum(pool)
     rng = random.Random(seed)
     hits = 0
     for _ in range(iters):
         rng.shuffle(pool)
-        if abs(mean(pool[:len(xs)]) - mean(pool[len(xs):])) >= observed - 1e-12:
+        head = math.fsum(pool[:k])
+        if abs(head / k - (total - head) / (len(pool) - k)) >= observed - 1e-12:
             hits += 1
     return (hits + 1) / (iters + 1)
 
 
-def growth_fit(points: list[tuple[float, float]]) -> tuple[float, float]:
-    """Split a role's per-attempt input tokens into a flat and a compounding term.
-
-    If the k-th call of a leg is handed base + slope*(k-1) tokens, then an attempt
-    with n calls spends base*n + slope*n*(n-1)/2 in total. Least squares through
-    the origin on those two predictors recovers (base, slope) without needing
-    per-call token counts, which the harness does not record.
-    """
-    sxx = sxy = sxz = syy = syz = 0.0
-    for n, total in points:
-        if n < 1:
-            continue
-        x, y = n, n * (n - 1) / 2
-        sxx += x * x
-        sxy += x * y
-        syy += y * y
-        sxz += x * total
-        syz += y * total
-    det = sxx * syy - sxy * sxy
-    if abs(det) < 1e-9:
-        return (float("nan"), float("nan"), float("nan"))
-    base = (sxz * syy - syz * sxy) / det
-    slope = (syz * sxx - sxz * sxy) / det
-    # base and slope trade off against each other, so report how much of the
-    # spread the pair explains before reading either one on its own.
-    used = [(n, t) for n, t in points if n >= 1]
-    ybar = statistics.fmean(t for _, t in used)
-    ss_tot = sum((t - ybar) ** 2 for _, t in used)
-    ss_res = sum((t - (base * n + slope * n * (n - 1) / 2)) ** 2 for n, t in used)
-    r2 = 1 - ss_res / ss_tot if ss_tot else float("nan")
-    return (base, slope, r2)
-
-
-def projected(base: float, slope: float, n: int) -> float:
-    """Total input tokens the fit predicts for a leg of n calls.
-
-    Less sensitive than base or slope alone: the two parameters are strongly
-    anti-correlated, so their sum at a fixed leg length is the stable readout.
-    """
-    return base * n + slope * n * (n - 1) / 2
-
-
 def section(title: str) -> None:
     print(f"\n{title}\n{'=' * len(title)}")
-
-
-def table(headers, rows) -> None:
-    if not rows:
-        return
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
 
 
 def main() -> int:

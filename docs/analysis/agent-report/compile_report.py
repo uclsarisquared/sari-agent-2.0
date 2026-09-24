@@ -6,7 +6,7 @@ Every number in the report comes out of this script: it reads each attempt's on-
 reuses `sari_bench.watch.scan` for the verdict semantics so "human grading" here means exactly what
 the dashboard and `sari_bench report` mean by it.
 
-Usage:  python3 analysis/agent-report/compile_report.py [--csv OUT.csv] [--json OUT.json]
+Usage:  python3 docs/analysis/agent-report/compile_report.py [--csv OUT.csv] [--json OUT.json]
 """
 
 from __future__ import annotations
@@ -152,6 +152,8 @@ def summarize(difficulty: str, rows: list[dict[str, Any]], battery_summary: dict
     agree = sum(1 for r in graded if r["auto_success"] == r["human_pass"])
     false_pass = sum(1 for r in graded if r["auto_success"] and not r["human_pass"])
     false_fail = sum(1 for r in graded if not r["auto_success"] and r["human_pass"])
+    span = battery_span(rows)
+    total_seconds = sum(r["wall_seconds"] for r in rows)
 
     return {
         "difficulty": difficulty,
@@ -177,12 +179,10 @@ def summarize(difficulty: str, rows: list[dict[str, Any]], battery_summary: dict
         "median_success_seconds": median([r["wall_seconds"] for r in passes if r["wall_seconds"] > 0]),
         "avg_graded_fail_seconds": mean([r["wall_seconds"] for r in fails if r["wall_seconds"] > 0]),
         "avg_attempt_seconds_all": mean([r["wall_seconds"] for r in timed]),
-        "total_attempt_seconds": sum(r["wall_seconds"] for r in rows),
-        "battery_span_seconds": battery_span(rows),
+        "total_attempt_seconds": total_seconds,
+        "battery_span_seconds": span,
         "battery_last_session_seconds": float(battery_summary.get("wall_seconds") or 0.0),
-        "parallelism_factor": (
-            sum(r["wall_seconds"] for r in rows) / battery_span(rows)
-            if battery_span(rows) else None),
+        "parallelism_factor": total_seconds / span if span else None,
         # --- tokens ---
         "tokens_total": sum(r["tokens_total"] for r in rows),
         "tokens_in_total": sum(r["tokens_in"] for r in rows),

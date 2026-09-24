@@ -4,7 +4,6 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import statistics
 import sys
@@ -15,12 +14,11 @@ _REPO = _AGENT_DIR.parent
 if str(_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENT_DIR))
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
 from orchestrator.pickup_vlm_guard import classify_pickup
 from agent_core.models import agent_model
-from agent_core.llm import normalize_endpoint_root
+from agent_core.llm import EndpointProfile
 
 DEFAULT_FRAME = (
     _REPO / "bench_runs" / "20260727_020820" / "easy_02" / "try04" / "capture"
@@ -29,17 +27,6 @@ DEFAULT_FRAME = (
 DEFAULT_SKU = "LESLIE_S_CLOVER_CHIPS_CHEESE_24G"
 DEFAULT_TARGET = "Clover Chips"
 DEFAULT_MODEL = agent_model()  # $OPENAI_MODEL in secrets.env
-
-
-def _client(base_url=None, api_key=None):
-    load_dotenv(_REPO / "secrets.env")
-    url = base_url or os.getenv("OPENAI_API_URL")
-    key = api_key or os.getenv("OPENAI_API_KEY")
-    if not (url and key):
-        raise RuntimeError(
-            "Set OPENAI_API_URL and OPENAI_API_KEY (or pass --base-url and --api-key).")
-    resolved = f"{normalize_endpoint_root(url)}/v1"
-    return OpenAI(base_url=resolved, api_key=key, max_retries=0), resolved
 
 
 def main():
@@ -60,12 +47,12 @@ def main():
     frame = args.frame.resolve()
     image_b64 = base64.b64encode(frame.read_bytes()).decode("utf-8")
     media_type = "image/jpeg" if frame.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-    client, resolved_url = _client(args.base_url, args.api_key)
-    config = SimpleNamespace(
-        temperature=0.5,
-        max_tokens=1536,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
+    # vLLM transport (secrets.env loaded by agent_core.models); flags override the env.
+    profile = EndpointProfile.from_env(
+        provider="vllm", base_url=args.base_url, api_key=args.api_key)
+    client = OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0)
+    resolved_url = profile.base_url
+    config = SimpleNamespace(temperature=0.5, max_tokens=1536, extra_body=profile.extra_body)
 
     results = []
     for index in range(1, args.runs + 1):

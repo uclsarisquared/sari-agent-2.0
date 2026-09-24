@@ -43,7 +43,6 @@ from sim.env import _REQUEST_SCREENSHOT_, downscale_for_storage
 from orchestrator.action_dispatch import dispatch_action, parse_actor_response
 from orchestrator.leg_runner import _fresh_agent_state, write_step_output
 from orchestrator.start_pose import return_to_start
-from sim.hand_reset import reset_hands_in_front2
 
 # Targets verified present in the live store and reachable on open shelving (fridge items are
 # excluded on purpose: grabbing through glass doors is an unmeasured sim behaviour, and this

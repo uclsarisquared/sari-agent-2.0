@@ -7,19 +7,18 @@ trusted. For A2c the "after" is produced by replaying the arm's own rule over a
 baseline store, which is the only way to see the same entries with and without
 the seam.
 
-Usage:  python3 analysis/context-ablation/examples.py [--arm a1] [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/examples.py [--arm a1] [--bench-runs DIR]
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import pathlib
 import re
 import statistics
 
-from collect import BATTERIES
+from collect import BATTERIES, add_bench_runs_arg
 from findings import blocks
 
 ENTRY = re.compile(r"^@ leg (\d+) step (\d+): (.*)$", re.M)
@@ -79,7 +78,7 @@ def show_a2c(runs: pathlib.Path) -> None:
     print("so the same entries are seen with and without the seam.\n")
 
     kept = dropped = 0
-    worked: list[tuple[str, str, str, float]] = []
+    worked: list[tuple[str, str, str, float, str]] = []
     for path in sorted((runs / BATTERIES["baseline"]).glob("*/try*/semantic_memory.txt")):
         survivors: list[str] = []
         for marker, text in store_entries(path):
@@ -89,8 +88,7 @@ def show_a2c(runs: pathlib.Path) -> None:
                 kept += 1
             else:
                 dropped += 1
-                worked.append((str(path.parent.relative_to(runs)), marker, text, ratio))
-                worked[-1] = (*worked[-1], against)
+                worked.append((str(path.parent.relative_to(runs)), marker, text, ratio, against))
     total = kept + dropped
     print(f"Over {total} baseline entries: {kept} kept, {dropped} dropped "
           f"({dropped / total:.0%} near-duplicate).\n")
@@ -169,10 +167,8 @@ SHOWS = {"a1": show_a1, "a2c": show_a2c, "a3": show_a3_a4, "a4": show_a3_a4,
 
 
 def main() -> int:
-    here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     parser.add_argument("--arm", choices=sorted(set(SHOWS)), help="show only one arm")
     args = parser.parse_args()
     order = [args.arm] if args.arm else ["a1", "a2c", "a3", "a5", "a6"]

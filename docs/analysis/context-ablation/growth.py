@@ -11,7 +11,7 @@ Fitting that through the origin over an arm's legs recovers (base, slope) withou
 per-call token counts, which the harness does not record. `base` is the flat cost
 an arm pays every call; `slope` is the compounding term each seam claims to cut.
 
-Usage:  python3 analysis/context-ablation/growth.py [--csv PATH]
+Usage:  python3 docs/analysis/context-ablation/growth.py [--csv PATH]
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ import statistics
 
 from collections import defaultdict
 
-ARMS = ["baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"]
+from collect import ARMS, table
+
 # Legs shorter than this cannot separate base from slope; a 1-call leg puts zero
 # weight on the quadratic term and just inflates the base estimate.
 MIN_CALLS = 3
@@ -64,14 +65,6 @@ def boot_ci(points, index, iters=2000, seed=0):
         return (float("nan"), float("nan"))
     draws.sort()
     return (draws[int(0.025 * len(draws))], draws[int(0.975 * len(draws))])
-
-
-def table(headers, rows):
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
 
 
 def main() -> int:

@@ -9,7 +9,7 @@ Two symptoms motivated arms in this batch and are only visible in runtime.log:
 Neither reaches attempts.jsonl, so they are counted here and normalised by the
 number of steps each arm actually ran.
 
-Usage:  python3 analysis/context-ablation/logscan.py [--bench-runs DIR]
+Usage:  python3 docs/analysis/context-ablation/logscan.py [--bench-runs DIR]
 """
 
 from __future__ import annotations
@@ -20,9 +20,8 @@ import csv
 import pathlib
 import re
 
-from collect import BATTERIES
+from collect import ARMS, BATTERIES, add_bench_runs_arg, table
 
-ARMS = ["baseline", "a1", "a2c", "a3", "a4", "a5", "a6-2", "a6-4"]
 PATTERNS = {
     "learner_unparseable": re.compile(r"\[learner\] unparseable reply"),
     "episodic_unparseable": re.compile(r"\[episodic\] unparseable reply"),
@@ -44,8 +43,7 @@ def steps_by_arm(csv_path: pathlib.Path) -> dict[str, float]:
 def main() -> int:
     here = pathlib.Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bench-runs", type=pathlib.Path,
-                        default=here.parent.parent / "bench_runs")
+    add_bench_runs_arg(parser)
     parser.add_argument("--attempts", type=pathlib.Path, default=here / "attempts.csv")
     args = parser.parse_args()
 
@@ -65,11 +63,7 @@ def main() -> int:
         n = steps.get(arm, 0)
         rows.append([arm, int(n)] + [counts[arm][name] for name in PATTERNS] +
                     [f"{100 * bad / n:.2f}" if n else "-"])
-    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
-    print("  ".join(str(h).ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)))
+    table(headers, rows)
     print("\nsteps is every step the arm ran, including attempts excluded from the")
     print("success tables, because a crash counts wherever it happened.")
     return 0
