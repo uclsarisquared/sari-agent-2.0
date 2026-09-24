@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.8.6 (2026-09-24)
+
+### Bug Fixes
+
+- **analysis**: Repair script paths, bash 3.2 runner and tie-aware Spearman
+  ([`a6b61e3`](https://github.com/uclsarisquared/sari-agent-2.0/commit/a6b61e38f154f79588477c5d06e98f6f33707e9b))
+
+- **configs**: Make comprehensive ablation runner work on macOS bash
+  ([`e60df22`](https://github.com/uclsarisquared/sari-agent-2.0/commit/e60df2274276d6f4ae12735619f6818bee4425dd))
+
+### Continuous Integration
+
+- Serialize release runs and align semantic-release floor
+  ([`362a878`](https://github.com/uclsarisquared/sari-agent-2.0/commit/362a87883b90b11060427fdac3ccadd9d6a05245))
+
+### Documentation
+
+- Describe VL bbox pointing as primary and moondream as deprecated
+  ([`25adc14`](https://github.com/uclsarisquared/sari-agent-2.0/commit/25adc14635f69f2741e448ef7725dbe0c259c6c6))
+
+
 ## v1.8.5 (2026-09-24)
 
 ### Bug Fixes
