@@ -33,8 +33,9 @@ The default `LLM_PROVIDER=vllm` uses `OPENAI_API_URL` (scheme, host, and port; f
 For Vertex, set `LLM_PROVIDER=vertex`, `GOOGLE_CLOUD_PROJECT`, optional
 `GOOGLE_CLOUD_LOCATION` (default `global`), and `OPENAI_MODEL=google/gemini-3.1-flash-lite`.
 Vertex authentication uses Application Default Credentials.
-`MDREAM_API_KEY` enables the primary grab-pointing service; the runtime falls back to Qwen if it is
-unavailable.
+Grab pointing uses the VL model on that same endpoint: it returns a bounding box and the agent aims
+at its center (see `AGENTS.md` before switching models; bbox order is model-specific).
+`MDREAM_API_KEY` and the moondream path (`agent/vision/md_tools.py`) are deprecated and unused.
 
 The checked-in [`runconfig.toml`](runconfig.toml) already points at the complete map in
 `agent/mapping/output_runs/run_0724_164652`. This is specifically for Sandbox²'s `Store 2.json`.
